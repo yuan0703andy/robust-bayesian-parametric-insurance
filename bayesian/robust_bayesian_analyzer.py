@@ -221,6 +221,73 @@ class RobustBayesianAnalyzer:
         else:
             self.skill_evaluator = None
         
+    def _calculate_skill_scores_refactored(self, pred_samples: np.ndarray, validation_data: np.ndarray) -> Tuple[float, float, float]:
+        """
+        重構版本：簡潔的技能分數計算
+        
+        Returns:
+        --------
+        Tuple[float, float, float]
+            (crps_score, tss_score, edi_score)
+        """
+        print(f"    📊 重構版技能分數計算...")
+        
+        try:
+            # 步驟1：數據準備和驗證
+            validation_data = np.asarray(validation_data, dtype=float)
+            pred_samples = np.asarray(pred_samples, dtype=float)
+            
+            # 確保預測樣本是 2D
+            if pred_samples.ndim == 1:
+                pred_samples = pred_samples.reshape(1, -1)
+            elif pred_samples.ndim == 0:
+                pred_samples = np.array([[float(pred_samples)] * len(validation_data)])
+                
+            print(f"      數據形狀: pred_samples={pred_samples.shape}, validation={validation_data.shape}")
+            
+            # 步驟2：計算預測均值
+            if pred_samples.shape[1] >= len(validation_data):
+                pred_mean = np.mean(pred_samples, axis=0)[:len(validation_data)]
+            else:
+                # 使用驗證數據均值作為回退預測
+                fallback = np.mean(validation_data)
+                pred_mean = np.full(len(validation_data), fallback)
+            
+            pred_mean = np.asarray(pred_mean, dtype=float)
+            print(f"      pred_mean 形狀: {pred_mean.shape}")
+            
+            # 步驟3：計算CRPS（簡化版本）
+            if HAS_SKILL_SCORES:
+                print(f"      使用完整 CRPS 計算...")
+                crps_values = []
+                for obs, pred in zip(validation_data, pred_mean):
+                    crps_val = calculate_crps([float(obs)], forecasts_mean=float(pred), forecasts_std=0.1)
+                    crps_values.append(float(crps_val[0]) if hasattr(crps_val, '__len__') else float(crps_val))
+                crps_score = np.mean(crps_values)
+            else:
+                print(f"      使用簡化 MSE 計算...")
+                crps_score = float(np.mean((pred_mean - validation_data) ** 2))
+            
+            # 步驟4：計算其他指標
+            if len(pred_mean) > 1:
+                correlation = np.corrcoef(pred_mean, validation_data)[0, 1]
+                tss_score = -float(correlation) if not np.isnan(correlation) else -0.1
+            else:
+                tss_score = -0.1
+                
+            edi_score = 0.1  # 占位符
+            
+            print(f"      ✅ CRPS: {crps_score:.6f}, TSS: {tss_score:.3f}, EDI: {edi_score:.3f}")
+            return float(crps_score), float(tss_score), float(edi_score)
+            
+        except Exception as e:
+            print(f"      ❌ 技能分數計算失敗: {e}")
+            print(f"         pred_samples 類型: {type(pred_samples)}")
+            print(f"         validation_data 類型: {type(validation_data)}")
+            import traceback
+            traceback.print_exc()
+            return 1.0, -0.1, 0.1
+
     def integrated_bayesian_optimization(self,
                                          observations: np.ndarray,
                                          validation_data: np.ndarray,
@@ -424,125 +491,10 @@ class RobustBayesianAnalyzer:
                         if not isinstance(pred_samples, np.ndarray):
                             pred_samples = np.array([validation_data])
                         
-                        # Simple skill score calculation with robust error handling
-                        try:
-                            if HAS_SKILL_SCORES:
-                                # 確保 pred_samples 有正確的維度
-                                if pred_samples.ndim == 1:
-                                    pred_samples = pred_samples.reshape(1, -1)
-                                
-                                # 安全地計算預測平均值
-                                if pred_samples.shape[0] > 0 and pred_samples.shape[1] >= len(validation_data):
-                                    pred_mean = np.mean(pred_samples, axis=0)[:len(validation_data)]
-                                else:
-                                    # 回退到簡單預測 - 確保返回數值
-                                    fallback_mean = float(np.mean(validation_data))
-                                    pred_mean = np.full(len(validation_data), fallback_mean)
-                                
-                                # 確保維度匹配
-                                if len(pred_mean) != len(validation_data):
-                                    # 安全計算平均值，確保返回數值
-                                    if len(pred_mean) > 0:
-                                        safe_mean = float(np.mean(pred_mean))
-                                    else:
-                                        safe_mean = float(np.mean(validation_data))
-                                    pred_mean = np.full(len(validation_data), safe_mean)
-                                
-                                # 安全地計算 CRPS
-                                crps_scores = []
-                                for i, obs in enumerate(validation_data):
-                                    try:
-                                        if i < len(pred_mean):
-                                            # 確保所有參數都是數值
-                                            obs_val = float(obs)
-                                            mean_val = float(pred_mean[i])
-                                            std_val = 0.1
-                                            crps = calculate_crps([obs_val], forecasts_mean=mean_val, forecasts_std=std_val)
-                                        else:
-                                            obs_val = float(obs)  
-                                            mean_val = float(np.mean(validation_data))
-                                            std_val = 0.1
-                                            crps = calculate_crps([obs_val], forecasts_mean=mean_val, forecasts_std=std_val)
-                                        crps_scores.append(float(crps[0]) if hasattr(crps, '__len__') else float(crps))
-                                    except Exception as e:
-                                        print(f"    🔍 CRPS計算詳細錯誤 (i={i}, obs={obs}): {e}")
-                                        crps_scores.append(1.0)  # 預設值
-                                
-                                crps_score = np.mean(crps_scores) if crps_scores else 1.0
-                                tss_score = -0.1  # Placeholder
-                                edi_score = 0.1   # Placeholder
-                            else:
-                                # Fallback scoring with dimension checks
-                                if pred_samples.ndim == 1:
-                                    pred_samples = pred_samples.reshape(1, -1)
-                                
-                                if pred_samples.shape[0] > 0 and pred_samples.shape[1] >= len(validation_data):
-                                    pred_mean = np.mean(pred_samples, axis=0)[:len(validation_data)]
-                                else:
-                                    # 確保返回數值而不是方法引用
-                                    fallback_mean = float(np.mean(validation_data))
-                                    pred_mean = np.full(len(validation_data), fallback_mean)
-                                
-                                # 確保所有變數都是數值陣列，不是方法對象
-                                try:
-                                    # 檢查並修復 pred_mean
-                                    if callable(pred_mean) or any(callable(x) for x in np.atleast_1d(pred_mean)):
-                                        print(f"    🔍 pred_mean 包含方法對象，修復中...")
-                                        pred_mean = np.array([float(x() if callable(x) else x) for x in np.atleast_1d(pred_mean)])
-                                    else:
-                                        pred_mean = np.array([float(x) for x in np.atleast_1d(pred_mean)])
-                                    
-                                    # 檢查並修復 validation_data  
-                                    if callable(validation_data) or any(callable(x) for x in np.atleast_1d(validation_data)):
-                                        print(f"    🔍 validation_data 包含方法對象，修復中...")
-                                        validation_data_safe = np.array([float(x() if callable(x) else x) for x in np.atleast_1d(validation_data)])
-                                    else:
-                                        validation_data_safe = np.array([float(x) for x in np.atleast_1d(validation_data)])
-                                    
-                                    # 現在安全地進行計算
-                                    diff = pred_mean - validation_data_safe
-                                    crps_score = float(np.mean(diff ** 2))
-                                    
-                                    if len(pred_mean) > 1:
-                                        corr_matrix = np.corrcoef(pred_mean, validation_data_safe)
-                                        tss_score = -float(corr_matrix[0, 1])
-                                    else:
-                                        tss_score = -0.1
-                                    edi_score = 0.1
-                                    
-                                except Exception as e2:
-                                    print(f"    🔍 Fallback scoring 詳細錯誤: {e2}")
-                                    print(f"      pred_mean 類型: {type(pred_mean)}, 內容: {pred_mean}")
-                                    print(f"      validation_data 類型: {type(validation_data)}, 內容: {validation_data}")
-                                    # 最終回退
-                                    crps_score = 1.0
-                                    tss_score = -0.1
-                                    edi_score = 0.1
-                                
-                        except Exception as e:
-                            print(f"    ⚠️ 技能分數計算失敗: {e}")
-                            print(f"    🔍 HAS_SKILL_SCORES 分支錯誤詳情:")
-                            print(f"      錯誤類型: {type(e)}")
-                            print(f"      錯誤位置: {e}")
-                            
-                            # 檢查變數狀態
-                            try:
-                                print(f"      pred_samples 類型: {type(pred_samples)}, 形狀: {getattr(pred_samples, 'shape', '無形狀')}")
-                                print(f"      validation_data 類型: {type(validation_data)}, 長度: {len(validation_data) if hasattr(validation_data, '__len__') else '無長度'}")
-                                if 'pred_mean' in locals():
-                                    print(f"      pred_mean 類型: {type(pred_mean)}")
-                                    print(f"      pred_mean 內容: {pred_mean}")
-                                    print(f"      pred_mean 可調用: {callable(pred_mean)}")
-                                    if hasattr(pred_mean, '__len__'):
-                                        for i, val in enumerate(pred_mean):
-                                            print(f"        pred_mean[{i}]: {val}, 類型: {type(val)}, 可調用: {callable(val)}")
-                            except Exception as e2:
-                                print(f"      變數檢查失敗: {e2}")
-                            
-                            # 完全回退的分數
-                            crps_score = 1.0
-                            tss_score = -0.1
-                            edi_score = 0.1
+                        # 重構版本：簡潔的技能分數計算
+                        crps_score, tss_score, edi_score = self._calculate_skill_scores_refactored(
+                            pred_samples, validation_data
+                        )
                         
                         # Create result
                         result = ModelComparisonResult(
