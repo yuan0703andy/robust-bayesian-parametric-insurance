@@ -9,7 +9,12 @@ all statistical metrics mentioned in main_analysis.py and robust_bayesian_crps_a
 
 import numpy as np
 from typing import Dict, Any
-from bayesian.reports.bayesian_report_generator import BayesianReportGenerator, ReportConfig
+# NOTE: Reports module has been removed in the refactoring
+# Report functionality is now integrated into RobustBayesianAnalyzer
+# from bayesian.reports.bayesian_report_generator import BayesianReportGenerator, ReportConfig
+
+# Updated import to use the refactored analyzer
+from bayesian import RobustBayesianAnalyzer
 
 
 def create_enhanced_analysis_metadata(wind_uncertainty_cv: float = 0.15,

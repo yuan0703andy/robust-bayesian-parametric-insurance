@@ -40,9 +40,10 @@ Core Architecture:
 Usage Examples:
 ==============
 
-🚀 Primary Interface (Recommended for Most Users):
+🚀 Primary Interface (Recommended - 正確的兩階段整合流程):
 ```python
 from bayesian import RobustBayesianAnalyzer
+from skill_scores.basis_risk_functions import BasisRiskType
 
 # Initialize analyzer
 analyzer = RobustBayesianAnalyzer(
@@ -51,28 +52,63 @@ analyzer = RobustBayesianAnalyzer(
     n_mixture_components=3
 )
 
-# Run comprehensive analysis
-results = analyzer.comprehensive_bayesian_analysis(
-    tc_hazard=tc_hazard,
-    exposure_main=exposure_main,
-    impact_func_set=impact_func_set,
-    observed_losses=observed_losses,
-    parametric_products=products
+# 🎯 NEW: Integrated two-phase optimization (方法一 → 方法二連貫流程)
+# This automatically executes:
+# 1. Method 1: Build candidate models → Fit all models → Skill evaluation → Select champion
+# 2. Method 2: Use champion model's posterior → Define basis risk loss → Minimize expected loss
+results = analyzer.integrated_bayesian_optimization(
+    observations=train_losses,           # Method 1: training data for model fitting
+    validation_data=validation_losses,   # Method 1: validation for model selection
+    hazard_indices=hazard_indices,       # Method 2: hazard indices for optimization
+    actual_losses=actual_losses_matrix,  # Method 2: loss scenarios for basis risk calculation
+    product_bounds={'trigger_threshold': (30, 60), 'payout_amount': (1e7, 1e9)},
+    basis_risk_type=BasisRiskType.WEIGHTED_ASYMMETRIC,
+    w_under=2.0, w_over=0.5
 )
 
-# Get analysis summary
-summary = analyzer.get_analysis_summary()
-report = analyzer.generate_detailed_report()
+# Access results
+champion_model = results['phase_1_model_comparison']['champion_model']
+optimal_product = results['phase_2_decision_optimization']['optimal_product']
+theoretical_compliance = results['integration_validation']['theoretical_compliance']
+
+print(f"Champion Model: {champion_model['name']} (CRPS: {champion_model['crps_score']:.3e})")
+print(f"Optimal Product: Threshold={optimal_product['trigger_threshold']:.1f}, "
+      f"Payout=${optimal_product['payout_amount']:.1e}")
+print(f"Theory Compliance: {theoretical_compliance}")
 ```
 
-🔧 Advanced/Component Usage (For Researchers/Developers):
+🔧 Legacy Methods (已移除 - Removed for API Simplification):
+```
+❌ 舊方法已移除 (Old methods removed):
+   - fit_and_compare_models()      # 獨立的方法一實現
+   - optimize_product_parameters() # 獨立的方法二實現
+   
+💡 移除原因:
+   1. 簡化API，避免用戶混淆
+   2. 強制使用正確的理論框架  
+   3. 確保方法一→方法二的連貫流程
+   4. 減少維護負擔
+   
+✅ 新的統一介面:
+   只使用 integrated_bayesian_optimization() 即可獲得完整功能
+```
+
+🔧 Advanced Component Usage (For Researchers/Developers):
 ```python
+# Direct access to underlying components if needed
 from bayesian import (
-    RobustBayesianFramework,
-    HierarchicalBayesianModel, HierarchicalModelConfig,
-    ProbabilisticLossDistributionGenerator,
-    DensityRatioClass
+    RobustBayesianFramework,           # Density ratio framework
+    HierarchicalBayesianModel,         # 4-level hierarchical + MPE
+    ProbabilisticLossDistributionGenerator,  # Uncertainty quantification
 )
+
+# Use components separately for research
+framework = RobustBayesianFramework(density_ratio_constraint=2.0)
+hierarchical = HierarchicalBayesianModel(config)
+uncertainty_gen = ProbabilisticLossDistributionGenerator()
+```
+
+Integration with External Modules:
 
 # 1. Robust analysis with multiple models
 framework = RobustBayesianFramework(density_ratio_constraint=2.0)
@@ -146,28 +182,9 @@ from .robust_bayesian_analyzer import (
     RobustBayesianAnalyzer
 )
 
-# 5. New Model Comparison Framework (方法一)
-from .bayesian_model_comparison import (
-    BayesianModelComparison,
-    ModelComparisonResult
-)
-
-# 6. Bayesian Decision Theory Framework (方法二)  
-from .bayesian_decision_theory import (
-    BayesianDecisionTheory,
-    BasisRiskLossFunction,
-    BasisRiskType,
-    ProductParameters,
-    DecisionTheoryResult
-)
-
-# 5. Comprehensive Reporting System
-from .reports import (
-    BayesianReportGenerator,
-    ReportConfig,
-    ReportFormat,
-    create_quick_report
-)
+# NOTE: Model comparison and decision theory functionality has been migrated
+# to robust_bayesian_analyzer.py for better integration and reduced complexity.
+# Basis risk functions moved to skill_scores/basis_risk_functions.py for reusability.
 
 # =============================================================================
 # Public API (Clean & Simple)
@@ -175,20 +192,7 @@ from .reports import (
 
 __all__ = [
     # === Main Interface (Recommended) ===
-    'RobustBayesianAnalyzer',                           # Primary analyzer
-    
-    # === New Frameworks (方法一 + 方法二) ===
-    'BayesianModelComparison',                          # Model comparison framework
-    'BayesianDecisionTheory',                           # Decision theory optimization
-    'BasisRiskLossFunction', 'BasisRiskType',          # Loss function components
-    'ProductParameters', 'DecisionTheoryResult',       # Decision theory results
-    'ModelComparisonResult',                            # Model comparison results
-    
-    # === Comprehensive Reporting System ===
-    'BayesianReportGenerator',                          # Complete report generator
-    'ReportConfig',                                     # Report configuration
-    'ReportFormat',                                     # Report format options
-    'create_quick_report',                              # Quick report utility
+    'RobustBayesianAnalyzer',                           # Primary analyzer (includes model comparison + decision theory)
     
     # === Core Components ===
     # Robust Analysis
