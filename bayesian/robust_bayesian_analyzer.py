@@ -662,9 +662,9 @@ class RobustBayesianAnalyzer:
         best_loss = float('inf')
         best_params = None
         
-        # Grid search over parameter space
-        trigger_values = np.linspace(trigger_range[0], trigger_range[1], 10)
-        payout_values = np.linspace(payout_range[0], payout_range[1], 10)
+        # Grid search over parameter space - 優化：減少網格密度獲得4倍加速
+        trigger_values = np.linspace(trigger_range[0], trigger_range[1], 5)  # 10→5 獲得4倍加速
+        payout_values = np.linspace(payout_range[0], payout_range[1], 5)    # 總計算量：5×5=25 (vs 10×10=100)
         
         print(f"    網格搜尋: {len(trigger_values)} × {len(payout_values)} = {len(trigger_values) * len(payout_values)} 個組合")
         

@@ -54,7 +54,7 @@ def get_ondemand_config():
         
         # 分析參數 (高效能)
         'n_monte_carlo_samples': 2000,  # 更多 Monte Carlo 樣本
-        'n_loss_scenarios': 1000,       # 更多損失情境
+        'n_loss_scenarios': 200,        # 優化後的損失情境數量 (5倍加速)
         'n_mixture_components': 5,       # 更複雜的混合模型
         
         # 優化參數
@@ -128,7 +128,7 @@ pymc_config = {
 
 # 高效能分析參數
 n_monte_carlo_samples = 2000   # 高質量 Monte Carlo
-n_loss_scenarios = 1000        # 豐富的損失情境
+n_loss_scenarios = 200         # 優化的損失情境 (5倍加速)
 n_mixture_components = 5       # 複雜混合模型
 
 # MCMC 高效能參數
