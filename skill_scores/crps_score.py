@@ -114,8 +114,16 @@ def crps_gaussian(observations, mu, sigma):
     # 標準化
     z = (observations - mu) / sigma
     
-    # 高斯 CRPS 解析解
-    crps = sigma * (z * (2 * norm.cdf(z) - 1) + 2 * norm.pdf(z) - 1 / np.sqrt(np.pi))
+    # 高斯 CRPS 解析解 - 修復 method 問題
+    # 確保 norm.cdf 和 norm.pdf 返回數值而不是 method 對象
+    cdf_values = np.array([norm.cdf(zi) if np.isscalar(zi) else norm.cdf(zi) for zi in np.atleast_1d(z)])
+    pdf_values = np.array([norm.pdf(zi) if np.isscalar(zi) else norm.pdf(zi) for zi in np.atleast_1d(z)])
+    
+    if np.isscalar(z):
+        cdf_values = cdf_values[0]
+        pdf_values = pdf_values[0]
+    
+    crps = sigma * (z * (2 * cdf_values - 1) + 2 * pdf_values - 1 / np.sqrt(np.pi))
     
     return crps
 
