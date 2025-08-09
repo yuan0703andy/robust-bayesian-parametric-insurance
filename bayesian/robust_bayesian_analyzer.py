@@ -270,13 +270,20 @@ class RobustBayesianAnalyzer:
             
             pred_mean = np.asarray(pred_mean, dtype=float)
             
-            # 步驟4：計算CRPS
+            # 步驟4：計算CRPS（修復尺度問題）
             if HAS_SKILL_SCORES:
+                # 計算適當的標準差（使用數據的變異性）
+                data_std = max(np.std(validation_data), np.std(pred_mean))
+                forecast_std = max(data_std * 0.1, np.abs(np.mean(validation_data)) * 0.05)  # 數據變異的10%或均值的5%
+                
                 crps_values = []
                 for obs, pred in zip(validation_data, pred_mean):
-                    crps_val = calculate_crps([float(obs)], forecasts_mean=float(pred), forecasts_std=0.1)
+                    crps_val = calculate_crps([float(obs)], forecasts_mean=float(pred), forecasts_std=forecast_std)
                     crps_values.append(float(crps_val[0]) if hasattr(crps_val, '__len__') else float(crps_val))
                 crps_score = np.mean(crps_values)
+                
+                print(f"    📊 數據尺度: 觀測範圍 {np.min(validation_data):.2e} - {np.max(validation_data):.2e}")
+                print(f"    📊 預測標準差: {forecast_std:.2e}, CRPS: {crps_score:.6e}")
             else:
                 crps_score = float(np.mean((pred_mean - validation_data) ** 2))
             
