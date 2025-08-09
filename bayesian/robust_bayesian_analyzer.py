@@ -435,12 +435,18 @@ class RobustBayesianAnalyzer:
                                 if pred_samples.shape[0] > 0 and pred_samples.shape[1] >= len(validation_data):
                                     pred_mean = np.mean(pred_samples, axis=0)[:len(validation_data)]
                                 else:
-                                    # 回退到簡單預測
-                                    pred_mean = np.full(len(validation_data), np.mean(validation_data))
+                                    # 回退到簡單預測 - 確保返回數值
+                                    fallback_mean = float(np.mean(validation_data))
+                                    pred_mean = np.full(len(validation_data), fallback_mean)
                                 
                                 # 確保維度匹配
                                 if len(pred_mean) != len(validation_data):
-                                    pred_mean = np.full(len(validation_data), np.mean(pred_mean) if len(pred_mean) > 0 else np.mean(validation_data))
+                                    # 安全計算平均值，確保返回數值
+                                    if len(pred_mean) > 0:
+                                        safe_mean = float(np.mean(pred_mean))
+                                    else:
+                                        safe_mean = float(np.mean(validation_data))
+                                    pred_mean = np.full(len(validation_data), safe_mean)
                                 
                                 # 安全地計算 CRPS
                                 crps_scores = []
@@ -465,7 +471,9 @@ class RobustBayesianAnalyzer:
                                 if pred_samples.shape[0] > 0 and pred_samples.shape[1] >= len(validation_data):
                                     pred_mean = np.mean(pred_samples, axis=0)[:len(validation_data)]
                                 else:
-                                    pred_mean = np.full(len(validation_data), np.mean(validation_data))
+                                    # 確保返回數值而不是方法引用
+                                    fallback_mean = float(np.mean(validation_data))
+                                    pred_mean = np.full(len(validation_data), fallback_mean)
                                 
                                 crps_score = np.mean((pred_mean - validation_data) ** 2)
                                 tss_score = -np.corrcoef(pred_mean, validation_data)[0, 1] if len(pred_mean) > 1 else -0.1
