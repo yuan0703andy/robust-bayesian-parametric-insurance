@@ -521,6 +521,24 @@ class RobustBayesianAnalyzer:
                                 
                         except Exception as e:
                             print(f"    ⚠️ 技能分數計算失敗: {e}")
+                            print(f"    🔍 HAS_SKILL_SCORES 分支錯誤詳情:")
+                            print(f"      錯誤類型: {type(e)}")
+                            print(f"      錯誤位置: {e}")
+                            
+                            # 檢查變數狀態
+                            try:
+                                print(f"      pred_samples 類型: {type(pred_samples)}, 形狀: {getattr(pred_samples, 'shape', '無形狀')}")
+                                print(f"      validation_data 類型: {type(validation_data)}, 長度: {len(validation_data) if hasattr(validation_data, '__len__') else '無長度'}")
+                                if 'pred_mean' in locals():
+                                    print(f"      pred_mean 類型: {type(pred_mean)}")
+                                    print(f"      pred_mean 內容: {pred_mean}")
+                                    print(f"      pred_mean 可調用: {callable(pred_mean)}")
+                                    if hasattr(pred_mean, '__len__'):
+                                        for i, val in enumerate(pred_mean):
+                                            print(f"        pred_mean[{i}]: {val}, 類型: {type(val)}, 可調用: {callable(val)}")
+                            except Exception as e2:
+                                print(f"      變數檢查失敗: {e2}")
+                            
                             # 完全回退的分數
                             crps_score = 1.0
                             tss_score = -0.1
