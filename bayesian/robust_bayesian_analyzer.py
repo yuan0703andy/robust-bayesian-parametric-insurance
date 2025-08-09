@@ -453,11 +453,19 @@ class RobustBayesianAnalyzer:
                                 for i, obs in enumerate(validation_data):
                                     try:
                                         if i < len(pred_mean):
-                                            crps = calculate_crps([obs], forecasts_mean=pred_mean[i], forecasts_std=0.1)
+                                            # 確保所有參數都是數值
+                                            obs_val = float(obs)
+                                            mean_val = float(pred_mean[i])
+                                            std_val = 0.1
+                                            crps = calculate_crps([obs_val], forecasts_mean=mean_val, forecasts_std=std_val)
                                         else:
-                                            crps = calculate_crps([obs], forecasts_mean=np.mean(validation_data), forecasts_std=0.1)
-                                        crps_scores.append(crps)
-                                    except:
+                                            obs_val = float(obs)  
+                                            mean_val = float(np.mean(validation_data))
+                                            std_val = 0.1
+                                            crps = calculate_crps([obs_val], forecasts_mean=mean_val, forecasts_std=std_val)
+                                        crps_scores.append(float(crps[0]) if hasattr(crps, '__len__') else float(crps))
+                                    except Exception as e:
+                                        print(f"    🔍 CRPS計算詳細錯誤 (i={i}, obs={obs}): {e}")
                                         crps_scores.append(1.0)  # 預設值
                                 
                                 crps_score = np.mean(crps_scores) if crps_scores else 1.0
