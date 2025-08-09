@@ -483,9 +483,41 @@ class RobustBayesianAnalyzer:
                                     fallback_mean = float(np.mean(validation_data))
                                     pred_mean = np.full(len(validation_data), fallback_mean)
                                 
-                                crps_score = np.mean((pred_mean - validation_data) ** 2)
-                                tss_score = -np.corrcoef(pred_mean, validation_data)[0, 1] if len(pred_mean) > 1 else -0.1
-                                edi_score = 0.1
+                                # 確保所有變數都是數值陣列，不是方法對象
+                                try:
+                                    # 檢查並修復 pred_mean
+                                    if callable(pred_mean) or any(callable(x) for x in np.atleast_1d(pred_mean)):
+                                        print(f"    🔍 pred_mean 包含方法對象，修復中...")
+                                        pred_mean = np.array([float(x() if callable(x) else x) for x in np.atleast_1d(pred_mean)])
+                                    else:
+                                        pred_mean = np.array([float(x) for x in np.atleast_1d(pred_mean)])
+                                    
+                                    # 檢查並修復 validation_data  
+                                    if callable(validation_data) or any(callable(x) for x in np.atleast_1d(validation_data)):
+                                        print(f"    🔍 validation_data 包含方法對象，修復中...")
+                                        validation_data_safe = np.array([float(x() if callable(x) else x) for x in np.atleast_1d(validation_data)])
+                                    else:
+                                        validation_data_safe = np.array([float(x) for x in np.atleast_1d(validation_data)])
+                                    
+                                    # 現在安全地進行計算
+                                    diff = pred_mean - validation_data_safe
+                                    crps_score = float(np.mean(diff ** 2))
+                                    
+                                    if len(pred_mean) > 1:
+                                        corr_matrix = np.corrcoef(pred_mean, validation_data_safe)
+                                        tss_score = -float(corr_matrix[0, 1])
+                                    else:
+                                        tss_score = -0.1
+                                    edi_score = 0.1
+                                    
+                                except Exception as e2:
+                                    print(f"    🔍 Fallback scoring 詳細錯誤: {e2}")
+                                    print(f"      pred_mean 類型: {type(pred_mean)}, 內容: {pred_mean}")
+                                    print(f"      validation_data 類型: {type(validation_data)}, 內容: {validation_data}")
+                                    # 最終回退
+                                    crps_score = 1.0
+                                    tss_score = -0.1
+                                    edi_score = 0.1
                                 
                         except Exception as e:
                             print(f"    ⚠️ 技能分數計算失敗: {e}")
