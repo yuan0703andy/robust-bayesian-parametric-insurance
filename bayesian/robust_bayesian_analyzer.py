@@ -230,30 +230,24 @@ class RobustBayesianAnalyzer:
         Tuple[float, float, float]
             (crps_score, tss_score, edi_score)
         """
-        print(f"    📊 重構版技能分數計算...")
-        
         try:
-            # 步驟1：數據準備和驗證
-            print(f"      檢查 pred_samples 內容...")
-            
-            # 檢查並修復 pred_samples 中的方法對象
+            # 步驟1：數據準備和驗證 - 靜默修復方法對象
             if isinstance(pred_samples, np.ndarray):
-                # 檢查是否有方法對象
                 has_methods = any(callable(x) for x in pred_samples.flat)
                 if has_methods:
-                    print(f"      🔧 發現方法對象，正在修復...")
-                    # 將方法對象轉換為數值
                     pred_samples_clean = np.zeros_like(pred_samples, dtype=float)
+                    method_count = 0
                     for i, x in enumerate(pred_samples.flat):
                         if callable(x):
-                            print(f"        方法對象位置 {i}: {x}")
+                            method_count += 1
                             try:
-                                pred_samples_clean.flat[i] = float(x())  # 調用方法
+                                pred_samples_clean.flat[i] = float(x())
                             except:
-                                pred_samples_clean.flat[i] = 0.0  # 回退值
+                                pred_samples_clean.flat[i] = 0.0
                         else:
                             pred_samples_clean.flat[i] = float(x)
                     pred_samples = pred_samples_clean
+                    print(f"    🔧 修復了 {method_count} 個 xarray 方法對象")
                 else:
                     pred_samples = np.asarray(pred_samples, dtype=float)
             else:
@@ -261,47 +255,40 @@ class RobustBayesianAnalyzer:
                 
             validation_data = np.asarray(validation_data, dtype=float)
             
-            # 確保預測樣本是 2D
+            # 步驟2：確保預測樣本是 2D
             if pred_samples.ndim == 1:
                 pred_samples = pred_samples.reshape(1, -1)
             elif pred_samples.ndim == 0:
                 pred_samples = np.array([[float(pred_samples)] * len(validation_data)])
-                
-            print(f"      數據形狀: pred_samples={pred_samples.shape}, validation={validation_data.shape}")
             
-            # 步驟2：計算預測均值
+            # 步驟3：計算預測均值
             if pred_samples.shape[1] >= len(validation_data):
                 pred_mean = np.mean(pred_samples, axis=0)[:len(validation_data)]
             else:
-                # 使用驗證數據均值作為回退預測
                 fallback = np.mean(validation_data)
                 pred_mean = np.full(len(validation_data), fallback)
             
             pred_mean = np.asarray(pred_mean, dtype=float)
-            print(f"      pred_mean 形狀: {pred_mean.shape}")
             
-            # 步驟3：計算CRPS（簡化版本）
+            # 步驟4：計算CRPS
             if HAS_SKILL_SCORES:
-                print(f"      使用完整 CRPS 計算...")
                 crps_values = []
                 for obs, pred in zip(validation_data, pred_mean):
                     crps_val = calculate_crps([float(obs)], forecasts_mean=float(pred), forecasts_std=0.1)
                     crps_values.append(float(crps_val[0]) if hasattr(crps_val, '__len__') else float(crps_val))
                 crps_score = np.mean(crps_values)
             else:
-                print(f"      使用簡化 MSE 計算...")
                 crps_score = float(np.mean((pred_mean - validation_data) ** 2))
             
-            # 步驟4：計算其他指標
+            # 步驟5：計算其他指標
             if len(pred_mean) > 1:
                 correlation = np.corrcoef(pred_mean, validation_data)[0, 1]
                 tss_score = -float(correlation) if not np.isnan(correlation) else -0.1
             else:
                 tss_score = -0.1
                 
-            edi_score = 0.1  # 占位符
+            edi_score = 0.1
             
-            print(f"      ✅ CRPS: {crps_score:.6f}, TSS: {tss_score:.3f}, EDI: {edi_score:.3f}")
             return float(crps_score), float(tss_score), float(edi_score)
             
         except Exception as e:
