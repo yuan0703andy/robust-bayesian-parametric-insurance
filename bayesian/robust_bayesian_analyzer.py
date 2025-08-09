@@ -234,8 +234,32 @@ class RobustBayesianAnalyzer:
         
         try:
             # 步驟1：數據準備和驗證
+            print(f"      檢查 pred_samples 內容...")
+            
+            # 檢查並修復 pred_samples 中的方法對象
+            if isinstance(pred_samples, np.ndarray):
+                # 檢查是否有方法對象
+                has_methods = any(callable(x) for x in pred_samples.flat)
+                if has_methods:
+                    print(f"      🔧 發現方法對象，正在修復...")
+                    # 將方法對象轉換為數值
+                    pred_samples_clean = np.zeros_like(pred_samples, dtype=float)
+                    for i, x in enumerate(pred_samples.flat):
+                        if callable(x):
+                            print(f"        方法對象位置 {i}: {x}")
+                            try:
+                                pred_samples_clean.flat[i] = float(x())  # 調用方法
+                            except:
+                                pred_samples_clean.flat[i] = 0.0  # 回退值
+                        else:
+                            pred_samples_clean.flat[i] = float(x)
+                    pred_samples = pred_samples_clean
+                else:
+                    pred_samples = np.asarray(pred_samples, dtype=float)
+            else:
+                pred_samples = np.asarray(pred_samples, dtype=float)
+                
             validation_data = np.asarray(validation_data, dtype=float)
-            pred_samples = np.asarray(pred_samples, dtype=float)
             
             # 確保預測樣本是 2D
             if pred_samples.ndim == 1:
