@@ -1,0 +1,61 @@
+================================================================================
+Cat-in-a-Circle Spatial Analysis Report
+Based on Steinmann et al. (2023) Standard Method
+================================================================================
+
+📊 Analysis Overview
+----------------------------------------
+Number of Hospitals: 50
+Number of TC Events: 328
+Hazard Grid Points: 2263
+Analysis Radii: [15, 30, 50, 75, 100] km
+Statistical Methods: ['max', 'mean', '95th']
+
+🎯 Detailed Statistics by Radius
+----------------------------------------
+
+Radius 15 km:
+  • Affected Events: 160 / 328
+  • Coverage Rate: 48.8%
+  • Mean Wind Speed: 26.4 m/s
+  • Max Wind Speed: 55.8 m/s
+  • Median Wind Speed: 24.8 m/s
+  • 95th Percentile: 42.7 m/s
+
+Radius 30 km:
+  • Affected Events: 170 / 328
+  • Coverage Rate: 51.8%
+  • Mean Wind Speed: 26.8 m/s
+  • Max Wind Speed: 55.8 m/s
+  • Median Wind Speed: 25.2 m/s
+  • 95th Percentile: 43.0 m/s
+
+Radius 50 km:
+  • Affected Events: 175 / 328
+  • Coverage Rate: 53.4%
+  • Mean Wind Speed: 27.1 m/s
+  • Max Wind Speed: 55.8 m/s
+  • Median Wind Speed: 25.9 m/s
+  • 95th Percentile: 43.0 m/s
+
+Radius 75 km:
+  • Affected Events: 187 / 328
+  • Coverage Rate: 57.0%
+  • Mean Wind Speed: 27.2 m/s
+  • Max Wind Speed: 55.8 m/s
+  • Median Wind Speed: 26.1 m/s
+  • 95th Percentile: 43.9 m/s
+
+Radius 100 km:
+  • Affected Events: 192 / 328
+  • Coverage Rate: 58.5%
+  • Mean Wind Speed: 27.6 m/s
+  • Max Wind Speed: 55.8 m/s
+  • Median Wind Speed: 26.7 m/s
+  • 95th Percentile: 43.8 m/s
+
+========================================
+🔍 Key Findings
+----------------------------------------
+• Recommended Optimal Analysis Radius: 100 km
+  (Based on balance of coverage and wind speed variability)

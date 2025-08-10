@@ -19,11 +19,13 @@ This module provides comprehensive spatial analysis capabilities for parametric 
 
 import numpy as np
 import pandas as pd
-from typing import List, Dict, Tuple, Optional, Union
+from typing import List, Dict, Tuple, Optional, Union, Any
 from dataclasses import dataclass
 import time
 from scipy.spatial import cKDTree
 import warnings
+import pickle
+from pathlib import Path
 
 # 地球半徑 (公里)
 EARTH_RADIUS_KM = 6371.0
@@ -583,3 +585,250 @@ def create_ultra_fast_config() -> SpatialAnalysisConfig:
         min_points_threshold=5,  # 提高閾值減少計算
         performance_mode="ultra_fast"
     )
+
+
+def extract_hospital_cat_in_circle_complete(
+    tc_hazard: Any,
+    hospital_coords: List[Tuple[float, float]],
+    radii_km: List[float] = None,
+    statistics: List[str] = None
+) -> Dict[str, Any]:
+    """
+    完整的醫院 Cat-in-a-Circle 分析
+    實現 Steinmann et al. (2023) 論文的完整流程
+    
+    流程：
+    1. 確定曝險點：醫院座標
+    2. 繪製圓圈：多種半徑的圓形區域
+    3. 疊加災害足跡：從 tc_hazard 提取風速場
+    4. 提取圈內強度值：使用 cKDTree 搜尋
+    5. 計算指數值：取最大值或其他統計量
+    
+    Parameters:
+    -----------
+    tc_hazard : CLIMADA TropCyclone object
+        颱風災害對象，包含 intensity 和 centroids
+    hospital_coords : List[Tuple[float, float]]
+        醫院座標列表 [(lat1, lon1), (lat2, lon2), ...]
+    radii_km : List[float], optional
+        分析半徑列表（公里），默認 [15, 30, 50, 75, 100]
+    statistics : List[str], optional
+        統計方法列表，默認 ['max']
+        
+    Returns:
+    --------
+    Dict[str, Any]
+        包含完整分析結果的字典：
+        - 'indices': 各半徑和統計方法的指標值
+        - 'hospital_series': 每家醫院的時間序列
+        - 'metadata': 分析元數據
+    """
+    if radii_km is None:
+        radii_km = [15, 30, 50, 75, 100]  # Steinmann 標準半徑
+    if statistics is None:
+        statistics = ['max']  # Steinmann 使用最大值
+    
+    print("\n🏥 開始完整的醫院 Cat-in-a-Circle 分析")
+    print(f"   醫院數量: {len(hospital_coords)}")
+    print(f"   分析半徑: {radii_km} km")
+    print(f"   統計方法: {statistics}")
+    
+    # 步驟 1-2: 準備災害場座標和空間索引
+    print("\n📍 步驟 1-2: 準備曝險點和災害場網格...")
+    hazard_coords = np.array([
+        [tc_hazard.centroids.lat[i], tc_hazard.centroids.lon[i]] 
+        for i in range(tc_hazard.centroids.size)
+    ])
+    print(f"   災害網格點: {len(hazard_coords)} 個")
+    
+    # 建立空間索引（用於快速搜尋）
+    hazard_tree = cKDTree(np.radians(hazard_coords))
+    
+    # 獲取事件數量
+    n_events = tc_hazard.intensity.shape[0]
+    n_hospitals = len(hospital_coords)
+    print(f"   颱風事件數: {n_events}")
+    
+    # 初始化結果儲存
+    results = {
+        'indices': {},  # 各半徑的指標
+        'hospital_series': {},  # 每家醫院的完整時間序列
+        'metadata': {
+            'n_hospitals': n_hospitals,
+            'n_events': n_events,
+            'radii_km': radii_km,
+            'statistics': statistics,
+            'hazard_grid_size': len(hazard_coords)
+        }
+    }
+    
+    # 對每個半徑進行分析
+    for radius_km in radii_km:
+        print(f"\n🌀 分析半徑 {radius_km} km...")
+        radius_rad = radius_km / 6371.0  # 轉換為弧度
+        
+        # 儲存該半徑下所有醫院的風速
+        radius_hospital_winds = {}
+        
+        # 步驟 3-5: 對每家醫院進行分析
+        for hospital_idx, hospital_coord in enumerate(hospital_coords):
+            wind_speeds = np.zeros(n_events)
+            
+            # 步驟 4: 找出圓圈內的災害網格點
+            nearby_indices = hazard_tree.query_ball_point(
+                np.radians(hospital_coord), radius_rad
+            )
+            
+            if len(nearby_indices) > 0:
+                # 步驟 3: 對每個颱風事件提取災害足跡
+                for event_idx in range(n_events):
+                    # 獲取該事件的風速場（災害足跡）
+                    wind_field = tc_hazard.intensity[event_idx, :].toarray().flatten()
+                    
+                    # 提取圓圈內的風速值
+                    nearby_winds = wind_field[nearby_indices]
+                    nearby_winds = nearby_winds[nearby_winds > 0]  # 排除零值
+                    
+                    # 步驟 5: 計算指數值（默認取最大值）
+                    if len(nearby_winds) > 0:
+                        wind_speeds[event_idx] = np.max(nearby_winds)
+                    else:
+                        wind_speeds[event_idx] = 0.0
+            
+            radius_hospital_winds[hospital_idx] = wind_speeds
+            
+            if hospital_idx % 10 == 0:
+                print(f"     處理醫院 {hospital_idx+1}/{n_hospitals}", end='\r')
+        
+        # 計算各種統計指標
+        for stat in statistics:
+            index_name = f"cat_in_circle_{radius_km}km_{stat}"
+            
+            if stat == 'max':
+                # 對每個事件，取所有醫院的最大值
+                event_indices = np.zeros(n_events)
+                for event_idx in range(n_events):
+                    hospital_winds_at_event = [
+                        radius_hospital_winds[h_idx][event_idx] 
+                        for h_idx in range(n_hospitals)
+                    ]
+                    event_indices[event_idx] = np.max(hospital_winds_at_event) if hospital_winds_at_event else 0
+                results['indices'][index_name] = event_indices
+                
+            elif stat == 'mean':
+                # 對每個事件，計算所有醫院的平均值
+                event_indices = np.zeros(n_events)
+                for event_idx in range(n_events):
+                    hospital_winds_at_event = [
+                        radius_hospital_winds[h_idx][event_idx] 
+                        for h_idx in range(n_hospitals)
+                        if radius_hospital_winds[h_idx][event_idx] > 0
+                    ]
+                    event_indices[event_idx] = np.mean(hospital_winds_at_event) if hospital_winds_at_event else 0
+                results['indices'][index_name] = event_indices
+                
+            elif stat == '95th':
+                # 對每個事件，計算所有醫院的95百分位數
+                event_indices = np.zeros(n_events)
+                for event_idx in range(n_events):
+                    hospital_winds_at_event = [
+                        radius_hospital_winds[h_idx][event_idx] 
+                        for h_idx in range(n_hospitals)
+                        if radius_hospital_winds[h_idx][event_idx] > 0
+                    ]
+                    if hospital_winds_at_event:
+                        event_indices[event_idx] = np.percentile(hospital_winds_at_event, 95)
+                    else:
+                        event_indices[event_idx] = 0
+                results['indices'][index_name] = event_indices
+        
+        # 儲存醫院級別的詳細數據
+        results['hospital_series'][f"radius_{radius_km}km"] = radius_hospital_winds
+        
+        # 顯示該半徑的統計摘要
+        all_winds = []
+        for h_idx in range(n_hospitals):
+            winds = radius_hospital_winds[h_idx]
+            all_winds.extend(winds[winds > 0])
+        
+        if all_winds:
+            print(f"\n   ✅ 半徑 {radius_km}km 完成")
+            print(f"      平均風速: {np.mean(all_winds):.1f} m/s")
+            print(f"      最大風速: {np.max(all_winds):.1f} m/s")
+            print(f"      影響事件: {np.sum([np.any(radius_hospital_winds[h] > 0) for h in range(n_hospitals)])}")
+    
+    print("\n✅ 完整 Cat-in-a-Circle 分析完成！")
+    print(f"   生成指標: {len(results['indices'])} 個")
+    
+    return results
+
+
+def load_climada_data(filepath: str) -> Dict[str, Any]:
+    """
+    載入 CLIMADA 數據
+    
+    Parameters:
+    -----------
+    filepath : str
+        pickle 檔案路徑
+        
+    Returns:
+    --------
+    Dict[str, Any]
+        包含 tc_hazard, exposure, impact 等的字典
+    """
+    print(f"\n📂 載入 CLIMADA 數據: {filepath}")
+    
+    try:
+        with open(filepath, 'rb') as f:
+            data = pickle.load(f)
+        
+        print("   ✅ 數據載入成功")
+        
+        # 顯示數據內容
+        if 'tc_hazard' in data:
+            print(f"   🌀 災害事件: {data['tc_hazard'].size} 個")
+        if 'exposure' in data:
+            print(f"   🏢 曝險點: {len(data['exposure'].gdf)} 個")
+        if 'impact' in data:
+            print(f"   💥 年均損失: ${data['impact'].aai_agg/1e9:.2f}B")
+        
+        return data
+        
+    except Exception as e:
+        print(f"   ❌ 載入失敗: {e}")
+        return None
+
+
+def extract_hospitals_from_exposure(exposure: Any) -> List[Tuple[float, float]]:
+    """
+    從曝險數據中提取醫院座標
+    
+    Parameters:
+    -----------
+    exposure : CLIMADA Exposures object
+        曝險數據
+        
+    Returns:
+    --------
+    List[Tuple[float, float]]
+        醫院座標列表
+    """
+    # 這裡可以根據實際數據結構調整
+    # 假設醫院可以通過某些屬性識別
+    hospital_coords = []
+    
+    # 如果沒有明確的醫院標記，可以使用高價值曝險點作為代理
+    if hasattr(exposure, 'gdf'):
+        gdf = exposure.gdf
+        # 選擇價值最高的前N個點作為關鍵設施
+        n_hospitals = min(50, len(gdf))  # 最多選50個
+        top_exposures = gdf.nlargest(n_hospitals, 'value')
+        
+        for idx, row in top_exposures.iterrows():
+            lat = row.geometry.y if hasattr(row.geometry, 'y') else row['latitude']
+            lon = row.geometry.x if hasattr(row.geometry, 'x') else row['longitude']
+            hospital_coords.append((lat, lon))
+    
+    print(f"   📍 識別 {len(hospital_coords)} 個關鍵設施點")
+    return hospital_coords
