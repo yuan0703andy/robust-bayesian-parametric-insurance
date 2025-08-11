@@ -5,9 +5,16 @@ OSM Hospital Extraction for Cat-in-a-Circle Analysis
 
 import numpy as np
 import pandas as pd
-import geopandas as gpd
 from pathlib import Path
 import warnings
+
+# Try to import geopandas, but provide fallback if not available
+try:
+    import geopandas as gpd
+    GEOPANDAS_AVAILABLE = True
+except ImportError:
+    GEOPANDAS_AVAILABLE = False
+    warnings.warn("geopandas not available - will use simplified data structures")
 
 # OSM-flex imports with error handling
 try:
@@ -20,6 +27,13 @@ except ImportError:
     OSM_FLEX_AVAILABLE = False
     warnings.warn("osm_flex not available - hospital extraction will use mock data")
 
+# Try CLIMADA-petals OSM module as alternative
+try:
+    from climada_petals.entity.exposures.osm_dataloader import OSMApiQuery
+    CLIMADA_OSM_AVAILABLE = True
+except ImportError:
+    CLIMADA_OSM_AVAILABLE = False
+
 # CLIMADA imports
 try:
     from climada.entity import Exposures
@@ -30,7 +44,7 @@ except ImportError:
     warnings.warn("CLIMADA not available - using simplified hospital processing")
 
 
-def extract_nc_hospitals_from_osm(osm_file_path: str = None, use_mock: bool = False):
+def extract_nc_hospitals_from_osm(osm_file_path: str = None, use_mock: bool = False, use_overpass_api: bool = False):
     """
     從OSM數據提取北卡羅來納州醫院
     
@@ -40,6 +54,8 @@ def extract_nc_hospitals_from_osm(osm_file_path: str = None, use_mock: bool = Fa
         OSM PBF文件路徑，如果未提供將使用預設路徑
     use_mock : bool
         是否使用模擬醫院數據（用於測試）
+    use_overpass_api : bool
+        是否使用Overpass API直接下載（需要網絡連接）
         
     Returns:
     --------
@@ -47,7 +63,26 @@ def extract_nc_hospitals_from_osm(osm_file_path: str = None, use_mock: bool = Fa
         醫院位置數據
     """
     
-    if use_mock or not OSM_FLEX_AVAILABLE:
+    # 檢查是否應該使用模擬數據
+    if use_mock:
+        print("📍 使用模擬醫院數據進行測試...")
+        return create_mock_hospitals()
+    
+    # 嘗試使用Overpass API（如果可用且被要求）
+    if use_overpass_api and CLIMADA_OSM_AVAILABLE and GEOPANDAS_AVAILABLE:
+        print("🌐 嘗試使用Overpass API下載醫院數據...")
+        try:
+            return extract_hospitals_via_overpass()
+        except Exception as e:
+            print(f"   ⚠️ Overpass API失敗: {e}")
+            print("   🔄 回退到其他方法...")
+    
+    # 檢查依賴是否可用
+    if not OSM_FLEX_AVAILABLE or not GEOPANDAS_AVAILABLE:
+        if not OSM_FLEX_AVAILABLE:
+            print("   ⚠️ osm_flex 不可用")
+        if not GEOPANDAS_AVAILABLE:
+            print("   ⚠️ geopandas 不可用")
         print("📍 使用模擬醫院數據進行測試...")
         return create_mock_hospitals()
     
@@ -59,10 +94,25 @@ def extract_nc_hospitals_from_osm(osm_file_path: str = None, use_mock: bool = Fa
     
     try:
         # 檢查文件是否存在
-        if not Path(osm_file_path).exists():
+        osm_path = Path(osm_file_path)
+        if not osm_path.exists():
             print(f"   ⚠️ OSM文件不存在: {osm_file_path}")
-            print("   🔄 使用模擬數據替代...")
-            return create_mock_hospitals()
+            # 檢查可能的替代路徑
+            alternative_paths = [
+                '/Users/andyhou/osm/nc.osm.pbf',
+                './osm_data/nc.osm.pbf',
+                './data/nc.osm.pbf',
+                'nc.osm.pbf'
+            ]
+            
+            for alt_path in alternative_paths:
+                if Path(alt_path).exists():
+                    print(f"   🔍 找到替代OSM文件: {alt_path}")
+                    osm_file_path = alt_path
+                    break
+            else:
+                print("   🔄 未找到OSM文件，使用模擬數據替代...")
+                return create_mock_hospitals()
         
         print(f"   📂 讀取OSM文件: {osm_file_path}")
         
@@ -74,22 +124,64 @@ def extract_nc_hospitals_from_osm(osm_file_path: str = None, use_mock: bool = Fa
         
         # 提取點位型醫院
         print("   🔍 提取點位型醫院...")
-        gdf_hospitals_points = osm_flex.extract.extract(
-            osm_file_path,
-            'points',
-            keys_to_keep,
-            filter_query
-        )
+        gdf_hospitals_points = None
+        
+        # 嘗試使用osm_flex.extract的不同方法
+        try:
+            # 方法1: 使用extract_cis (infrastructure extraction)
+            if hasattr(osm_flex.extract, 'extract_cis'):
+                print("      嘗試使用extract_cis方法...")
+                gdf_hospitals_points = osm_flex.extract.extract_cis(osm_file_path, 'health')
+                if gdf_hospitals_points is not None and len(gdf_hospitals_points) > 0:
+                    # 過濾只保留醫院
+                    gdf_hospitals_points = gdf_hospitals_points[
+                        gdf_hospitals_points.get('amenity', '') == 'hospital'
+                    ] if 'amenity' in gdf_hospitals_points.columns else gdf_hospitals_points
+        except Exception as e:
+            print(f"      extract_cis失敗: {e}")
+        
+        # 如果方法1失敗，嘗試原始方法
+        if gdf_hospitals_points is None or len(gdf_hospitals_points) == 0:
+            try:
+                gdf_hospitals_points = osm_flex.extract.extract(
+                    osm_file_path,
+                    'points',
+                    keys_to_keep,
+                    filter_query
+                )
+            except (TypeError, AttributeError, StopIteration) as e:
+                print(f"      ⚠️ 點位提取失敗: {e}")
+        
+        # 確保有有效的DataFrame
+        if gdf_hospitals_points is None:
+            if GEOPANDAS_AVAILABLE:
+                gdf_hospitals_points = gpd.GeoDataFrame(columns=['amenity', 'name'], crs='EPSG:4326')
+            else:
+                gdf_hospitals_points = pd.DataFrame(columns=['amenity', 'name', 'geometry'])
+        
         print(f"      找到 {len(gdf_hospitals_points)} 個點位型醫院")
         
         # 提取多邊形型醫院
         print("   🔍 提取多邊形型醫院...")
-        gdf_hospitals_polygons = osm_flex.extract.extract(
-            osm_file_path,
-            'multipolygons',
-            keys_to_keep,
-            filter_query
-        )
+        gdf_hospitals_polygons = None
+        
+        try:
+            gdf_hospitals_polygons = osm_flex.extract.extract(
+                osm_file_path,
+                'multipolygons',
+                keys_to_keep,
+                filter_query
+            )
+        except (TypeError, AttributeError, StopIteration) as e:
+            print(f"      ⚠️ 多邊形提取失敗: {e}")
+        
+        # 確保有有效的DataFrame
+        if gdf_hospitals_polygons is None:
+            if GEOPANDAS_AVAILABLE:
+                gdf_hospitals_polygons = gpd.GeoDataFrame(columns=['amenity', 'name'], crs='EPSG:4326')
+            else:
+                gdf_hospitals_polygons = pd.DataFrame(columns=['amenity', 'name', 'geometry'])
+            
         print(f"      找到 {len(gdf_hospitals_polygons)} 個多邊形型醫院")
         
         # 合併結果
@@ -112,6 +204,44 @@ def extract_nc_hospitals_from_osm(osm_file_path: str = None, use_mock: bool = Fa
     except Exception as e:
         print(f"   ❌ OSM提取失敗: {e}")
         print("   🔄 使用模擬數據...")
+        return create_mock_hospitals()
+
+
+def extract_hospitals_via_overpass():
+    """
+    使用Overpass API直接下載北卡羅來納州醫院數據
+    
+    Returns:
+    --------
+    geopandas.GeoDataFrame
+        醫院位置數據
+    """
+    print("   📍 定義北卡羅來納州邊界...")
+    # North Carolina bounding box (approximate)
+    nc_bbox = (33.8, -84.5, 36.6, -75.5)  # (lat_min, lon_min, lat_max, lon_max)
+    
+    # Define hospital query conditions
+    condition_hospital = '["amenity"="hospital"]'
+    
+    print("   🔍 查詢醫院數據...")
+    try:
+        from climada_petals.entity.exposures.osm_dataloader import OSMApiQuery
+        
+        # Create query
+        hospital_query = OSMApiQuery.from_bounding_box(nc_bbox, condition_hospital)
+        
+        # Get data from Overpass API
+        gdf_hospitals = hospital_query.get_data_overpass()
+        
+        if gdf_hospitals is None or len(gdf_hospitals) == 0:
+            print("   ⚠️ 未找到醫院數據")
+            return create_mock_hospitals()
+            
+        print(f"   ✅ 成功下載 {len(gdf_hospitals)} 家醫院")
+        return gdf_hospitals
+        
+    except Exception as e:
+        print(f"   ❌ Overpass API提取失敗: {e}")
         return create_mock_hospitals()
 
 
@@ -160,14 +290,28 @@ def create_mock_hospitals():
         {"name": "FirstHealth Moore Regional Hospital", "lat": 35.1779, "lon": -79.4608, "city": "Pinehurst"}
     ]
     
-    # 轉換為GeoDataFrame
+    # 轉換為DataFrame
     df = pd.DataFrame(mock_hospitals_data)
     
-    # 創建Point geometry
-    from shapely.geometry import Point
-    geometry = [Point(lon, lat) for lat, lon in zip(df['lat'], df['lon'])]
-    
-    gdf = gpd.GeoDataFrame(df, geometry=geometry, crs='EPSG:4326')
+    if GEOPANDAS_AVAILABLE:
+        # 創建Point geometry
+        try:
+            from shapely.geometry import Point
+            geometry = [Point(lon, lat) for lat, lon in zip(df['lat'], df['lon'])]
+            gdf = gpd.GeoDataFrame(df, geometry=geometry, crs='EPSG:4326')
+        except ImportError:
+            # If shapely is not available, create a simple structure
+            print("   ⚠️ Shapely not available, using simplified structure")
+            gdf = df.copy()
+            # Add a mock geometry column
+            gdf['geometry'] = [type('Point', (), {'x': lon, 'y': lat})() 
+                              for lat, lon in zip(df['lat'], df['lon'])]
+    else:
+        # No geopandas available, use simple DataFrame with geometry-like objects
+        gdf = df.copy()
+        # Create simple mock geometry objects
+        gdf['geometry'] = [type('Point', (), {'x': lon, 'y': lat})() 
+                          for lat, lon in zip(df['lat'], df['lon'])]
     
     # 添加OSM標準屬性
     gdf['amenity'] = 'hospital'

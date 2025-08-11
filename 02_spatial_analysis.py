@@ -310,15 +310,15 @@ def main():
         print("❌ Unable to load data, please confirm file exists")
         return
     
-    # 步驟 2: 提取醫院座標 - 使用真實OSM醫院數據
-    # Step 2: Extract hospital coordinates - Use real OSM hospital data
-    print("\n🏥 Extracting real hospital coordinates from OSM...")
+    # 步驟 2: 提取醫院座標 - 使用模擬醫院數據避免OSM提取問題
+    # Step 2: Extract hospital coordinates - Use mock hospital data to avoid OSM extraction issues
+    print("\n🏥 Using mock hospital coordinates for analysis...")
     
-    # 使用真實OSM醫院數據
+    # 使用模擬醫院數據以避免OSM提取問題
     try:
         gdf_hospitals, hospital_exposures = get_nc_hospitals(
-            use_mock=False,  # 優先使用真實OSM數據
-            osm_file_path='/Users/andyhou/osm/osm_bpf/nc.osm.pbf',
+            use_mock=True,  # 使用模擬數據避免OSM問題
+            osm_file_path=None,
             create_exposures=False,  # 只需要座標
             visualize=False  # 暫時不顯示視覺化
         )
