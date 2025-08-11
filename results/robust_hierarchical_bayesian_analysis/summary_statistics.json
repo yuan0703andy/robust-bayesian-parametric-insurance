@@ -1,0 +1,9 @@
+{
+  "total_products": 70,
+  "total_events": 328,
+  "analysis_type": "Complete Robust Hierarchical Bayesian Analysis",
+  "monte_carlo_samples": 500,
+  "mcmc_samples": 2000,
+  "mcmc_chains": 4,
+  "density_ratio_constraint": 2.0
+}

@@ -32,6 +32,9 @@ from insurance_analysis_refactored.core.enhanced_spatial_analysis import (
     create_standard_steinmann_config
 )
 
+# 導入OSM醫院提取模組
+from exposure_modeling.hospital_osm_extraction import get_nc_hospitals
+
 # 設置matplotlib支援中文
 import matplotlib
 matplotlib.rcParams['font.sans-serif'] = ['DejaVu Sans']
@@ -307,25 +310,45 @@ def main():
         print("❌ Unable to load data, please confirm file exists")
         return
     
-    # 步驟 2: 提取醫院座標
-    # Step 2: Extract hospital coordinates
-    print("\n🏥 Extracting hospital coordinates...")
+    # 步驟 2: 提取醫院座標 - 使用真實OSM醫院數據
+    # Step 2: Extract hospital coordinates - Use real OSM hospital data
+    print("\n🏥 Extracting real hospital coordinates from OSM...")
     
-    # 方法1: 從曝險數據中提取高價值點作為醫院代理
-    # Method 1: Extract high-value points from exposure as hospital proxies
-    if 'exposure' in climada_data:
-        hospital_coords = extract_hospitals_from_exposure(climada_data['exposure'])
-    else:
-        # 方法2: 如果有預存的醫院座標
-        # Method 2: Use pre-stored hospital coordinates
-        print("   ⚠️ Using example hospital coordinates")
-        hospital_coords = [
-            (35.7796, -78.6382),  # Raleigh
-            (36.0726, -79.7920),  # Greensboro
-            (35.2271, -80.8431),  # Charlotte
-            (35.0527, -78.8784),  # Fayetteville
-            (35.9132, -79.0558),  # Chapel Hill
-        ]
+    # 使用真實OSM醫院數據
+    try:
+        gdf_hospitals, hospital_exposures = get_nc_hospitals(
+            use_mock=False,  # 優先使用真實OSM數據
+            osm_file_path='/Users/andyhou/osm/osm_bpf/nc.osm.pbf',
+            create_exposures=False,  # 只需要座標
+            visualize=False  # 暫時不顯示視覺化
+        )
+        
+        # 轉換為座標列表 (lat, lon)
+        hospital_coords = [(row.geometry.y, row.geometry.x) 
+                          for idx, row in gdf_hospitals.iterrows()]
+        
+        print(f"   ✅ 成功提取 {len(hospital_coords)} 家真實OSM醫院")
+        if len(gdf_hospitals) > 0 and 'name' in gdf_hospitals.columns:
+            print(f"   📋 示例醫院: {gdf_hospitals['name'].iloc[0] if pd.notna(gdf_hospitals['name'].iloc[0]) else '未命名醫院'}")
+            print(f"   🏥 數據來源: OpenStreetMap 真實醫院數據")
+        
+    except Exception as e:
+        print(f"   ⚠️ 醫院數據提取失敗: {e}")
+        print("   🔄 使用備用方法: 從曝險數據提取高價值點...")
+        
+        # 備用方法1: 從曝險數據中提取高價值點
+        if 'exposure' in climada_data:
+            hospital_coords = extract_hospitals_from_exposure(climada_data['exposure'])
+        else:
+            # 備用方法2: 使用預設座標
+            print("   ⚠️ Using fallback example coordinates")
+            hospital_coords = [
+                (35.7796, -78.6382),  # Raleigh
+                (36.0726, -79.7920),  # Greensboro
+                (35.2271, -80.8431),  # Charlotte
+                (35.0527, -78.8784),  # Fayetteville
+                (35.9132, -79.0558),  # Chapel Hill
+            ]
     
     # 步驟 3: 執行完整的 Cat-in-a-Circle 分析
     # Step 3: Execute complete Cat-in-a-Circle analysis
