@@ -160,7 +160,7 @@ def main():
     
     return compatible_products
 
-
+# %%
 if __name__ == "__main__":
     products = main()
 # %%
