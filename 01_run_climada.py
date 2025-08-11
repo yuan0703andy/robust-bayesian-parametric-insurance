@@ -9,13 +9,13 @@ Minimal CLIMADA Data Generation
 
 print("🚀 最小化CLIMADA數據生成")
 
-# %% 直接複製成功腳本的導入和設置
+# %% 
 import os
 import sys
 import numpy as np
 from datetime import datetime
 
-# 設置路徑 (複製自成功腳本)
+# 設置路徑
 current_dir = os.path.dirname(os.path.abspath(__file__))
 insurance_dir = os.path.join(current_dir, 'insurance_analysis_refactored')
 
@@ -25,7 +25,7 @@ for path in [insurance_dir, current_dir]:
 
 print(f"✅ 路徑設置: {current_dir}")
 
-# %% 直接導入 (複製自成功腳本)
+# %% 直接導入
 print("📦 導入模組...")
 from config.settings import NC_BOUNDS, YEAR_RANGE, RESOLUTION
 from data_processing.track_processing import get_regional_tracks
@@ -120,3 +120,4 @@ print("可通過以下方式使用：")
 print("  import pickle")
 print("  with open('climada_complete_data.pkl', 'rb') as f:")
 print("      data = pickle.load(f)")
+# %%

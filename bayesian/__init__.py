@@ -182,6 +182,12 @@ from .robust_bayesian_analyzer import (
     RobustBayesianAnalyzer
 )
 
+# 5. Weight Sensitivity Analysis
+from .weight_sensitivity_analyzer import (
+    WeightSensitivityAnalyzer,
+    extend_robust_analyzer_with_weight_sensitivity
+)
+
 # NOTE: Model comparison and decision theory functionality has been migrated
 # to robust_bayesian_analyzer.py for better integration and reduced complexity.
 # Basis risk functions moved to skill_scores/basis_risk_functions.py for reusability.
@@ -211,6 +217,10 @@ __all__ = [
     # Uncertainty Quantification
     'ProbabilisticLossDistributionGenerator',           # Probabilistic loss generator
     'integrate_robust_bayesian_with_parametric_insurance',  # Integration function
+    
+    # Weight Sensitivity Analysis
+    'WeightSensitivityAnalyzer',                        # Weight sensitivity analysis
+    'extend_robust_analyzer_with_weight_sensitivity',   # Integration with RobustBayesianAnalyzer
 ]
 
 __version__ = "2.0.0"  # Clean architecture version
@@ -228,7 +238,8 @@ def get_module_info():
             'robust_bayesian_analysis.py - Density ratio framework',
             'hierarchical_bayesian_model.py - 4-level hierarchical + MPE', 
             'robust_bayesian_uncertainty.py - Uncertainty quantification',
-            'robust_bayesian_analyzer.py - Main integration hub'
+            'robust_bayesian_analyzer.py - Main integration hub',
+            'weight_sensitivity_analyzer.py - Weight sensitivity analysis'
         ],
         'external_integrations': [
             'skill_scores/ - CRPS, EDI, TSS evaluation',
@@ -286,7 +297,7 @@ def get_quick_start_guide():
     
     === 🔧 組件分析 ===
     ```python
-    from bayesian import RobustBayesianFramework, HierarchicalBayesianModel
+    from bayesian import RobustBayesianFramework, HierarchicalBayesianModel, WeightSensitivityAnalyzer
     
     # Density ratio framework
     framework = RobustBayesianFramework(density_ratio_constraint=2.0)
@@ -295,6 +306,12 @@ def get_quick_start_guide():
     # Hierarchical model with MPE
     hierarchical = HierarchicalBayesianModel(config)
     hierarchical_result = hierarchical.fit(observed_losses)
+    
+    # Weight sensitivity analysis
+    weight_analyzer = WeightSensitivityAnalyzer()
+    sensitivity_results = weight_analyzer.analyze_weight_sensitivity(
+        products, actual_losses, wind_indices
+    )
     ```
     
     === ✨ 主要功能 ===

@@ -86,7 +86,13 @@ class SteinmannProductConfig:
     """Steinmann 產品生成配置"""
     use_saffir_simpson_thresholds: bool = True
     payout_increments: List[float] = field(default_factory=lambda: [0.25, 0.50, 0.75, 1.00])
-    max_payout_amount: float = 1e9  # 默認最大賠付 $1B
+    # 差異化的最大賠付金額（為不同產品類型設置不同賠付額）
+    max_payout_amounts: Dict[str, float] = field(default_factory=lambda: {
+        'single': 5e8,      # 單閾值產品: $500M
+        'double': 8e8,      # 雙閾值產品: $800M  
+        'triple': 1.2e9,    # 三閾值產品: $1.2B
+        'quadruple': 1.5e9  # 四閾值產品: $1.5B
+    })
     
     # 複雜度分配 (確保總和為70)
     single_threshold_count: int = 25
@@ -241,7 +247,7 @@ class SaffirSimpsonProductGenerator:
             'quadruple_threshold': len(quadruple_products),
             'saffir_simpson_thresholds': self.ss_thresholds,
             'payout_increments': self.config.payout_increments,
-            'max_payout': self.config.max_payout_amount
+            'max_payout_amounts': self.config.max_payout_amounts
         }
         
         print(f"✅ 產品生成完成!")
@@ -276,7 +282,7 @@ class SaffirSimpsonProductGenerator:
             product = PayoutStructure(
                 thresholds=[threshold],
                 payouts=[payout],
-                max_payout=self.config.max_payout_amount,
+                max_payout=self.config.max_payout_amounts['single'],
                 structure_type="single",
                 product_id=product_id
             )
@@ -314,7 +320,7 @@ class SaffirSimpsonProductGenerator:
             product = PayoutStructure(
                 thresholds=[t1, t2],
                 payouts=[p1, p2],
-                max_payout=self.config.max_payout_amount,
+                max_payout=self.config.max_payout_amounts['double'],
                 structure_type="double",
                 product_id=product_id
             )
@@ -354,7 +360,7 @@ class SaffirSimpsonProductGenerator:
             product = PayoutStructure(
                 thresholds=thresholds_list,
                 payouts=payouts_list,
-                max_payout=self.config.max_payout_amount,
+                max_payout=self.config.max_payout_amounts['triple'],
                 structure_type="triple",
                 product_id=product_id
             )
@@ -397,7 +403,7 @@ class SaffirSimpsonProductGenerator:
             product = PayoutStructure(
                 thresholds=thresholds_list,
                 payouts=payouts_list,
-                max_payout=self.config.max_payout_amount,
+                max_payout=self.config.max_payout_amounts['quadruple'],
                 structure_type="quadruple",
                 product_id=product_id
             )
@@ -532,7 +538,12 @@ def create_steinmann_2023_config() -> SteinmannProductConfig:
     return SteinmannProductConfig(
         use_saffir_simpson_thresholds=True,
         payout_increments=[0.25, 0.50, 0.75, 1.00],  # 25% 遞增
-        max_payout_amount=1e9,  # $1B
+        max_payout_amounts={  # 差異化賠付金額
+            'single': 5e8,      # 單閾值產品: $500M
+            'double': 8e8,      # 雙閾值產品: $800M  
+            'triple': 1.2e9,    # 三閾值產品: $1.2B
+            'quadruple': 1.5e9  # 四閾值產品: $1.5B
+        },
         single_threshold_count=25,   # 確保總和為70
         double_threshold_count=20,
         triple_threshold_count=15,

@@ -13,7 +13,7 @@
 4. 視覺化結果
 5. 輸出統計報告
 """
-
+# %%
 import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -37,7 +37,7 @@ import matplotlib
 matplotlib.rcParams['font.sans-serif'] = ['DejaVu Sans']
 matplotlib.rcParams['axes.unicode_minus'] = False
 
-
+# %%
 def visualize_cat_in_circle_results(results, output_dir="results/spatial_analysis"):
     """
     視覺化 Cat-in-a-Circle 分析結果
@@ -193,12 +193,12 @@ def visualize_cat_in_circle_results(results, output_dir="results/spatial_analysi
     
     # 儲存圖表
     output_path = Path(output_dir) / "cat_in_circle_analysis.png"
-    plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    # plt.savefig(output_path, dpi=300, bbox_inches='tight')
     print(f"\n📊 Chart saved to: {output_path}")
     
     plt.show()
 
-
+# %%
 def generate_analysis_report(results, output_dir="results/spatial_analysis"):
     """
     生成分析報告
@@ -287,7 +287,7 @@ def generate_analysis_report(results, output_dir="results/spatial_analysis"):
     # 同時打印到控制台
     print("\n" + '\n'.join(report_lines))
 
-
+# %%
 def main():
     """
     主程序：執行完整的 Cat-in-a-Circle 空間分析
@@ -376,6 +376,7 @@ def main():
     
     return results
 
-
+# %%
 if __name__ == "__main__":
     results = main()
+# %%
