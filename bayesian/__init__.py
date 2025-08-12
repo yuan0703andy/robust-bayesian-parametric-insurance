@@ -15,6 +15,7 @@ Core Modules:
 
 Supporting Modules:
 ==================
+- spatial_effects.py - 空間效應模組 (醫院脆弱度的空間相關性建模)
 - density_ratio_theory.py - 密度比理論框架 (Γ = {P : dP/dP₀ ≤ γ(x)})
 - climada_uncertainty_quantification.py - CLIMADA不確定性量化
 - mcmc_environment_config.py - MCMC環境配置
@@ -72,6 +73,8 @@ from .parametric_bayesian_hierarchy import (
     HierarchicalModelResult,
     LikelihoodFamily,
     PriorScenario,
+    VulnerabilityData,           # 新增：脆弱度數據結構
+    VulnerabilityFunctionType,   # 新增：脆弱度函數類型
     create_model_spec,
     quick_fit
 )
@@ -163,8 +166,32 @@ __all__ = [
     # === 支持組件 ===
     'ProbabilisticLossDistributionGenerator',
     'WeightSensitivityAnalyzer',
-    'configure_pymc_environment'
+    'configure_pymc_environment',
+    
+    # === 新增：空間效應組件 ===
+    'SpatialEffectsAnalyzer',            # 空間效應分析器
+    'SpatialConfig',                     # 空間分析配置
+    'SpatialEffectsResult',              # 空間分析結果
+    'CovarianceFunction',                # 協方差函數類型
+    'create_standard_spatial_config',    # 創建標準空間配置
+    'quick_spatial_analysis'             # 快速空間分析
 ]
+
+# 導入空間效應模組
+try:
+    from .spatial_effects import (
+        SpatialEffectsAnalyzer,
+        SpatialConfig,
+        SpatialEffectsResult,
+        CovarianceFunction,
+        create_standard_spatial_config,
+        quick_spatial_analysis
+    )
+    HAS_SPATIAL_EFFECTS = True
+except ImportError:
+    HAS_SPATIAL_EFFECTS = False
+    import warnings
+    warnings.warn("空間效應模組不可用")
 
 __version__ = "3.0.0"  # Modular architecture version
 __author__ = "Robust Bayesian Analysis Team"

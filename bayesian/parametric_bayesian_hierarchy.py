@@ -73,6 +73,14 @@ except ImportError:
     HAS_MPE = False
     warnings.warn("混合預測估計模組不可用")
 
+# 導入空間效應模組
+try:
+    from .spatial_effects import SpatialEffectsAnalyzer, SpatialConfig, CovarianceFunction
+    HAS_SPATIAL = True
+except ImportError:
+    HAS_SPATIAL = False
+    warnings.warn("空間效應模組不可用")
+
 # 新增：脆弱度建模數據結構
 @dataclass
 class VulnerabilityData:
@@ -82,6 +90,11 @@ class VulnerabilityData:
     observed_losses: np.ndarray         # L_ij - 觀測損失 (USD)
     event_ids: Optional[np.ndarray] = None      # 事件ID
     location_ids: Optional[np.ndarray] = None   # 地點ID
+    
+    # 新增：空間信息
+    hospital_coordinates: Optional[np.ndarray] = None    # 醫院座標 [(lat1, lon1), ...]
+    hospital_names: Optional[List[str]] = None           # 醫院名稱
+    region_assignments: Optional[np.ndarray] = None      # 區域分配 [0, 1, 2, ...]
     
     def __post_init__(self):
         """驗證數據一致性"""
@@ -93,11 +106,31 @@ class VulnerabilityData:
         
         if len(lengths) == 0:
             raise ValueError("至少需要提供災害強度、暴險值和觀測損失")
+        
+        # 驗證空間信息一致性
+        if self.hospital_coordinates is not None:
+            n_hospitals = len(self.hospital_coordinates)
+            if self.hospital_names is not None and len(self.hospital_names) != n_hospitals:
+                raise ValueError("醫院名稱數量與座標不符")
+            if self.region_assignments is not None and len(self.region_assignments) != n_hospitals:
+                raise ValueError("區域分配數量與醫院數量不符")
     
     @property 
     def n_observations(self) -> int:
         """觀測數量"""
         return len(self.hazard_intensities)
+    
+    @property
+    def n_hospitals(self) -> int:
+        """醫院數量"""
+        if self.hospital_coordinates is not None:
+            return len(self.hospital_coordinates)
+        return 0
+    
+    @property
+    def has_spatial_info(self) -> bool:
+        """是否包含空間信息"""
+        return self.hospital_coordinates is not None
 
 class VulnerabilityFunctionType(Enum):
     """脆弱度函數類型"""
@@ -131,6 +164,13 @@ class ModelSpec:
     prior_scenario: PriorScenario = PriorScenario.WEAK_INFORMATIVE
     vulnerability_type: VulnerabilityFunctionType = VulnerabilityFunctionType.EMANUEL
     model_name: Optional[str] = None
+    
+    # 新增：空間效應配置
+    include_spatial_effects: bool = False           # 是否包含空間隨機效應 δ_i
+    include_region_effects: bool = False            # 是否包含區域效應 α_r(i)
+    spatial_covariance_function: str = "exponential"  # 空間協方差函數
+    spatial_length_scale_prior: Tuple[float, float] = (10.0, 100.0)  # 長度尺度先驗
+    spatial_variance_prior: Tuple[float, float] = (0.5, 2.0)         # 空間變異數先驗
     
     def __post_init__(self):
         # 類型轉換支援
@@ -294,7 +334,16 @@ class ParametricHierarchicalModel:
             return self._fit_vulnerability_simplified(data)
         
         try:
-            return self._fit_vulnerability_with_pymc(data)
+            # 根據是否有空間信息選擇建模方法
+            if data.has_spatial_info and (self.model_spec.include_spatial_effects or self.model_spec.include_region_effects):
+                if not HAS_SPATIAL:
+                    print("⚠️ 空間效應模組不可用，回退到標準脆弱度建模")
+                    return self._fit_vulnerability_with_pymc(data)
+                else:
+                    print("🗺️ 使用空間效應階層貝氏模型")
+                    return self._fit_spatial_vulnerability_model(data)
+            else:
+                return self._fit_vulnerability_with_pymc(data)
         except Exception as e:
             print(f"⚠️ PyMC脆弱度擬合失敗: {e}")
             print("回退到簡化實現")
@@ -414,6 +463,253 @@ class ParametricHierarchicalModel:
             
             print("✅ PyMC脆弱度階層模型擬合完成")
             return result
+    
+    def _fit_spatial_vulnerability_model(self, vulnerability_data: VulnerabilityData) -> HierarchicalModelResult:
+        """
+        使用空間效應的階層貝氏脆弱度建模
+        實現您的理論框架：β_i = α_r(i) + δ_i + γ_i
+        """
+        print("  🗺️ 構建空間效應階層貝氏脆弱度模型...")
+        
+        # 提取數據
+        hazard = vulnerability_data.hazard_intensities
+        exposure = vulnerability_data.exposure_values
+        losses = vulnerability_data.observed_losses
+        coords = vulnerability_data.hospital_coordinates
+        region_assignments = vulnerability_data.region_assignments
+        n_obs = len(hazard)
+        n_hospitals = vulnerability_data.n_hospitals
+        
+        print(f"   觀測數量: {n_obs}, 醫院數量: {n_hospitals}")
+        print(f"   空間效應: {self.model_spec.include_spatial_effects}")
+        print(f"   區域效應: {self.model_spec.include_region_effects}")
+        
+        # 準備空間效應分析器
+        if self.model_spec.include_spatial_effects:
+            spatial_config = SpatialConfig(
+                covariance_function=CovarianceFunction(self.model_spec.spatial_covariance_function),
+                length_scale=50.0,  # 將在 PyMC 中估計
+                variance=1.0,       # 將在 PyMC 中估計
+                nugget=0.1,
+                region_effect=self.model_spec.include_region_effects,
+                n_regions=3 if region_assignments is None else len(np.unique(region_assignments))
+            )
+            
+            spatial_analyzer = SpatialEffectsAnalyzer(spatial_config)
+            # 預計算距離矩陣（用於 PyMC）
+            spatial_analyzer.hospital_coords = spatial_analyzer._process_coordinates(coords)
+            distance_matrix = spatial_analyzer._compute_distance_matrix(spatial_analyzer.hospital_coords)
+            print(f"   醫院間最大距離: {np.max(distance_matrix):.1f} km")
+        
+        with pm.Model() as spatial_vulnerability_model:
+            print("   🏗️ 構建空間階層模型...")
+            
+            # Level 4: 全域超參數
+            alpha_global = pm.Normal("alpha_global", mu=0, sigma=2)
+            
+            # 空間參數（如果啟用空間效應）
+            if self.model_spec.include_spatial_effects:
+                # 空間長度尺度
+                rho_spatial = pm.Gamma("rho_spatial", 
+                                     alpha=self.model_spec.spatial_length_scale_prior[0]/10,
+                                     beta=self.model_spec.spatial_length_scale_prior[1]/100)
+                # 空間變異數
+                sigma2_spatial = pm.Gamma("sigma2_spatial",
+                                        alpha=self.model_spec.spatial_variance_prior[0], 
+                                        beta=self.model_spec.spatial_variance_prior[1])
+                # Nugget 效應
+                nugget = pm.Uniform("nugget", lower=0.01, upper=0.5)
+            
+            # Level 3: 區域效應 α_r(i)（如果啟用）
+            if self.model_spec.include_region_effects:
+                n_regions = 3 if region_assignments is None else len(np.unique(region_assignments))
+                alpha_region = pm.Normal("alpha_region", mu=alpha_global, sigma=0.5, shape=n_regions)
+                print(f"   區域數量: {n_regions}")
+                
+                # 分配醫院到區域
+                if region_assignments is None:
+                    # 自動分配：基於經度（東部、中部、山區）
+                    lons = coords[:, 1]
+                    lon_33rd = np.percentile(lons, 33.33)
+                    lon_67th = np.percentile(lons, 66.67) 
+                    region_mapping = []
+                    for lon in lons:
+                        if lon >= lon_33rd:
+                            region_mapping.append(0)  # 東部海岸
+                        elif lon >= lon_67th:
+                            region_mapping.append(1)  # 中部
+                        else:
+                            region_mapping.append(2)  # 西部山區
+                    region_mapping = np.array(region_mapping)
+                else:
+                    region_mapping = region_assignments
+                
+                hospital_region_effects = alpha_region[region_mapping]
+            else:
+                hospital_region_effects = alpha_global
+            
+            # Level 2: 空間隨機效應 δ_i（核心創新！）
+            if self.model_spec.include_spatial_effects:
+                print("   🌐 構建空間協方差矩陣...")
+                
+                # 使用 PyMC 的 deterministic 來動態構建協方差矩陣
+                @pm.math.op.vectorize
+                def spatial_covariance_func(rho, sigma2, nugget_val):
+                    # 指數協方差函數
+                    cov_matrix = sigma2 * pm.math.exp(-distance_matrix / rho)
+                    # 添加 nugget 效應
+                    cov_matrix = pm.math.set_subtensor(
+                        cov_matrix[np.diag_indices(n_hospitals)],
+                        cov_matrix[np.diag_indices(n_hospitals)] + nugget_val
+                    )
+                    return cov_matrix
+                
+                # 空間協方差矩陣
+                Sigma_delta = spatial_covariance_func(rho_spatial, sigma2_spatial, nugget)
+                
+                # 空間隨機效應：δ ~ MVN(0, Σ_δ)
+                delta_spatial = pm.MvNormal("delta_spatial", mu=0, cov=Sigma_delta, shape=n_hospitals)
+                print("   ✅ 空間隨機效應已建立")
+            else:
+                delta_spatial = 0.0
+            
+            # Level 1: 個體醫院效應 γ_i
+            gamma_individual = pm.Normal("gamma_individual", mu=0, sigma=0.2, shape=n_hospitals)
+            
+            # 組合脆弱度參數：β_i = α_r(i) + δ_i + γ_i
+            beta_vulnerability = hospital_region_effects + delta_spatial + gamma_individual
+            print("   🧬 脆弱度參數組合完成: β_i = α_r(i) + δ_i + γ_i")
+            
+            # 脆弱度函數：將災害強度和暴險轉換為預期損失
+            if self.model_spec.vulnerability_type == VulnerabilityFunctionType.EMANUEL:
+                # Emanuel USA: L = E × β × max(0, H - H₀)^α
+                H_threshold = 25.7  # 74 mph threshold in m/s
+                vulnerability_power = pm.Gamma("vulnerability_power", alpha=2, beta=0.5)  # ~2.5 for Emanuel
+                
+                # 對每個觀測計算預期損失
+                expected_losses = pm.math.switch(
+                    hazard > H_threshold,
+                    exposure * pm.math.exp(beta_vulnerability[0]) * pm.math.power(hazard - H_threshold, vulnerability_power),
+                    0.0
+                )
+            else:
+                # 簡化線性關係
+                expected_losses = exposure * pm.math.exp(beta_vulnerability[0]) * hazard
+            
+            # 觀測模型：實際損失 ~ 預期損失 + 噪音
+            sigma_obs = pm.HalfNormal("sigma_obs", sigma=1e6)  # 觀測噪音
+            
+            if self.model_spec.likelihood_family == LikelihoodFamily.LOGNORMAL:
+                # 確保正值
+                expected_losses_positive = pm.math.maximum(expected_losses, 1.0)
+                y_obs = pm.LogNormal("y_obs", 
+                                   mu=pm.math.log(expected_losses_positive), 
+                                   sigma=sigma_obs/expected_losses_positive, 
+                                   observed=losses)
+            else:
+                # 正態分佈
+                y_obs = pm.Normal("y_obs", mu=expected_losses, sigma=sigma_obs, observed=losses)
+            
+            print("   ⚙️ 執行空間 MCMC 採樣...")
+            trace = pm.sample(
+                draws=self.mcmc_config.n_samples,
+                tune=self.mcmc_config.n_warmup,
+                chains=self.mcmc_config.n_chains,
+                cores=self.mcmc_config.cores,
+                random_seed=self.mcmc_config.random_seed,
+                target_accept=0.9,  # 較高的接受率以處理複雜幾何
+                return_inferencedata=True,
+                progressbar=self.mcmc_config.progressbar
+            )
+            
+            print("   📊 提取空間後驗樣本...")
+            posterior_samples = self._extract_spatial_posterior_samples(trace)
+            
+            print("   📈 計算空間診斷統計...")
+            diagnostics = self._compute_diagnostics(trace)
+            
+            # 生成後驗摘要
+            posterior_summary = self._generate_spatial_posterior_summary(posterior_samples, diagnostics)
+            
+            # 計算模型評估指標
+            log_likelihood, dic, waic = self._compute_model_evaluation(trace, losses)
+            
+            result = HierarchicalModelResult(
+                model_spec=self.model_spec,
+                posterior_samples=posterior_samples,
+                posterior_summary=posterior_summary,
+                diagnostics=diagnostics,
+                mpe_results=None,  # 空間模型暫不支持 MPE
+                log_likelihood=log_likelihood,
+                dic=dic,
+                waic=waic,
+                trace=trace
+            )
+            
+            self.last_result = result
+            self.fit_history.append(result)
+            
+            print("✅ 空間效應階層貝氏模型擬合完成！")
+            print(f"   空間長度尺度後驗均值: {np.mean(posterior_samples.get('rho_spatial', [50])):.1f} km")
+            print(f"   空間變異數後驗均值: {np.mean(posterior_samples.get('sigma2_spatial', [1])):.3f}")
+            
+            return result
+    
+    def _extract_spatial_posterior_samples(self, trace) -> Dict[str, np.ndarray]:
+        """提取空間模型的後驗樣本"""
+        samples = {}
+        
+        # 提取標準參數
+        for param_name in ['alpha_global', 'rho_spatial', 'sigma2_spatial', 'nugget']:
+            if param_name in trace.posterior:
+                samples[param_name] = trace.posterior[param_name].values.flatten()
+        
+        # 提取空間效應
+        if 'delta_spatial' in trace.posterior:
+            samples['delta_spatial'] = trace.posterior['delta_spatial'].values.reshape(-1, trace.posterior['delta_spatial'].shape[-1])
+        
+        # 提取區域效應
+        if 'alpha_region' in trace.posterior:
+            samples['alpha_region'] = trace.posterior['alpha_region'].values.reshape(-1, trace.posterior['alpha_region'].shape[-1])
+        
+        # 提取個體效應
+        if 'gamma_individual' in trace.posterior:
+            samples['gamma_individual'] = trace.posterior['gamma_individual'].values.reshape(-1, trace.posterior['gamma_individual'].shape[-1])
+        
+        return samples
+    
+    def _generate_spatial_posterior_summary(self, posterior_samples: Dict[str, np.ndarray], 
+                                          diagnostics: Any) -> pd.DataFrame:
+        """生成空間模型的後驗摘要"""
+        summary_data = []
+        
+        for param_name, samples in posterior_samples.items():
+            if samples.ndim == 1:
+                # 標量參數
+                summary_data.append({
+                    'parameter': param_name,
+                    'mean': np.mean(samples),
+                    'std': np.std(samples),
+                    'hdi_2.5%': np.percentile(samples, 2.5),
+                    'hdi_97.5%': np.percentile(samples, 97.5),
+                    'ess': getattr(diagnostics, f'{param_name}_ess', np.nan),
+                    'r_hat': getattr(diagnostics, f'{param_name}_rhat', np.nan)
+                })
+            else:
+                # 向量參數（如空間效應）
+                for i in range(samples.shape[1]):
+                    param_samples = samples[:, i]
+                    summary_data.append({
+                        'parameter': f'{param_name}[{i}]',
+                        'mean': np.mean(param_samples),
+                        'std': np.std(param_samples),
+                        'hdi_2.5%': np.percentile(param_samples, 2.5),
+                        'hdi_97.5%': np.percentile(param_samples, 97.5),
+                        'ess': np.nan,  # ESS 計算較複雜，暫時跳過
+                        'r_hat': np.nan
+                    })
+        
+        return pd.DataFrame(summary_data)
     
     def _fit_legacy_model(self, observations: np.ndarray) -> HierarchicalModelResult:
         """向後兼容：使用傳統觀測數據的擬合方法"""

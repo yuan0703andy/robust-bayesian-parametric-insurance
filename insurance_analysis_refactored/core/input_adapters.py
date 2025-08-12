@@ -763,6 +763,102 @@ def extract_pure_cat_in_circle(tc_hazard, exposure_coords, hazard_tree, radius_k
     return max_winds
 
 
+# Bayesian integration helper functions
+
+def create_vulnerability_data_from_climada_adapter(climada_adapter: CLIMADAInputAdapter):
+    """
+    從 CLIMADAInputAdapter 創建 VulnerabilityData 物件
+    
+    這個函數將 CLIMADA 的災害、暴險和損失數據轉換為 @bayesian/ 模組
+    所需的 VulnerabilityData 格式，支援脆弱度關係建模。
+    
+    Parameters:
+    -----------
+    climada_adapter : CLIMADAInputAdapter
+        已初始化的 CLIMADA 輸入適配器
+        
+    Returns:
+    --------
+    VulnerabilityData
+        格式化的脆弱度數據物件，包含：
+        - hazard_intensities: 災害強度數據 (H_ij)
+        - exposure_values: 暴險值數據 (E_i) 
+        - observed_losses: 觀測損失數據 (L_ij)
+    """
+    try:
+        # Import VulnerabilityData from bayesian module
+        from bayesian.parametric_bayesian_hierarchy import VulnerabilityData
+    except ImportError:
+        raise ImportError("無法導入 VulnerabilityData，請檢查 @bayesian/ 模組")
+    
+    print("🔄 從 CLIMADA 適配器提取脆弱度數據...")
+    
+    # 1. 提取災害強度 (H_ij) - 使用 Cat-in-a-Circle 參數指標
+    parametric_indices = climada_adapter.extract_parametric_indices()
+    
+    # 選擇最大風速作為主要災害強度指標
+    # 優先選擇 'max' 統計的 Cat-in-a-Circle 指標
+    hazard_intensities = None
+    for key, values in parametric_indices.items():
+        if 'max' in key.lower():
+            hazard_intensities = values
+            print(f"   使用災害指標: {key}")
+            break
+    
+    # 如果沒有找到 'max' 指標，使用第一個可用的指標
+    if hazard_intensities is None and parametric_indices:
+        key, hazard_intensities = next(iter(parametric_indices.items()))
+        print(f"   回退使用災害指標: {key}")
+    
+    if hazard_intensities is None:
+        raise ValueError("無法從 CLIMADA 適配器中提取災害強度數據")
+    
+    # 2. 提取暴險值 (E_i)
+    try:
+        exposure_gdf = climada_adapter.exposure_main.gdf
+        if 'value' in exposure_gdf.columns:
+            # 取暴險總值作為代表性暴險值
+            total_exposure = np.sum(exposure_gdf['value'].values)
+            # 為每個事件重複相同的暴險值
+            exposure_values = np.full(len(hazard_intensities), total_exposure)
+            print(f"   暴險總值: ${total_exposure/1e9:.2f}B")
+        else:
+            # 使用單位暴險值
+            exposure_values = np.ones(len(hazard_intensities))
+            print("   使用單位暴險值")
+    except Exception as e:
+        print(f"   ⚠️ 暴險值提取失敗: {e}")
+        exposure_values = np.ones(len(hazard_intensities))
+    
+    # 3. 提取觀測損失 (L_ij)
+    observed_losses = climada_adapter.get_loss_data()
+    
+    # 確保數組長度一致
+    min_length = min(len(hazard_intensities), len(exposure_values), len(observed_losses))
+    
+    if min_length == 0:
+        raise ValueError("數據數組為空，無法創建 VulnerabilityData")
+    
+    hazard_intensities = hazard_intensities[:min_length]
+    exposure_values = exposure_values[:min_length]  
+    observed_losses = observed_losses[:min_length]
+    
+    print(f"   ✅ 數據對齊完成: {min_length} 個事件")
+    print(f"   災害強度範圍: [{np.min(hazard_intensities):.1f}, {np.max(hazard_intensities):.1f}] m/s")
+    print(f"   損失範圍: [${np.min(observed_losses)/1e6:.1f}M, ${np.max(observed_losses)/1e6:.1f}M]")
+    
+    # 創建 VulnerabilityData 物件
+    vulnerability_data = VulnerabilityData(
+        hazard_intensities=hazard_intensities,
+        exposure_values=exposure_values,
+        observed_losses=observed_losses
+    )
+    
+    print("✅ VulnerabilityData 創建完成")
+    
+    return vulnerability_data
+
+
 def compare_adapters_summary(adapters: Dict[str, InputAdapter]) -> pd.DataFrame:
     """
     比較多個適配器的摘要統計

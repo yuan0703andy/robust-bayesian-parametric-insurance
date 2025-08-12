@@ -8,22 +8,33 @@ North Carolina Tropical Cyclone Parametric Insurance Analysis system - an academ
 
 ## Key Commands
 
-### Running the Main Analysis
-```bash
-# Complete NC tropical cyclone analysis (29,900+ line functional script)
-python nc_tc_comprehensive_functional.py
+### Sequential Workflow Execution
+The analysis follows a numbered script workflow (01-07) that can be run sequentially:
 
-# Alternative optimized test runs
-python test_new_bayesian_framework.py
+```bash
+# Activate CLIMADA environment first
+conda activate climada_env  # Required for all scripts
+
+# Sequential analysis workflow:
+python 01_run_climada.py                    # Generate base CLIMADA data
+python 02_spatial_analysis.py               # Spatial cat-in-circle analysis  
+python 03_insurance_product.py              # Generate parametric products
+python 04_traditional_parm_insurance.py     # Traditional RMSE-based analysis
+python 05_robust_bayesian_parm_insurance.py # Robust Bayesian analysis
+python 06_sensitivity_analysis.py           # Weight sensitivity analysis
+python 07_technical_premium_analysis.py     # Technical premium optimization
 ```
 
-### Testing and Validation
+### Individual Component Testing
 ```bash
-# Test Bayesian framework implementation
-python test_bayesian_fix.py
+# Test core framework components
+python -c "from insurance_analysis_refactored.core import ParametricInsuranceEngine; print('Framework loaded successfully')"
 
-# Import and test core modules
-python -c "from insurance_analysis_refactored.core import UnifiedAnalysisFramework; print('Framework loaded successfully')"
+# Test Bayesian components  
+python -c "from bayesian import RobustBayesianAnalyzer; print('Bayesian framework ready')"
+
+# Verify configuration
+python -c "from config.settings import NC_BOUNDS; print(f'NC Bounds: {NC_BOUNDS}')"
 ```
 
 ### Module Development
@@ -37,23 +48,26 @@ Since there are no standard build files (requirements.txt, setup.py), developmen
 
 ### Core Analysis Components
 
-1. **Main Entry Point** (`nc_tc_comprehensive_functional.py`)
-   - 29,900+ line comprehensive analysis script implementing complete workflow
-   - Orchestrates NC tropical cyclone catastrophic risk assessment
-   - Functional style with immediate cell execution and bilingual documentation
-   - Generates 350 products (5 radii × 70 Steinmann functions)
-   - Dual-track analysis: Traditional RMSE vs Bayesian CRPS evaluation
+1. **Sequential Analysis Pipeline** (Scripts 01-07)
+   - **`01_run_climada.py`**: CLIMADA data generation with IBTRACS track processing
+   - **`02_spatial_analysis.py`**: Cat-in-circle spatial analysis with multiple radii
+   - **`03_insurance_product.py`**: Steinmann 2023-compliant product generation (70 products × 5 radii = 350 total)
+   - **`04_traditional_parm_insurance.py`**: Traditional RMSE-based parametric insurance evaluation
+   - **`05_robust_bayesian_parm_insurance.py`**: 4-level hierarchical Bayesian analysis with uncertainty quantification
+   - **`06_sensitivity_analysis.py`**: Weight sensitivity analysis for penalty parameters
+   - **`07_technical_premium_analysis.py`**: Multi-objective premium optimization with Pareto analysis
 
-2. **Unified Insurance Analysis Framework** (`insurance_analysis_refactored/core/`)
-   - **`UnifiedAnalysisFramework`**: High-level API integrating all components
-   - **`ParametricInsuranceEngine`**: Cat-in-a-Circle index extraction with cKDTree optimization
+2. **Insurance Analysis Framework** (`insurance_analysis_refactored/core/`)
+   - **`ParametricInsuranceEngine`**: Core product creation and data structures
    - **`SkillScoreEvaluator`**: Comprehensive evaluation (RMSE, MAE, Brier, CRPS, EDI, TSS)
-   - **`InsuranceProductManager`**: Enterprise product lifecycle management
-   - **`SaffirSimpsonProductGenerator`**: Generates exactly 70 Steinmann 2023-compliant products
+   - **`InsuranceProductManager`**: Product lifecycle management
+   - **`TechnicalPremiumCalculator`**: Advanced premium calculation with VaR and Solvency II
+   - **`MarketAcceptabilityAnalyzer`**: Market acceptance and product complexity analysis
+   - **`MultiObjectiveOptimizer`**: Pareto frontier optimization
    - **Input Adapters**: 
      - `CLIMADAInputAdapter`: Traditional hazard-exposure-impact workflow
      - `BayesianInputAdapter`: Probabilistic simulation results processing
-   - **`EnhancedCatInCircleAnalyzer`**: Multi-radius spatial analysis with Haversine distances
+   - **`EnhancedCatInCircleAnalyzer`**: Multi-radius spatial analysis with cKDTree optimization
 
 3. **Bayesian Uncertainty Framework** (`bayesian/`)
    - **`ProbabilisticLossDistributionGenerator`**: Monte Carlo uncertainty quantification
@@ -110,29 +124,37 @@ RESOLUTION = 0.1  # degrees
 ## Usage Patterns
 
 ### Complete Analysis Workflow
-```python
-# Main comprehensive analysis - preferred entry point
-python nc_tc_comprehensive_functional.py
+```bash
+# Full sequential analysis - run all scripts in order
+conda activate climada_env
 
-# For programmatic access:
-from insurance_analysis_refactored.core import UnifiedAnalysisFramework
-
-framework = UnifiedAnalysisFramework()
-results = framework.run_comprehensive_analysis(parametric_indices, observed_losses)
+python 01_run_climada.py                    # ~10 minutes: Generate CLIMADA data
+python 02_spatial_analysis.py               # ~30 minutes: Spatial analysis  
+python 03_insurance_product.py              # ~5 minutes: Generate 350 products
+python 04_traditional_parm_insurance.py     # ~45 minutes: Traditional analysis
+python 05_robust_bayesian_parm_insurance.py # ~2 hours: Bayesian analysis
+python 06_sensitivity_analysis.py           # ~30 minutes: Sensitivity analysis
+python 07_technical_premium_analysis.py     # ~1 hour: Premium optimization
 ```
 
 ### Steinmann 2023 Standard Analysis
 ```python
-# Academic research compliance - exactly 70 products
-steinmann_results = framework.run_steinmann_analysis(parametric_indices, observed_losses)
-
-# Validation check
-assert len(steinmann_results.products) == 70
-print("✅ Fully compliant with Steinmann et al. (2023) standard")
-
-# Generate all 350 products (5 radii × 70 functions)
+# Generate exactly 70 Steinmann 2023-compliant products
 from insurance_analysis_refactored.core.saffir_simpson_products import generate_steinmann_2023_products
+
+# Create products for all 5 radii (total = 350 products)
 all_products = generate_steinmann_2023_products()
+print(f"✅ Generated {len(all_products)} products (5 radii × 70 functions)")
+
+# Individual component usage
+from insurance_analysis_refactored.core import ParametricInsuranceEngine
+engine = ParametricInsuranceEngine()
+product = engine.create_parametric_product(
+    product_id="NC_H3_50km", 
+    index_type="CAT_IN_CIRCLE",
+    trigger_thresholds=[33.0, 42.0, 58.0],
+    payout_amounts=[1e8, 3e8, 5e8]
+)
 ```
 
 ### Input Adapter System
@@ -187,12 +209,16 @@ robust_posterior = mpe.fit_ensemble_posterior(probabilistic_losses)
 
 ### Environment Setup
 ```bash
-# Assumes CLIMADA conda environment already exists
-conda activate climada_env  # or your CLIMADA environment name
+# REQUIRED: Activate CLIMADA conda environment
+conda activate climada_env  # Essential for all analysis scripts
 
-# Verify key dependencies
+# Verify core dependencies
 python -c "import climada; print('CLIMADA available')"
-python -c "from insurance_analysis_refactored.core import UnifiedAnalysisFramework; print('Framework ready')"
+python -c "from insurance_analysis_refactored.core import ParametricInsuranceEngine; print('Framework ready')"
+python -c "from bayesian import RobustBayesianAnalyzer; print('Bayesian framework ready')"
+
+# Check configuration
+python -c "from config.settings import NC_BOUNDS, YEAR_RANGE; print(f'Analysis: NC {YEAR_RANGE[0]}-{YEAR_RANGE[1]}')"
 ```
 
 ### Data Dependencies
@@ -203,11 +229,12 @@ python -c "from insurance_analysis_refactored.core import UnifiedAnalysisFramewo
 ## Development Notes
 
 ### Code Organization Principles
-- **No standard packaging**: No requirements.txt, setup.py by design (research flexibility)
-- **Functional main script**: `nc_tc_comprehensive_functional.py` uses Jupyter-style cells for reproducibility
-- **Modular libraries**: `insurance_analysis_refactored/` provides reusable components
-- **Bilingual documentation**: English/Chinese throughout for international research collaboration
-- **Academic focus**: Prioritizes research correctness over production deployment
+- **Sequential Scripts**: Numbered workflow (01-07) for reproducible analysis pipeline
+- **Jupyter-style Cells**: Scripts use `# %%` cell markers for interactive development
+- **Modular Libraries**: `insurance_analysis_refactored/` and `bayesian/` provide reusable components
+- **Bilingual Documentation**: English/Chinese throughout for international research collaboration
+- **Academic Focus**: Prioritizes research correctness over production deployment
+- **No Standard Packaging**: No requirements.txt, setup.py by design (research flexibility)
 
 ### Performance Characteristics
 - **Main analysis runtime**: Several hours for complete 350-product analysis
