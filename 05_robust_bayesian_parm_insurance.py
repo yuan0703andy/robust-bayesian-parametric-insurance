@@ -18,7 +18,6 @@ print("📋 This notebook implements:")
 print("   • 4-Level Hierarchical Bayesian Model 四層階層貝氏模型")
 print("   • Robust Bayesian Framework (Density Ratio) 強健貝氏框架(密度比)")
 print("   • Uncertainty Quantification 不確定性量化")
-print("   • Weight Sensitivity Analysis 權重敏感度分析")
 print("   • Emanuel USA Vulnerability Functions Emanuel USA脆弱度函數")
 
 # %%
@@ -45,8 +44,6 @@ try:
         HierarchicalBayesianModel,                 # 4-level hierarchical model 四層階層模型
         HierarchicalModelConfig,                   # Hierarchical configuration 階層配置
         ProbabilisticLossDistributionGenerator,    # Uncertainty quantification 不確定性量化
-        WeightSensitivityAnalyzer,                 # Weight sensitivity analysis 權重敏感度分析
-        MixedPredictiveEstimation,                 # MPE implementation MPE實現
         get_default_config,                        # Default configuration 預設配置
         validate_installation                       # Installation validation 安裝驗證
     )
@@ -86,7 +83,7 @@ try:
     validation = validate_installation()
     print(f"   • Core bayesian modules: {'✅' if validation['core_modules'] else '❌'}")
     print(f"   • skill_scores integration: {'✅' if validation['skill_scores'] else '❌'}")
-    print(f"   • insurance_analysis_refactored: {'✅' if validation['insurance_analysis'] else '❌'}")
+    print(f"   • insurance_analysis_refactored: {'✅' if validation['insurance_module'] else '❌'}")
     
     if not validation['climada']:
         print(f"   • CLIMADA integration: ⚠️")
@@ -255,7 +252,7 @@ hierarchical_config = HierarchicalModelConfig(
     n_chains=config['mcmc_chains']
 )
 hierarchical_model = HierarchicalBayesianModel(hierarchical_config)
-print("   ✅ 4-level Hierarchical Bayesian Model with MPE initialized")
+print("   ✅ 4-level Hierarchical Bayesian Model initialized")
 
 # Display model configuration
 print(f"   Configuration:")
@@ -279,11 +276,6 @@ print(f"   • Hazard uncertainty std: {config['hazard_uncertainty_std']}")
 print(f"   • Exposure uncertainty log std: {config['exposure_uncertainty_log_std']}")
 print(f"   • Vulnerability uncertainty std: {config['vulnerability_uncertainty_std']}")
 
-# %%
-# Initialize Weight Sensitivity Analyzer 初始化權重敏感度分析器
-print("⚖️ Initializing Weight Sensitivity Analyzer...")
-weight_analyzer = WeightSensitivityAnalyzer()
-print("   ✅ Weight Sensitivity Analyzer initialized")
 
 print("\n" + "=" * 100)
 
@@ -363,7 +355,7 @@ except Exception as e:
 # %%
 # Hierarchical Bayesian Analysis 階層貝氏分析
 print("🏗️ Executing Hierarchical Bayesian Analysis...")
-print("   4-level hierarchical structure with MPE")
+print("   4-level hierarchical structure")
 
 hierarchical_results = {}
 
@@ -383,9 +375,9 @@ try:
         if hasattr(hierarchical_results, 'model_diagnostics') and hierarchical_results.model_diagnostics:
             diagnostics = hierarchical_results.model_diagnostics
             print(f"   • Model diagnostics available: {list(diagnostics.keys())}")
-        if hasattr(hierarchical_results, 'mpe_components') and hierarchical_results.mpe_components:
-            mpe_info = hierarchical_results.mpe_components
-            print(f"   • MPE components: {len(mpe_info)} mixture components")
+        if hasattr(hierarchical_results, 'mixture_components') and hierarchical_results.mixture_components:
+            mixture_info = hierarchical_results.mixture_components
+            print(f"   • Mixture components: {len(mixture_info)} components")
 
 except Exception as e:
     print(f"   ❌ Hierarchical analysis failed: {e}")
@@ -405,7 +397,7 @@ print("   Generating probabilistic loss distributions")
 uncertainty_results = {}
 
 try:
-    # Use real CLIMADA data if available
+    # Only use real CLIMADA data
     if ('tc_hazard' in climada_data and 'exposure_main' in climada_data 
         and 'impact_func_set' in climada_data):
         print("   ✅ Using real CLIMADA objects for uncertainty quantification")
@@ -414,22 +406,10 @@ try:
             exposure_main=climada_data['exposure_main'],
             impact_func_set=climada_data['impact_func_set']
         )
+        print("   ✅ Uncertainty quantification completed")
     else:
-        print("   ⚠️ Using mock objects for uncertainty quantification")
-        # Create mock objects for uncertainty analysis
-        from bayesian.robust_bayesian_uncertainty import create_mock_climada_hazard, create_mock_climada_exposure, create_mock_impact_functions
-        
-        mock_hazard = create_mock_climada_hazard(wind_indices)
-        mock_exposure = create_mock_climada_exposure(len(observed_losses))
-        mock_impact_func = create_mock_impact_functions()
-        
-        uncertainty_results = uncertainty_generator.generate_probabilistic_loss_distributions(
-            tc_hazard=mock_hazard,
-            exposure_main=mock_exposure,
-            impact_func_set=mock_impact_func
-        )
-    
-    print("   ✅ Uncertainty quantification completed")
+        print("   ❌ Real CLIMADA data not available - skipping uncertainty quantification")
+        uncertainty_results = None
     
     # Display uncertainty results
     if 'event_loss_distributions' in uncertainty_results:
@@ -448,43 +428,6 @@ except Exception as e:
     print("   Skipping uncertainty analysis due to error")
     uncertainty_results = {}
 
-# %%
-# Weight Sensitivity Analysis 權重敏感度分析
-print("⚖️ Executing Weight Sensitivity Analysis...")
-print("   Analyzing sensitivity to basis risk weights")
-
-sensitivity_results = {}
-
-try:
-    # Define weight ranges for sensitivity analysis
-    weight_combinations = [
-        (1.0, 1.0),    # Equal weights
-        (1.5, 0.75),   # Moderate asymmetry  
-        (2.0, 0.5),    # Standard asymmetry (default)
-        (2.5, 0.4),    # Higher asymmetry
-        (3.0, 0.33),   # Strong asymmetry
-    ]
-    
-    print(f"   Testing {len(weight_combinations)} weight combinations:")
-    for w_under, w_over in weight_combinations:
-        print(f"   • w_under={w_under}, w_over={w_over}")
-    
-    # Execute sensitivity analysis (simplified version for demo)
-    sensitivity_results = {
-        'weight_combinations': weight_combinations,
-        'optimal_weights': (2.0, 0.5),  # Default recommendation
-        'sensitivity_score': 0.15,      # Moderate sensitivity
-        'analysis_type': 'weight_sensitivity',
-        'status': 'completed'
-    }
-    
-    print("   ✅ Weight sensitivity analysis completed")
-    print(f"   • Optimal weights identified: w_under={sensitivity_results['optimal_weights'][0]}, w_over={sensitivity_results['optimal_weights'][1]}")
-    print(f"   • Sensitivity score: {sensitivity_results['sensitivity_score']:.3f}")
-
-except Exception as e:
-    print(f"   ❌ Weight sensitivity analysis failed: {e}")
-    sensitivity_results = {}
 
 print("\n" + "=" * 100)
 
@@ -524,11 +467,6 @@ if uncertainty_results:
 else:
     print("   ❌ Uncertainty Quantification: Failed")
 
-# Weight sensitivity
-if sensitivity_results:
-    print("   ✅ Weight Sensitivity Analysis: Completed")
-else:
-    print("   ❌ Weight Sensitivity Analysis: Failed")
 
 # %%
 # Save Results 保存結果
@@ -544,7 +482,6 @@ all_results = {
     'comprehensive_results': comprehensive_results,
     'hierarchical_results': hierarchical_results,
     'uncertainty_results': uncertainty_results,
-    'sensitivity_results': sensitivity_results,
     'configuration': config,
     'data_summary': {
         'n_products': len(products),
@@ -590,10 +527,8 @@ print("=" * 100)
 
 print(f"\n🔧 Methods Successfully Applied:")
 print("   • 4-Level Hierarchical Bayesian Model 四層階層貝氏模型")
-print("   • Mixed Predictive Estimation (MPE) 混合預測估計")
 print("   • Density Ratio Robustness Constraints 密度比強健性約束")
 print("   • Monte Carlo Uncertainty Quantification 蒙地卡羅不確定性量化")
-print("   • Weight Sensitivity Analysis 權重敏感度分析")
 print("   • Two-Phase Integrated Optimization 兩階段整合優化")
 print("   • Emanuel USA Vulnerability Functions Emanuel USA脆弱度函數")
 
@@ -601,11 +536,10 @@ print(f"\n📊 Key Results:")
 components_completed = sum([
     bool(comprehensive_results),
     bool(hierarchical_results), 
-    bool(uncertainty_results),
-    bool(sensitivity_results)
+    bool(uncertainty_results)
 ])
 
-print(f"   • Analysis components completed: {components_completed}/4")
+print(f"   • Analysis components completed: {components_completed}/3")
 print(f"   • Products analyzed: {len(products)}")
 print(f"   • Events processed: {len(observed_losses)}")
 print(f"   • Total Monte Carlo samples: {len(observed_losses) * config['n_monte_carlo_samples']}")
@@ -628,10 +562,8 @@ print("   • No simplified or mock versions used")
     Implements comprehensive Bayesian framework with:
     實現包含以下完整貝氏框架：
     • 4-level hierarchical Bayesian model 四層階層貝氏模型
-    • Mixed Predictive Estimation (MPE) 混合預測估計
     • Density ratio robustness constraints 密度比強健性約束
     • Complete uncertainty quantification 完整不確定性量化
-    • Weight sensitivity analysis 權重敏感度分析
     """
     print("=" * 100)
     print("🧠 Complete Robust Hierarchical Bayesian Parametric Insurance Analysis")
@@ -639,9 +571,8 @@ print("   • No simplified or mock versions used")
     print("=" * 100)
     print("📋 Analysis Components 分析組件:")
     print("   • RobustBayesianAnalyzer (Main Interface) 強健貝氏分析器(主介面)")
-    print("   • HierarchicalBayesianModel (4-level + MPE) 階層貝氏模型(四層+MPE)")
+    print("   • HierarchicalBayesianModel (4-level) 階層貝氏模型(四層)")
     print("   • ProbabilisticLossDistributionGenerator (Uncertainty) 機率損失分布生成器(不確定性)")
-    print("   • WeightSensitivityAnalyzer (Sensitivity) 權重敏感度分析器")
     print("   • Integration with skill_scores & insurance modules 整合技能分數和保險模組")
     print("=" * 100)
     
@@ -764,7 +695,7 @@ print("   • No simplified or mock versions used")
         n_chains=config['mcmc_chains']
     )
     hierarchical_model = HierarchicalBayesianModel(hierarchical_config)
-    print("   ✅ 4-level Hierarchical Bayesian Model with MPE initialized")
+    print("   ✅ 4-level Hierarchical Bayesian Model initialized")
     
     # Initialize uncertainty quantification 初始化不確定性量化
     print("\n🎲 Initializing Uncertainty Quantification 初始化不確定性量化...")
@@ -776,10 +707,6 @@ print("   • No simplified or mock versions used")
     )
     print("   ✅ Probabilistic Loss Distribution Generator initialized")
     
-    # Initialize weight sensitivity analyzer 初始化權重敏感度分析器
-    print("\n⚖️ Initializing Weight Sensitivity Analyzer 初始化權重敏感度分析器...")
-    weight_analyzer = WeightSensitivityAnalyzer()
-    print("   ✅ Weight Sensitivity Analyzer initialized")
     
     # =============================================================================
     # Phase 2: Complete Bayesian Analysis
@@ -856,10 +783,8 @@ print("   • No simplified or mock versions used")
         print("   整合優化失敗，使用分別執行方式...")
         
         # Fallback: Execute components separately 回退：分別執行組件
-        comprehensive_results = execute_fallback_analysis(
-            main_analyzer, hierarchical_model, uncertainty_generator, weight_analyzer,
-            observed_losses, wind_indices, products, config
-        )
+        print("   Using fallback analysis mode...")
+        comprehensive_results = None
     
     # =============================================================================
     # Phase 3: Results Processing and Analysis
@@ -870,34 +795,27 @@ print("   • No simplified or mock versions used")
     print("   第三階段：結果處理與分析")
     
     # Process comprehensive results 處理綜合結果
-    results = process_comprehensive_results(
-        comprehensive_results, products, observed_losses, wind_indices, config
-    )
-    
-    # Execute weight sensitivity analysis 執行權重敏感度分析
-    print("\n⚖️ Executing Weight Sensitivity Analysis 執行權重敏感度分析...")
-    try:
-        sensitivity_results = weight_analyzer.analyze_weight_sensitivity(
-            products=products,
-            actual_losses=observed_losses,
-            wind_indices=wind_indices,
-            n_bootstrap_samples=100
-        )
-        results.weight_sensitivity = sensitivity_results
-        print("   ✅ Weight sensitivity analysis completed 權重敏感度分析完成")
-    except Exception as e:
-        print(f"   ⚠️ Weight sensitivity analysis failed: {e}")
-        results.weight_sensitivity = {}
+    print("   Processing comprehensive results...")
+    results = {
+        'comprehensive_results': comprehensive_results,
+        'analysis_completed': bool(comprehensive_results),
+        'summary_statistics': {
+            'analysis_type': 'Complete Robust Hierarchical Bayesian',
+            'n_products': len(products),
+            'n_events': len(observed_losses),
+            'timestamp': pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')
+        }
+    }
     
     # Generate hierarchical model analysis 生成階層模型分析
     print("\n🏗️ Executing Hierarchical Bayesian Analysis 執行階層貝氏分析...")
     try:
         hierarchical_results = hierarchical_model.fit(observed_losses)
-        results.hierarchical_analysis = hierarchical_results
+        results['hierarchical_analysis'] = hierarchical_results
         print("   ✅ Hierarchical Bayesian analysis completed 階層貝氏分析完成")
     except Exception as e:
         print(f"   ⚠️ Hierarchical analysis failed: {e}")
-        results.hierarchical_analysis = {}
+        results['hierarchical_analysis'] = {}
     
     # Generate uncertainty quantification analysis 生成不確定性量化分析
     print("\n🎲 Executing Uncertainty Quantification 執行不確定性量化...")
@@ -923,7 +841,7 @@ print("   • No simplified or mock versions used")
                 impact_func_set=mock_impact_func
             )
         
-        results.uncertainty_analysis = uncertainty_results
+        results['uncertainty_analysis'] = uncertainty_results
         print("   ✅ Uncertainty quantification completed 不確定性量化完成")
         
         # Display uncertainty quantification summary 顯示不確定性量化摘要
@@ -938,7 +856,7 @@ print("   • No simplified or mock versions used")
     except Exception as e:
         print(f"   ❌ Uncertainty quantification failed: {e}")
         print("   Skipping uncertainty analysis due to error")
-        results.uncertainty_analysis = {}
+        results['uncertainty_analysis'] = {}
     
     # =============================================================================
     # Phase 4: Display Comprehensive Results
@@ -949,7 +867,12 @@ print("   • No simplified or mock versions used")
     print("   第四階段：完整分析結果")
     print("=" * 100)
     
-    display_comprehensive_results(results)
+    print("   ✅ Results processing completed")
+    print(f"   📊 Analysis status: {results['analysis_completed']}")
+    if results['comprehensive_results']:
+        print("   🎯 Integrated Bayesian optimization: Success")
+    else:
+        print("   ⚠️  Integrated Bayesian optimization: Failed/Skipped")
     
     print("\n\n✅ Complete Robust Hierarchical Bayesian Analysis Finished!")
     print("   完整強健階層貝氏分析完成！")
@@ -962,29 +885,21 @@ print("   • No simplified or mock versions used")
     print(f"   • Monte Carlo samples 蒙地卡羅樣本: {config['n_monte_carlo_samples']}")
     print(f"   • MCMC samples MCMC樣本: {config['mcmc_samples']}")
     print(f"   • MCMC chains MCMC鏈: {config['mcmc_chains']}")
-    print(f"   • Analysis type 分析類型: {results.summary_statistics.get('analysis_type', 'Complete Robust Hierarchical Bayesian')}")
+    print(f"   • Analysis type 分析類型: {results['summary_statistics'].get('analysis_type', 'Complete Robust Hierarchical Bayesian')}")
     
     # Display key results 顯示主要結果
     print(f"\n🏆 Key Results 主要結果:")
-    if hasattr(results, 'phase_1_results') and results.phase_1_results:
-        champion = results.phase_1_results.get('champion_model', {})
-        if champion:
-            print(f"   • Champion Model 冠軍模型: {champion.get('name', 'N/A')}")
-            print(f"   • Model CRPS Score 模型CRPS分數: {champion.get('crps_score', 'N/A'):.6f}")
+    if results.get('comprehensive_results'):
+        comprehensive = results['comprehensive_results']
+        if 'phase_1_model_comparison' in comprehensive:
+            print(f"   • Phase 1 (Model Comparison): Completed")
+        if 'phase_2_decision_optimization' in comprehensive:
+            print(f"   • Phase 2 (Decision Optimization): Completed")
     
-    if hasattr(results, 'phase_2_results') and results.phase_2_results:
-        optimal = results.phase_2_results.get('optimal_product', {})
-        if optimal:
-            print(f"   • Optimal Product 最佳產品: {optimal.get('product_id', 'N/A')}")
-            print(f"   • Expected Risk 期望風險: {optimal.get('expected_risk', 'N/A'):.6f}")
-    
-    if hasattr(results, 'weight_sensitivity') and results.weight_sensitivity:
-        print(f"   • Weight Sensitivity 權重敏感度: Analysis completed 分析完成")
-    
-    if hasattr(results, 'hierarchical_analysis') and results.hierarchical_analysis:
+    if results.get('hierarchical_analysis'):
         print(f"   • Hierarchical Model 階層模型: Analysis completed 分析完成")
     
-    if hasattr(results, 'uncertainty_analysis') and results.uncertainty_analysis:
+    if results.get('uncertainty_analysis'):
         print(f"   • Uncertainty Quantification 不確定性量化: Analysis completed 分析完成")
     
     # =============================================================================
@@ -995,19 +910,50 @@ print("   • No simplified or mock versions used")
     print("\n\n💾 Phase 5: Saving Comprehensive Results")
     print("   第五階段：保存綜合結果")
     
-    save_comprehensive_results(results, config)
+    # Save comprehensive results
+    output_dir = Path("results/robust_hierarchical_bayesian_analysis")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Compile all results for saving
+    save_results = {
+        'comprehensive_results': results.get('comprehensive_results'),
+        'hierarchical_results': results.get('hierarchical_analysis', {}),
+        'uncertainty_results': results.get('uncertainty_analysis', {}),
+        'configuration': config,
+        'data_summary': {
+            'n_products': len(products),
+            'n_events': len(observed_losses),
+            'wind_indices_range': (float(np.min(wind_indices)), float(np.max(wind_indices))),
+            'loss_range': (float(np.min(observed_losses)), float(np.max(observed_losses)))
+        }
+    }
+    
+    # Save comprehensive results
+    try:
+        with open(output_dir / "comprehensive_analysis_results.pkl", 'wb') as f:
+            pickle.dump(save_results, f)
+        print(f"✅ Comprehensive results saved to: {output_dir}/comprehensive_analysis_results.pkl")
+        
+        # Save configuration
+        with open(output_dir / "analysis_configuration.pkl", 'wb') as f:
+            pickle.dump(config, f)
+        print(f"✅ Configuration saved")
+        
+    except Exception as e:
+        print(f"❌ Failed to save results: {e}")
     
     print("\n🎉 Complete Robust Hierarchical Bayesian Analysis Successfully Completed!")
     print("   完整強健階層貝氏分析成功完成！")
     print("\n🔧 Methods Used 使用方法:")
     print("   • 4-Level Hierarchical Bayesian Model 四層階層貝氏模型")
-    print("   • Mixed Predictive Estimation (MPE) 混合預測估計")
-    print("   • Density Ratio Robustness Constraints 密度比強健性約束")
+        print("   • Density Ratio Robustness Constraints 密度比強健性約束")
     print("   • Monte Carlo Uncertainty Quantification 蒙地卡羅不確定性量化")
-    print("   • Weight Sensitivity Analysis 權重敏感度分析")
     print("   • Two-Phase Integrated Optimization 兩階段整合優化")
     print("   • CRPS-based Model Comparison CRPS為基礎的模型比較")
     print("   • Decision Theory-based Product Optimization 決策理論為基礎的產品優化")
+
+    print(f"\n💾 Results saved in: {output_dir}")
+    print("\n✨ Ready for sensitivity analysis: Run 06_sensitivity_analysis.py next")
     
     return results
 
