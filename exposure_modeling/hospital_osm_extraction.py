@@ -358,15 +358,20 @@ def process_hospital_geometries(gdf_hospitals):
     return gdf_processed
 
 
-def create_standardized_hospital_exposures(gdf_hospitals):
+def create_standardized_hospital_exposures(gdf_hospitals, value_config=None):
     """
     創建符合Steinmann論文的標準化醫院曝險數據
-    每家醫院設為1個標準化單位
+    支援基於醫院類型的差異化價值分配
     
     Parameters:
     -----------
     gdf_hospitals : geopandas.GeoDataFrame
         醫院位置數據
+    value_config : dict, optional
+        價值配置，包含:
+        - base_value: 基礎價值 (預設 1.0)
+        - type_multipliers: 醫院類型乘數字典
+        - use_real_values: 是否使用真實價值 (預設 False)
         
     Returns:
     --------
@@ -375,22 +380,51 @@ def create_standardized_hospital_exposures(gdf_hospitals):
     """
     
     print("🏥 創建標準化醫院曝險數據...")
-    print("   📋 使用Steinmann論文方法: 每家醫院 = 1標準化單位")
+    
+    # 預設配置
+    if value_config is None:
+        value_config = {
+            'base_value': 1.0,
+            'type_multipliers': {
+                'general': 1.0,
+                'emergency': 2.0,
+                'specialty': 1.5,
+                'regional': 2.5,
+                'university': 3.0,
+                'community': 0.8
+            },
+            'use_real_values': False
+        }
+    
+    base_value = value_config.get('base_value', 1.0)
+    print(f"   📋 基礎價值: {base_value} 標準化單位")
     
     if not CLIMADA_AVAILABLE:
         print("   ⚠️ CLIMADA不可用，返回基本數據結構...")
         return {
             'hospitals': gdf_hospitals,
-            'standardized_value': 1.0,
-            'total_hospitals': len(gdf_hospitals)
+            'base_value': base_value,
+            'total_hospitals': len(gdf_hospitals),
+            'value_config': value_config
         }
     
     try:
         # 準備曝險數據
         gdf_exposure = gdf_hospitals.copy()
         
-        # 設定標準化價值：每家醫院 = 1.0 單位
-        gdf_exposure['value'] = 1.0
+        # 設定醫院價值
+        type_multipliers = value_config.get('type_multipliers', {})
+        use_real_values = value_config.get('use_real_values', False)
+        
+        if use_real_values and 'hospital_type' in gdf_exposure.columns:
+            # 基於醫院類型分配差異化價值
+            gdf_exposure['value'] = gdf_exposure['hospital_type'].map(
+                lambda t: base_value * type_multipliers.get(t, 1.0)
+            )
+            print(f"   💰 使用差異化價值: 類型乘數已應用")
+        else:
+            # 設定標準化價值：每家醫院 = base_value 單位
+            gdf_exposure['value'] = base_value
         
         # 添加必要的CLIMADA屬性
         gdf_exposure['region_id'] = 840  # USA
@@ -406,8 +440,8 @@ def create_standardized_hospital_exposures(gdf_hospitals):
         hospital_exposures.check()
         
         print(f"   ✅ 創建標準化醫院曝險: {len(hospital_exposures.gdf)} 家醫院")
-        print(f"   💰 每家醫院價值: 1.0 標準化單位")
-        print(f"   🏥 總計價值: {hospital_exposures.value.sum()} 標準化單位")
+        print(f"   💰 價值範圍: {hospital_exposures.value.min():.2f} - {hospital_exposures.value.max():.2f} 單位")
+        print(f"   🏥 總計價值: {hospital_exposures.value.sum():.2f} 標準化單位")
         
         return hospital_exposures
         
@@ -477,7 +511,7 @@ def visualize_hospitals(gdf_hospitals, save_plot=True):
 
 
 # 便利函數
-def get_nc_hospitals(use_mock=True, osm_file_path=None, create_exposures=True, visualize=True):
+def get_nc_hospitals(use_mock=True, osm_file_path=None, create_exposures=True, visualize=True, value_config=None):
     """
     一站式獲取北卡羅來納州醫院數據
     
@@ -491,6 +525,8 @@ def get_nc_hospitals(use_mock=True, osm_file_path=None, create_exposures=True, v
         是否創建CLIMADA曝險對象
     visualize : bool
         是否顯示視覺化
+    value_config : dict, optional
+        醫院價值配置
         
     Returns:
     --------
@@ -510,7 +546,7 @@ def get_nc_hospitals(use_mock=True, osm_file_path=None, create_exposures=True, v
     # 創建標準化曝險
     hospital_exposures = None
     if create_exposures:
-        hospital_exposures = create_standardized_hospital_exposures(gdf_hospitals)
+        hospital_exposures = create_standardized_hospital_exposures(gdf_hospitals, value_config)
     
     print(f"✅ 醫院數據獲取完成: {len(gdf_hospitals)} 家醫院")
     

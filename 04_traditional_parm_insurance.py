@@ -17,6 +17,9 @@ import numpy as np
 import pickle
 from pathlib import Path
 
+# Import hospital-based configuration
+from config.hospital_based_payout_config import HospitalPayoutConfig, create_hospital_based_config
+
 # %%
 def main():
     """
@@ -32,57 +35,100 @@ def main():
     print("\n📂 Loading data...")
     
     # Load products
-    try:
-        with open("results/insurance_products/products.pkl", 'rb') as f:
-            products = pickle.load(f)
-        print(f"✅ Loaded {len(products)} insurance products")
-    except FileNotFoundError:
-        print("❌ Products not found. Run 03_insurance_product.py first.")
-        return
+    with open("results/insurance_products/products.pkl", 'rb') as f:
+        products = pickle.load(f)
+    print(f"✅ Loaded {len(products)} insurance products")
+    
+    # 配置基於醫院的賠付
+    print("\n🏥 Configuring hospital-based payouts...")
+    hospital_config = create_hospital_based_config(
+        n_hospitals=20,  # 預設20家醫院
+        base_value_per_hospital=1e7  # 每家醫院$10M USD
+    )
+    
+    # 根據產品類型更新最大賠付
+    total_exposure = hospital_config.calculate_total_exposure()
+    print(f"   💰 總曝險值: ${total_exposure:,.0f}")
+    
+    # 獲取不同產品類型的最大賠付（使用50km標準半徑）
+    max_payouts = hospital_config.get_max_payout_amounts(total_exposure, radius_km=50)
+    print(f"   📊 最大賠付配置:")
+    for ptype, amount in max_payouts.items():
+        print(f"      - {ptype}: ${amount:,.0f}")
+    
+    # 更新產品的最大賠付值
+    for product in products:
+        # 根據產品結構類型設定最大賠付
+        structure_type = product.get('structure_type', 'single')
+        if structure_type in max_payouts:
+            original_payout = product['max_payout']
+            product['max_payout'] = max_payouts[structure_type]
+            # 調整賠付比例以保持相對關係
+            if original_payout > 0:
+                scale_factor = max_payouts[structure_type] / original_payout
+                # 如果需要，也可以調整賠付比例
+                # product['payout_ratios'] = [r * scale_factor for r in product['payout_ratios']]
+    
+    print(f"   ✅ 已更新 {len(products)} 個產品的最大賠付值")
     
     # Load spatial analysis results  
-    try:
-        with open("results/spatial_analysis/cat_in_circle_results.pkl", 'rb') as f:
-            spatial_results = pickle.load(f)
-        wind_indices_dict = spatial_results['indices']
-        # Extract main wind index for analysis (using 30km max as primary)
-        wind_indices = wind_indices_dict.get('cat_in_circle_30km_max', np.array([]))
-        print("✅ Loaded spatial analysis results")
-        print(f"   Using primary index: cat_in_circle_30km_max ({len(wind_indices)} events)")
-    except FileNotFoundError:
-        print("❌ Spatial results not found. Run 02_spatial_analysis.py first.")
-        return
+    with open("results/spatial_analysis/cat_in_circle_results.pkl", 'rb') as f:
+        spatial_results = pickle.load(f)
+    wind_indices_dict = spatial_results['indices']
+    print("✅ Loaded spatial analysis results")
+    print("🌪️  Available Cat-in-Circle indices:")
+    for key in wind_indices_dict.keys():
+        print(f"   • {key}: {len(wind_indices_dict[key])} events")
     
-    # Load CLIMADA data
-    try:
-        with open("results/climada_data/climada_complete_data.pkl", 'rb') as f:
-            climada_data = pickle.load(f)
-        print("✅ Loaded CLIMADA data (真實數據)")
-    except FileNotFoundError:
-        print("⚠️ Using synthetic loss data (風速相關)")
-        np.random.seed(42)
-        # 創建與風速相關的合成損失數據
-        n_events = len(wind_indices) if len(wind_indices) > 0 else 1000
-        
-        # 基於風速生成損失（風速越高，損失越大）
-        # 使用指數關係模擬真實的風災損失
-        synthetic_losses = np.zeros(n_events)
-        for i, wind in enumerate(wind_indices[:n_events]):
-            if wind > 33:  # 颱風閾值
-                # 損失與風速的3.5次方成正比（符合Emanuel公式）
-                base_loss = (wind / 33) ** 3.5 * 1e8
-                # 加入隨機變異
-                synthetic_losses[i] = base_loss * np.random.lognormal(0, 0.5)
-            else:
-                # 低於颱風閾值，小概率產生小損失
-                if np.random.random() < 0.05:
-                    synthetic_losses[i] = np.random.lognormal(10, 2) * 1e3
-        
-        climada_data = {
-            'impact': type('MockImpact', (), {
-                'at_event': synthetic_losses
-            })()
-        }
+    # Extract main wind index for analysis (using 50km max as primary - matches hospital config)
+    wind_indices = wind_indices_dict.get('cat_in_circle_50km_max', np.array([]))
+    if len(wind_indices) == 0:
+        # Fallback to other available indices
+        for fallback_key in ['cat_in_circle_30km_max', 'cat_in_circle_75km_max', 'cat_in_circle_100km_max']:
+            if fallback_key in wind_indices_dict and len(wind_indices_dict[fallback_key]) > 0:
+                wind_indices = wind_indices_dict[fallback_key]
+                print(f"   Using fallback index: {fallback_key} ({len(wind_indices)} events)")
+                break
+    else:
+        print(f"   Using primary index: cat_in_circle_50km_max ({len(wind_indices)} events)")
+    
+    # 載入CLIMADA數據
+    print("📂 Loading CLIMADA data...")
+    
+    # 直接載入CLIMADA數據
+    with open("results/climada_data/climada_complete_data.pkl", 'rb') as f:
+        climada_data = pickle.load(f)
+    
+    print("✅ Successfully loaded CLIMADA data")
+    
+    # 提取impact數據
+    impact_obj = climada_data['impact']
+    observed_losses = impact_obj.at_event
+    print(f"   ✅ CLIMADA損失數據: {len(observed_losses)} events")
+    print(f"   損失範圍: ${np.min(observed_losses):,.0f} - ${np.max(observed_losses):,.0f}")
+    print(f"   平均損失: ${np.mean(observed_losses):,.0f}")
+    
+    # 將CLIMADA損失解釋為醫院聚合損失
+    print("🏥 將CLIMADA損失解釋為醫院聚合損失...")
+    
+    # 使用與02相同的方法獲取醫院數據（用於計數和配置）
+    from exposure_modeling.hospital_osm_extraction import get_nc_hospitals
+    
+    # 使用模擬醫院數據（與02保持一致）
+    gdf_hospitals_calc, _ = get_nc_hospitals(
+        use_mock=True,  # 與02_spatial_analysis一致使用mock數據
+        create_exposures=False,
+        visualize=False
+    )
+    print(f"   ✅ 醫院數量: {len(gdf_hospitals_calc)}")
+    
+    # 檢查是否有曝險數據可用於空間分配
+    if 'exposures' in climada_data and hasattr(climada_data['exposures'], 'gdf'):
+        exposure_gdf = climada_data['exposures'].gdf
+        print(f"   ✅ 曝險點數量: {len(exposure_gdf)}")
+    
+    # CLIMADA損失本身就代表區域內所有資產（包括醫院）的總損失
+    print(f"   ✅ CLIMADA損失代表 {len(gdf_hospitals_calc)} 家醫院的聚合損失")
     
     # Ensure data arrays have matching lengths
     observed_losses = climada_data.get('impact').at_event if 'impact' in climada_data else np.array([])
@@ -97,11 +143,27 @@ def main():
         print("❌ No valid data found")
         return
     
-    print("\n📊 執行傳統基差風險分析...")
-    print("   • 方法: 多種基差風險定義")
-    print("   • 指標: 絕對、不對稱、加權不對稱、RMSE、相對絕對、相對加權不對稱 基差風險") 
-    print("   • 方式: 確定性點估計 + 相對基差風險（解決極端事件主導問題）")
+    print("\n🏥 執行醫院導向的基差風險分析...")
+    print("   • 目標: 將觸發器賠付與醫院總損失匹配")
+    print("   • 損失計算: 每家醫院個別損失的總和")
+    print("   • 方法: 多種基差風險定義 + 多水平最大賠付測試")
     print(f"   • 使用預生成產品: {len(products)} 個")
+    print(f"   • 測試最大賠付水平: 25%, 50%, 75%, 100% 總曝險")
+    
+    # 多水平最大賠付測試
+    total_exposure = hospital_config.calculate_total_exposure()
+    payout_levels = [0.25, 0.50, 0.75, 1.00]  # 25%, 50%, 75%, 100% 總曝險
+    
+    print(f"\n🔍 最大賠付水平測試:")
+    for level in payout_levels:
+        max_payout_value = total_exposure * level
+        print(f"   - {level*100:3.0f}% 總曝險: ${max_payout_value:,.0f}")
+    
+    print(f"\n📊 開始分析...")
+    print(f"   分析產品數量: {len(products)}")
+    print(f"   事件數量: {len(wind_indices)}")
+    print(f"   最大賠付水平: {len(payout_levels)} 個")
+    print(f"   總分析組合: {len(products) * len(payout_levels)}")
     
     # Import basis risk calculator (使用整合的 skill_scores 模組)
     from skill_scores.basis_risk_functions import BasisRiskCalculator, BasisRiskType, BasisRiskConfig
@@ -143,17 +205,14 @@ def main():
     }
     
     # 分析結果儲存
-    analysis_results = []
-    
-    print(f"   分析產品數量: {len(products)}")
-    print(f"   事件數量: {len(wind_indices)}")
+    all_analysis_results = []
     
     # 檢查前3個產品的設置 (調試信息)
     print(f"\n🔍 產品設置檢查 (前3個):")
     for i in range(min(3, len(products))):
         product = products[i]
         print(f"  {product['product_id']}: 閾值={product['trigger_thresholds']}")
-        print(f"    賠付比例={product['payout_ratios']}, 最大賠付={product['max_payout']}")
+        print(f"    賠付比例={product['payout_ratios']}, 最大賠付=${product['max_payout']:,.0f}")
     
     # 檢查風速數據範圍
     print(f"\n🌪️  風速數據檢查:")
@@ -161,61 +220,65 @@ def main():
     print(f"   風速平均: {np.mean(wind_indices):.2f}")
     print(f"   風速標準差: {np.std(wind_indices):.2f}")
     
+    # 為每個產品測試多個最大賠付水平
+    total_combinations = len(products) * len(payout_levels)
+    combination_count = 0
+    
     for i, product in enumerate(products):
-        if (i + 1) % 20 == 0:
-            print(f"   進度: {i+1}/{len(products)}")
+        for payout_level in payout_levels:
+            combination_count += 1
+            if combination_count % 50 == 0:
+                print(f"   進度: {combination_count}/{total_combinations}")
+            
+            # 為這個組合設定最大賠付
+            current_max_payout = total_exposure * payout_level
         
-        # 計算階梯式賠付 (使用整合的 skill_scores 模組)
-        from skill_scores.basis_risk_functions import calculate_step_payouts_batch
+            # 計算階梯式賠付 (使用整合的 skill_scores 模組)
+            from skill_scores.basis_risk_functions import calculate_step_payouts_batch
+            
+            payouts = calculate_step_payouts_batch(
+                wind_indices,
+                product['trigger_thresholds'],
+                product['payout_ratios'],
+                current_max_payout  # 使用當前水平的最大賠付
+            )
         
-        payouts = calculate_step_payouts_batch(
-            wind_indices,
-            product['trigger_thresholds'],
-            product['payout_ratios'],
-            product['max_payout']
-        )
+            # 調試：檢查前幾個組合的賠付分佈
+            if combination_count <= 6:  # 只顯示前6個組合
+                print(f"    產品 {product['product_id']}, 水平{payout_level*100:.0f}%: 賠付範圍={np.min(payouts):.2e}-{np.max(payouts):.2e}, 觸發率={np.mean(payouts > 0):.3f}")
+            
+            # 計算各種基差風險指標
+            product_result = {
+                'product_id': f"{product['product_id']}_L{payout_level*100:.0f}",  # 添加水平標識
+                'base_product_id': product['product_id'],
+                'name': product.get('name', 'Unknown'),
+                'structure_type': product['structure_type'],
+                'radius_km': product.get('radius_km', 30),
+                'n_thresholds': len(product['trigger_thresholds']),
+                'max_payout': current_max_payout,
+                'payout_level': payout_level,
+                'payout_level_pct': f"{payout_level*100:.0f}%"
+            }
         
-        # 調試：檢查前幾個產品的賠付分佈
-        if i < 3:
-            print(f"  產品 {product['product_id']}: 賠付範圍={np.min(payouts):.2e}-{np.max(payouts):.2e}, 觸發率={np.mean(payouts > 0):.3f}")
-        
-        # 計算各種基差風險指標
-        product_result = {
-            'product_id': product['product_id'],
-            'name': product.get('name', 'Unknown'),
-            'structure_type': product['structure_type'],
-            'radius_km': product.get('radius_km', 30),
-            'n_thresholds': len(product['trigger_thresholds']),
-            'max_payout': product['max_payout']
-        }
-        
-        # 使用不同的基差風險計算器
-        for risk_name, calculator in calculators.items():
-            try:
+            # 使用不同的基差風險計算器
+            for risk_name, calculator in calculators.items():
                 risk_value = calculator.calculate_basis_risk(observed_losses, payouts)
                 product_result[f'{risk_name}_risk'] = risk_value
-            except Exception as e:
-                print(f"Warning: Failed to calculate {risk_name} risk for {product['product_id']}: {e}")
-                product_result[f'{risk_name}_risk'] = np.inf
         
-        # 計算額外的傳統指標
-        try:
+            # 計算額外的傳統指標
             product_result['correlation'] = np.corrcoef(observed_losses, payouts)[0,1] if np.std(payouts) > 0 else 0
             product_result['trigger_rate'] = np.mean(payouts > 0)
             product_result['mean_payout'] = np.mean(payouts)
             product_result['coverage_ratio'] = np.sum(payouts) / np.sum(observed_losses) if np.sum(observed_losses) > 0 else 0
             product_result['basis_risk_std'] = np.std(observed_losses - payouts)
-        except Exception as e:
-            print(f"Warning: Failed to calculate additional metrics for {product['product_id']}: {e}")
-            for key in ['correlation', 'trigger_rate', 'mean_payout', 'coverage_ratio', 'basis_risk_std']:
-                if key not in product_result:
-                    product_result[key] = 0
-        
-        analysis_results.append(product_result)
+            # 醫院導向指標
+            product_result['hospital_match_score'] = 1 / (1 + product_result.get('weighted_risk', np.inf))  # 轉為匹配分數
+            
+            all_analysis_results.append(product_result)
     
     # 創建結果DataFrame
     import pandas as pd
-    results_df = pd.DataFrame(analysis_results)
+    results_df = pd.DataFrame(all_analysis_results)
     
     # 將框架調用替換為我們的分析結果
     class TraditionalAnalysisResults:
@@ -251,19 +314,27 @@ def main():
     results = TraditionalAnalysisResults(results_df)
     
     # Extract and display results
-    print("\n✅ Traditional basis risk analysis complete!")
-    print(f"📊 Analyzed {len(products)} products with multiple basis risk definitions")
+    print("\n✅ 醫院導向的基差風險分析完成！")
+    print(f"📊 分析了 {len(products)} 個產品 × {len(payout_levels)} 個賠付水平 = {len(results_df)} 個組合")
     
     # Display comprehensive basis risk analysis results
     print("\n📋 基差風險分析摘要:")
     print("=" * 60)
     
     # 基本統計
-    print(f"總產品數: {len(results_df)}")
-    print(f"產品結構分布:")
+    print(f"總組合數: {len(results_df)}")
+    print(f"原始產品數: {len(products)}")
+    print(f"測試賠付水平: {len(payout_levels)} 個 ({', '.join([f'{l*100:.0f}%' for l in payout_levels])})")
+    
+    print(f"\n產品結構分布:")
     structure_counts = results_df['structure_type'].value_counts()
     for structure, count in structure_counts.items():
-        print(f"  • {structure.capitalize()}: {count} 產品")
+        print(f"  • {structure.capitalize()}: {count} 組合")
+    
+    print(f"\n賠付水平分布:")
+    payout_counts = results_df['payout_level_pct'].value_counts()
+    for level, count in payout_counts.items():
+        print(f"  • {level} 總曝險: {count} 組合")
     
     # 基差風險統計摘要（包含相對基差風險）
     print(f"\n🎯 基差風險指標統計:")
@@ -303,8 +374,42 @@ def main():
                     print(f"   風險值: {risk_value:.6f}")
             print()
     
+    # 醫院導向的最佳產品建議
+    print(f"\n🏥 醫院保護最佳Cat-in-Circle產品建議:")
+    print("=" * 50)
+    
+    if 'weighted_risk' in results_df.columns:
+        # 找到最佳的醫院匹配產品
+        best_overall = results_df.loc[results_df['weighted_risk'].idxmin()]
+        
+        print(f"🏆 總體最佳產品:")
+        print(f"   產品: {best_overall['base_product_id']} ({best_overall['structure_type']})")
+        print(f"   最佳賠付水平: {best_overall['payout_level_pct']} 總曝險 (${best_overall['max_payout']:,.0f})")
+        print(f"   加權基差風險: {best_overall['weighted_risk']:.2e}")
+        print(f"   觸發率: {best_overall['trigger_rate']:.3f}")
+        print(f"   覆蓋率: {best_overall['coverage_ratio']:.3f}")
+        print(f"   醫院匹配分數: {best_overall['hospital_match_score']:.6f}")
+        
+        # 按賠付水平分組找最佳
+        print(f"\n💰 各賠付水平最佳產品:")
+        for level in sorted(results_df['payout_level'].unique()):
+            level_data = results_df[results_df['payout_level'] == level]
+            best_in_level = level_data.loc[level_data['weighted_risk'].idxmin()]
+            
+            print(f"   • {level*100:.0f}% 總曝險水平: {best_in_level['base_product_id']}")
+            print(f"     風險: {best_in_level['weighted_risk']:.2e}, 觸發率: {best_in_level['trigger_rate']:.3f}")
+        
+        # 按產品結構分組找最佳
+        print(f"\n🔧 各結構類型最佳產品:")
+        for structure in sorted(results_df['structure_type'].unique()):
+            structure_data = results_df[results_df['structure_type'] == structure]
+            best_in_structure = structure_data.loc[structure_data['weighted_risk'].idxmin()]
+            
+            print(f"   • {structure.capitalize()}: {best_in_structure['product_id']}")
+            print(f"     風險: {best_in_structure['weighted_risk']:.2e}, 賠付水平: {best_in_structure['payout_level_pct']}")
+    
     # Top 10 綜合排名 (使用加權不對稱基差風險)
-    print(f"\n📈 Top 10 產品排名 (按加權不對稱基差風險):")
+    print(f"\n📈 Top 10 組合排名 (按醫院匹配效果):")
     print("-" * 40)
     
     if 'weighted_risk' in results_df.columns:
@@ -373,7 +478,13 @@ def main():
                 'n_products': len(products),
                 'n_events': len(wind_indices),
                 'undercompensation_weight': 2.0,
-                'overcompensation_weight': 0.5
+                'overcompensation_weight': 0.5,
+                'hospital_config': {
+                    'n_hospitals': hospital_config.n_hospitals,
+                    'base_hospital_value': hospital_config.base_hospital_value,
+                    'total_exposure': total_exposure,
+                    'max_payouts': max_payouts
+                }
             }
         }, f)
     
@@ -388,6 +499,10 @@ def main():
         f"Analysis Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
         f"Products Analyzed: {len(products)}",
         f"Events Analyzed: {len(wind_indices)}",
+        f"Hospital-Based Configuration:",
+        f"  - Hospitals: {hospital_config.n_hospitals}",
+        f"  - Base Value per Hospital: ${hospital_config.base_hospital_value:,.0f}",
+        f"  - Total Exposure: ${total_exposure:,.0f}",
         "",
         "Basis Risk Definitions Used:",
         "1. Absolute Basis Risk: |Actual_Loss - Payout|",
@@ -421,6 +536,10 @@ def main():
     print("   • 相對加權不對稱基差風險計算 (結合標準化與權重)")
     print("   • Skill Score多重評估架構")
     print("   • 絕對 vs 相對基差風險對比分析")
+    print("\n   🏥 基於醫院的賠付配置:")
+    print(f"   • 醫院數量: {hospital_config.n_hospitals}")
+    print(f"   • 總曝險值: ${total_exposure:,.0f}")
+    print(f"   • 最大賠付已根據醫院曝險調整")
     
     return results
 
