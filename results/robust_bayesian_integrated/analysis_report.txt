@@ -1,0 +1,35 @@
+Integrated Robust Bayesian Analysis Report
+==================================================
+
+FRAMEWORK INTEGRATION SUCCESS
+------------------------------
+✅ Used existing insurance_analysis_refactored framework
+✅ Avoided duplicate payout calculations
+✅ Integrated Bayesian uncertainty quantification
+
+ANALYSIS RESULTS
+---------------
+Products Evaluated: 10
+Events Analyzed: 50
+Best Product: S009_R30_max
+
+TOP 3 PRODUCTS
+-------------
+1. S009_R30_max
+   RMSE: $4,023,009,020
+   CRPS: 452,735,176
+   Correlation: -0.099
+   Coverage 80%: 64.0%
+
+2. S010_R30_max
+   RMSE: $4,023,708,063
+   CRPS: 460,250,176
+   Correlation: -0.099
+   Coverage 80%: 64.0%
+
+3. S005_R30_max
+   RMSE: $4,023,202,032
+   CRPS: 458,957,761
+   Correlation: -0.142
+   Coverage 80%: 60.0%
+
