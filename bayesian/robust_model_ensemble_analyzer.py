@@ -58,6 +58,17 @@ except ImportError:
     HAS_HIERARCHICAL = False
     warnings.warn("參數化階層模型不可用")
 
+# 導入 ε-contamination 支援
+try:
+    from .epsilon_contamination import (
+        EpsilonContaminationClass, EpsilonContaminationSpec,
+        ContaminationDistributionClass, create_typhoon_contamination_spec
+    )
+    HAS_EPSILON_CONTAMINATION = True
+except ImportError:
+    HAS_EPSILON_CONTAMINATION = False
+    warnings.warn("ε-contamination 模組不可用")
+
 @dataclass
 class ModelClassSpec:
     """模型類別規格"""
@@ -73,19 +84,48 @@ class ModelClassSpec:
         PriorScenario.PESSIMISTIC
     ])
     
+    # ε-contamination 支援
+    enable_epsilon_contamination: bool = False
+    epsilon_values: List[float] = field(default_factory=lambda: [0.05, 0.1, 0.2])
+    contamination_distribution: str = "typhoon"  # "typhoon" or "heavy_tail"
+    
     def get_model_count(self) -> int:
         """獲取模型總數"""
-        return len(self.likelihood_families) * len(self.prior_scenarios)
+        base_count = len(self.likelihood_families) * len(self.prior_scenarios)
+        if self.enable_epsilon_contamination and HAS_EPSILON_CONTAMINATION:
+            # 每個基礎模型 × 每個ε值 = 污染模型數量
+            contamination_count = base_count * len(self.epsilon_values)
+            return base_count + contamination_count
+        return base_count
     
     def generate_all_specs(self) -> List[ModelSpec]:
         """生成所有模型規格組合"""
         all_specs = []
+        
+        # 生成基礎模型規格
         for likelihood, prior in product(self.likelihood_families, self.prior_scenarios):
             spec = ModelSpec(
                 likelihood_family=likelihood,
                 prior_scenario=prior
             )
             all_specs.append(spec)
+        
+        # 生成ε-contamination模型規格
+        if self.enable_epsilon_contamination and HAS_EPSILON_CONTAMINATION:
+            for likelihood, prior in product(self.likelihood_families, self.prior_scenarios):
+                for epsilon in self.epsilon_values:
+                    contamination_spec = ModelSpec(
+                        likelihood_family=likelihood,
+                        prior_scenario=prior,
+                        # 添加ε-contamination標識到模型名稱
+                        model_name=f"{likelihood.value}_{prior.value}_epsilon_{epsilon:.2f}"
+                    )
+                    # 存儲ε-contamination參數（如果ModelSpec支援的話）
+                    if hasattr(contamination_spec, 'epsilon_contamination'):
+                        contamination_spec.epsilon_contamination = epsilon
+                        contamination_spec.contamination_type = self.contamination_distribution
+                    all_specs.append(contamination_spec)
+        
         return all_specs
 
 @dataclass
@@ -178,6 +218,9 @@ class ModelClassAnalyzer:
         print(f"   模型數量: {self.model_class_spec.get_model_count()}")
         print(f"   概似函數: {[f.value for f in self.model_class_spec.likelihood_families]}")
         print(f"   事前情境: {[p.value for p in self.model_class_spec.prior_scenarios]}")
+        if self.model_class_spec.enable_epsilon_contamination:
+            print(f"   ε-contamination啟用: ε值 = {self.model_class_spec.epsilon_values}")
+            print(f"   污染分布類型: {self.model_class_spec.contamination_distribution}")
     
     def analyze_model_class(self, 
                           observations: Union[np.ndarray, List[float]]) -> ModelClassResult:
@@ -266,6 +309,11 @@ class ModelClassAnalyzer:
             print(f"\n  📊 擬合模型 {i}/{len(model_specs)}: {spec.model_name}")
             
             try:
+                # 應用ε-contamination（如果適用）
+                working_observations, contamination_info = self._apply_epsilon_contamination(observations, spec)
+                if contamination_info:
+                    print(f"      污染效應: {contamination_info['contamination_effect']:.3f}")
+                
                 model = ParametricHierarchicalModel(
                     model_spec=spec,
                     mcmc_config=self.config.mcmc_config,
@@ -274,14 +322,14 @@ class ModelClassAnalyzer:
                 
                 # 處理特殊情況（如LogNormal需要正值數據）
                 if spec.likelihood_family == LikelihoodFamily.LOGNORMAL:
-                    if np.any(observations <= 0):
+                    if np.any(working_observations <= 0):
                         print("      調整數據為正值 (LogNormal要求)")
-                        adjusted_obs = np.abs(observations) + 1e-6
+                        adjusted_obs = np.abs(working_observations) + 1e-6
                     else:
-                        adjusted_obs = observations
+                        adjusted_obs = working_observations
                     result = model.fit(adjusted_obs)
                 else:
-                    result = model.fit(observations)
+                    result = model.fit(working_observations)
                 
                 results[spec.model_name] = result
                 
@@ -305,6 +353,9 @@ class ModelClassAnalyzer:
         
         def fit_single_model(spec: ModelSpec) -> Tuple[str, Optional[HierarchicalModelResult]]:
             try:
+                # 應用ε-contamination（如果適用）
+                working_observations, contamination_info = self._apply_epsilon_contamination(observations, spec)
+                
                 model = ParametricHierarchicalModel(
                     model_spec=spec,
                     mcmc_config=self.config.mcmc_config,
@@ -312,13 +363,13 @@ class ModelClassAnalyzer:
                 )
                 
                 if spec.likelihood_family == LikelihoodFamily.LOGNORMAL:
-                    if np.any(observations <= 0):
-                        adjusted_obs = np.abs(observations) + 1e-6
+                    if np.any(working_observations <= 0):
+                        adjusted_obs = np.abs(working_observations) + 1e-6
                     else:
-                        adjusted_obs = observations
+                        adjusted_obs = working_observations
                     result = model.fit(adjusted_obs)
                 else:
-                    result = model.fit(observations)
+                    result = model.fit(working_observations)
                 
                 return spec.model_name, result
             except Exception as e:
@@ -345,6 +396,53 @@ class ModelClassAnalyzer:
                     print(f"  ⚠️ 例外 {completed}/{len(model_specs)}: {spec.model_name} - {e}")
         
         return results
+    
+    def _apply_epsilon_contamination(self, 
+                                   observations: np.ndarray, 
+                                   spec: ModelSpec) -> Tuple[np.ndarray, Dict[str, Any]]:
+        """
+        應用ε-contamination到觀測數據
+        
+        π(θ) = (1-ε)π₀(θ) + εq(θ)
+        """
+        if not HAS_EPSILON_CONTAMINATION:
+            return observations, {}
+        
+        # 檢查是否為ε-contamination模型
+        epsilon = getattr(spec, 'epsilon_contamination', None)
+        if epsilon is None:
+            return observations, {}
+        
+        print(f"      應用 ε-contamination (ε={epsilon:.2f})...")
+        
+        # 創建污染規格
+        contamination_type = getattr(spec, 'contamination_type', 'typhoon')
+        if contamination_type == 'typhoon':
+            contamination_spec = create_typhoon_contamination_spec(epsilon)
+        else:
+            # 使用一般重尾分布污染
+            contamination_spec = EpsilonContaminationSpec(
+                epsilon=epsilon,
+                nominal_distribution="normal",
+                contamination_distribution="student_t",
+                contamination_params={"nu": 3.0}  # 重尾
+            )
+        
+        # 應用污染
+        contamination_analyzer = EpsilonContaminationClass()
+        contaminated_result = contamination_analyzer.apply_contamination(
+            observations, contamination_spec
+        )
+        
+        contamination_info = {
+            "epsilon": epsilon,
+            "contamination_type": contamination_type,
+            "original_mean": np.mean(observations),
+            "contaminated_mean": np.mean(contaminated_result.contaminated_samples),
+            "contamination_effect": np.std(contaminated_result.contaminated_samples) / np.std(observations)
+        }
+        
+        return contaminated_result.contaminated_samples, contamination_info
     
     def _select_best_model(self, results: Dict[str, HierarchicalModelResult]) -> Optional[str]:
         """選擇最佳模型"""
@@ -610,14 +708,41 @@ def test_model_class_analyzer():
     
     print(f"\n測試數據: 均值={np.mean(test_data):.3f}, 標準差={np.std(test_data):.3f}")
     
-    # 快速分析
-    print("\n🔍 執行快速模型類別分析...")
-    result = quick_model_class_analysis(
+    # 測試基本分析
+    print("\n🔍 執行基本模型類別分析...")
+    result_basic = quick_model_class_analysis(
         test_data,
         likelihood_families=["normal", "student_t"],
         prior_scenarios=["weak_informative", "optimistic"],
         n_samples=200
     )
+    
+    # 測試ε-contamination分析
+    if HAS_EPSILON_CONTAMINATION:
+        print("\n🔬 執行 ε-contamination 模型類別分析...")
+        
+        model_spec = ModelClassSpec(
+            likelihood_families=[LikelihoodFamily.NORMAL, LikelihoodFamily.STUDENT_T],
+            prior_scenarios=[PriorScenario.WEAK_INFORMATIVE],
+            enable_epsilon_contamination=True,
+            epsilon_values=[0.05, 0.1],
+            contamination_distribution="typhoon"
+        )
+        
+        config = AnalyzerConfig(
+            mcmc_config=MCMCConfig(n_samples=150, n_warmup=75, n_chains=2)
+        )
+        
+        analyzer = ModelClassAnalyzer(model_spec, config)
+        result = analyzer.analyze_model_class(test_data)
+        
+        print(f"\n📊 ε-contamination 分析結果:")
+        print(f"   總模型數: {len(result.individual_results)}")
+        contamination_models = [name for name in result.individual_results.keys() if 'epsilon' in name]
+        print(f"   污染模型數: {len(contamination_models)}")
+        
+    else:
+        result = result_basic
     
     # 顯示結果
     print(f"\n📊 分析結果:")

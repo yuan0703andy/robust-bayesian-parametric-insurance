@@ -17,6 +17,8 @@ Supporting Modules:
 ==================
 - spatial_effects.py - 空間效應模組 (醫院脆弱度的空間相關性建模)
 - density_ratio_theory.py - 密度比理論框架 (Γ = {P : dP/dP₀ ≤ γ(x)})
+- epsilon_contamination.py - ε-污染理論框架 (π(θ) = (1-ε)π₀(θ) + εq(θ))
+- posterior_predictive_checks.py - 後驗預測檢查 (PPC)
 - climada_uncertainty_quantification.py - CLIMADA不確定性量化
 - mcmc_environment_config.py - MCMC環境配置
 - basis_risk_weight_sensitivity.py - 基差風險權重敏感性分析
@@ -62,6 +64,14 @@ from .posterior_mixture_approximation import (
     MPEConfig,
     fit_gaussian_mixture,
     sample_from_gaussian_mixture
+)
+
+# 1a. Posterior Predictive Checks (後驗預測檢查) - NEW
+from .posterior_predictive_checks import (
+    PPCValidator,
+    PPCComparator,
+    quick_ppc,
+    compare_distributions
 )
 
 # 2. Parametric Bayesian Hierarchy (參數化階層貝氏模型)
@@ -123,6 +133,17 @@ from .density_ratio_theory import (
     ModelComparisonResult
 )
 
+# ε-Contamination Theory (ε-污染理論框架) - NEW
+from .epsilon_contamination import (
+    EpsilonContaminationClass,
+    EpsilonContaminationSpec,
+    ContaminationEstimateResult,
+    ContaminationDistributionClass,
+    create_typhoon_contamination_spec,
+    quick_contamination_analysis,
+    demonstrate_dual_process_nature
+)
+
 # CLIMADA Uncertainty Quantification (CLIMADA不確定性量化)
 from .climada_uncertainty_quantification import (
     ProbabilisticLossDistributionGenerator,
@@ -143,6 +164,7 @@ from .basis_risk_weight_sensitivity import (
 __all__ = [
     # === 5個核心獨立模組 ===
     'MixedPredictiveEstimation',              # 混合預測估計
+    'PPCValidator', 'PPCComparator',          # 後驗預測檢查
     'ParametricHierarchicalModel',            # 參數化階層模型
     'ModelClassAnalyzer',                     # 模型集合分析器
     'RobustCredibleIntervalCalculator',       # 穩健可信區間
@@ -157,11 +179,13 @@ __all__ = [
     'IntervalResult', 'DecisionResult', 'GammaMinimaxResult',
     
     # === 便利函數 ===
-    'fit_gaussian_mixture', 'create_model_spec', 'quick_fit',
+    'fit_gaussian_mixture', 'quick_ppc', 'compare_distributions',
+    'create_model_spec', 'quick_fit',
     'quick_model_class_analysis', 'compute_robust_credible_interval',
     
     # === 理論基礎 ===
     'RobustBayesianFramework', 'DensityRatioClass',
+    'EpsilonContaminationClass', 'quick_contamination_analysis',
     
     # === 支持組件 ===
     'ProbabilisticLossDistributionGenerator',

@@ -44,7 +44,7 @@ print("✅ Basic imports completed")
 # %%
 # Import Updated Bayesian Framework 匯入更新的貝氏框架
 try:
-    from bayesian.parametric_bayesian_hierarchy import (
+    from bayesian import (
         ParametricHierarchicalModel,               # Spatial hierarchical model 空間階層模型
         ModelSpec,                                 # Model specification 模型規格
         MCMCConfig,                               # MCMC configuration MCMC配置
@@ -52,10 +52,13 @@ try:
         LikelihoodFamily,                         # Likelihood families 概似函數家族
         PriorScenario,                           # Prior scenarios 事前情境
         VulnerabilityFunctionType,               # Vulnerability function types 脆弱度函數類型
-        HierarchicalModelResult                   # Results structure 結果結構
+        HierarchicalModelResult,                  # Results structure 結果結構
+        PPCValidator,                             # Posterior Predictive Checks 後驗預測檢查
+        quick_ppc                                 # Quick PPC function 快速PPC函數
     )
     print("✅ Updated spatial hierarchical Bayesian framework imported successfully")
     print("   Includes PyMC 5.25.1 compatible implementation with pytensor.tensor")
+    print("✅ Posterior Predictive Checks (PPC) module imported successfully")
     
     # Import skill scores integration 匯入技能分數整合
     from skill_scores.basis_risk_functions import (
@@ -67,6 +70,52 @@ except ImportError as e:
     print(f"❌ Import failed: {e}")
     print("Please check bayesian module installation and PyMC compatibility")
 
+
+# %%
+# High-Performance Environment Setup 高性能環境設置
+print("🚀 High-Performance Environment Setup 高性能環境設置...")
+
+# Configure optimized environment for 16-core CPU + 2x RTX2050
+import os
+import torch
+
+def configure_high_performance_environment():
+    """配置16核CPU + 2張RTX2050的高性能環境"""
+    
+    print("🖥️ Configuring 16-core CPU + 2x RTX2050 optimization...")
+    
+    # CPU優化設置
+    os.environ['OMP_NUM_THREADS'] = '16'          # OpenMP使用16線程
+    os.environ['MKL_NUM_THREADS'] = '16'          # Intel MKL使用16線程  
+    os.environ['OPENBLAS_NUM_THREADS'] = '16'     # OpenBLAS使用16線程
+    os.environ['MKL_THREADING_LAYER'] = 'GNU'     # 避免線程衝突
+    
+    # GPU優化設置
+    if torch.cuda.is_available():
+        gpu_count = torch.cuda.device_count()
+        print(f"   ✅ Found {gpu_count} CUDA GPUs")
+        
+        for i in range(gpu_count):
+            gpu_name = torch.cuda.get_device_name(i)
+            print(f"   • GPU {i}: {gpu_name}")
+        
+        # 使用兩張GPU
+        os.environ['CUDA_VISIBLE_DEVICES'] = '0,1'
+        os.environ['JAX_PLATFORM_NAME'] = 'gpu'
+        os.environ['XLA_PYTHON_CLIENT_PREALLOCATE'] = 'false'  # 避免預分配
+        
+        print(f"   ✅ GPU optimization enabled")
+    else:
+        print(f"   ⚠️ CUDA not available, using CPU-only")
+        os.environ['JAX_PLATFORM_NAME'] = 'cpu'
+    
+    # PyTensor優化設置
+    os.environ['PYTENSOR_FLAGS'] = 'mode=FAST_RUN,optimizer=fast_run,floatX=float32,allow_gc=True'
+    
+    print(f"   ✅ High-performance environment configured")
+
+# 執行環境配置
+configure_high_performance_environment()
 
 # %%
 # PyMC and Dependency Validation PyMC與依賴驗證
@@ -220,17 +269,57 @@ print("-" * 50)
 # Define default configuration
 def get_default_config():
     """Default configuration for robust Bayesian analysis"""
-    return {
-        'density_ratio_constraint': 2.0,
-        'n_monte_carlo_samples': 500,
-        'n_mixture_components': 3,
-        'hazard_uncertainty_std': 0.15,
-        'exposure_uncertainty_log_std': 0.20,
-        'vulnerability_uncertainty_std': 0.10,
-        'mcmc_samples': 2000,
-        'mcmc_warmup': 1000,
-        'mcmc_chains': 2
-    }
+    import torch
+    
+    # 檢測硬體能力
+    cpu_cores = 16  # 您的16核CPU
+    has_gpu = torch.cuda.is_available()
+    gpu_count = torch.cuda.device_count() if has_gpu else 0
+    
+    # 根據硬體優化配置
+    if has_gpu and gpu_count >= 2:
+        # 高性能配置：16核CPU + 2張RTX2050
+        config = {
+            'density_ratio_constraint': 2.0,
+            'n_monte_carlo_samples': 1000,      # 增加樣本數
+            'n_mixture_components': 5,          # 更複雜的混合模型
+            'hazard_uncertainty_std': 0.15,
+            'exposure_uncertainty_log_std': 0.20,
+            'vulnerability_uncertainty_std': 0.10,
+            'mcmc_samples': 4000,               # 增加MCMC樣本
+            'mcmc_warmup': 2000,                # 增加預熱樣本
+            'mcmc_chains': 8,                   # 8條鏈並行
+            'mcmc_cores': 16,                   # 使用全部16核
+            'target_accept': 0.95,              # 高接受率
+            'max_treedepth': 12,                # 增加樹深度
+            'use_gpu': True,
+            'optimization_level': 'high_performance'
+        }
+        print("🚀 High-Performance Configuration Detected:")
+        print(f"   • 16-core CPU + {gpu_count} GPUs")
+        print(f"   • MCMC chains: {config['mcmc_chains']}")
+        print(f"   • MCMC samples: {config['mcmc_samples']}")
+    else:
+        # 標準配置
+        config = {
+            'density_ratio_constraint': 2.0,
+            'n_monte_carlo_samples': 500,
+            'n_mixture_components': 3,
+            'hazard_uncertainty_std': 0.15,
+            'exposure_uncertainty_log_std': 0.20,
+            'vulnerability_uncertainty_std': 0.10,
+            'mcmc_samples': 2000,
+            'mcmc_warmup': 1000,
+            'mcmc_chains': 2,
+            'mcmc_cores': 4,
+            'use_gpu': False,
+            'optimization_level': 'standard'
+        }
+        print("📊 Standard Configuration:")
+        print(f"   • MCMC chains: {config['mcmc_chains']}")
+        print(f"   • MCMC samples: {config['mcmc_samples']}")
+    
+    return config
 
 # Get default configuration
 config = get_default_config()
@@ -271,11 +360,42 @@ except ImportError as e:
 
 # Main spatial hierarchical analyzer 主空間階層分析器
 print("📊 Initializing ParametricHierarchicalModel...")
-model_spec = ModelSpec(
-    likelihood_family='normal',
-    prior_scenario='weak_informative'
-)
-hierarchical_model = ParametricHierarchicalModel(model_spec)
+
+# 根據硬體配置選擇模型規格
+if config.get('optimization_level') == 'high_performance':
+    print("   🚀 Using high-performance model specification")
+    model_spec = ModelSpec(
+        likelihood_family='normal',
+        prior_scenario='weak_informative'
+    )
+    
+    # 高性能MCMC配置
+    mcmc_config = MCMCConfig(
+        n_samples=config['mcmc_samples'],        # 4000 samples
+        n_warmup=config['mcmc_warmup'],          # 2000 warmup
+        n_chains=config['mcmc_chains'],          # 8 chains
+        target_accept=config['target_accept'],    # 0.95
+        max_treedepth=config['max_treedepth']    # 12
+    )
+    
+    print(f"   • MCMC samples: {config['mcmc_samples']}")
+    print(f"   • MCMC chains: {config['mcmc_chains']} (parallel on {config['mcmc_cores']} cores)")
+    print(f"   • Target accept: {config['target_accept']}")
+    print(f"   • Max treedepth: {config['max_treedepth']}")
+    
+else:
+    print("   📊 Using standard model specification")
+    model_spec = ModelSpec(
+        likelihood_family='normal',
+        prior_scenario='weak_informative'
+    )
+    mcmc_config = MCMCConfig(
+        n_samples=config['mcmc_samples'],
+        n_warmup=config['mcmc_warmup'],
+        n_chains=config['mcmc_chains']
+    )
+
+hierarchical_model = ParametricHierarchicalModel(model_spec, mcmc_config)
 print("   ✅ Spatial hierarchical Bayesian model initialized")
 print("   • Model structure: β_i = α_r(i) + δ_i + γ_i")
 
@@ -359,7 +479,51 @@ try:
     
     # Fit the hierarchical model with observed losses
     print("🏗️ Fitting hierarchical model to observed losses...")
-    hierarchical_results = hierarchical_model.fit(observed_losses)
+    
+    # Check if we have complete CLIMADA objects for full vulnerability modeling
+    if ('tc_hazard' in climada_data and 'exposure_main' in climada_data 
+        and 'impact_func_set' in climada_data):
+        print("   🌪️ Using complete CLIMADA objects for vulnerability modeling")
+        
+        # Import VulnerabilityData for full modeling
+        from bayesian import VulnerabilityData, VulnerabilityFunctionType
+        
+        # Extract hazard intensities (wind speeds at exposure points)
+        tc_hazard = climada_data['tc_hazard']
+        exposure_main = climada_data['exposure_main']
+        
+        # Create hazard intensity array - use wind indices as proxy
+        hazard_intensities = wind_indices[:len(observed_losses)]
+        
+        # Extract exposure values
+        if hasattr(exposure_main, 'gdf') and 'value' in exposure_main.gdf.columns:
+            # Use actual exposure values
+            exposure_values = exposure_main.gdf['value'].values[:len(observed_losses)]
+        else:
+            # Use synthetic exposure values based on loss data
+            exposure_values = np.ones(len(observed_losses)) * 1e8  # $100M base exposure
+        
+        # Create VulnerabilityData object for complete modeling
+        vulnerability_data = VulnerabilityData(
+            hazard_intensities=hazard_intensities,
+            exposure_values=exposure_values,
+            observed_losses=observed_losses,
+            event_ids=np.arange(len(observed_losses)),
+            vulnerability_type=VulnerabilityFunctionType.EMANUEL_USA
+        )
+        
+        print(f"   • Hazard intensities: {len(hazard_intensities)} values")
+        print(f"   • Exposure values: {len(exposure_values)} points") 
+        print(f"   • Observed losses: {len(observed_losses)} events")
+        print(f"   • Using Emanuel USA vulnerability function")
+        
+        # Fit with complete vulnerability data
+        hierarchical_results = hierarchical_model.fit(vulnerability_data)
+        
+    else:
+        print("   ⚠️ Using traditional observed data mode (CLIMADA objects not available)")
+        # Fallback to traditional mode
+        hierarchical_results = hierarchical_model.fit(observed_losses)
     
     print("✅ Spatial hierarchical Bayesian analysis completed")
     
