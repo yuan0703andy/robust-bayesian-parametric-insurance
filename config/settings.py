@@ -45,3 +45,10 @@ IMPACT_FUNC_PARAMS = {
     'impf_id': 1,
     'intensity_unit': 'm/s'
 }
+
+# Exposure parameters
+EXPOSURE_PARAMS = {
+    'res_arcsec': 300,  # Resolution in arc seconds (5 arcmin)
+    'total_value': 200000000,  # Total exposure value in USD
+    'reference_year': 2020
+}

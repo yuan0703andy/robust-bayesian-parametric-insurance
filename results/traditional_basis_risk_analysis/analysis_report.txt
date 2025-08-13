@@ -1,0 +1,23 @@
+Traditional Basis Risk Analysis Report
+========================================
+Analysis Date: 2025-08-13 21:16:59
+Products Analyzed: 70
+Events Analyzed: 328
+Hospital-Based Configuration:
+  - Hospitals: 20
+  - Base Value per Hospital: $10,000,000
+  - Total Exposure: $200,000,000
+
+Basis Risk Definitions Used:
+1. Absolute Basis Risk: |Actual_Loss - Payout|
+2. Asymmetric Basis Risk: max(0, Actual_Loss - Payout)
+3. Weighted Asymmetric: 2.0*undercomp + 0.5*overcomp
+4. RMSE Risk: sqrt(mean((Actual_Loss - Payout)²))
+
+Key Findings:
+- Best Absolute Risk: S004_R30_max_L100 (Value: 307710813.778722)
+- Best Asymmetric Risk: S004_R30_max_L100 (Value: 307710813.778722)
+- Best Weighted Risk: S004_R30_max_L100 (Value: 615421627.557445)
+- Best Rmse Risk: S004_R30_max_L100 (Value: 1758770244.263901)
+- Best Relative Absolute Risk: S004_R30_max_L100 (Value: 0.194789)
+- Best Relative Weighted Risk: S004_R30_max_L100 (Value: 644208.774639)
