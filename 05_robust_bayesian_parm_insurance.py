@@ -604,10 +604,13 @@ for model_name in candidate_models:
             ensemble = np.random.normal(mean_pred, mean_pred * 0.2, 100)
             predictions.append(ensemble)
     
+    # Import the calculate_crps function directly
+    from skill_scores.crps_score import calculate_crps
+    
     # Calculate skill scores for this model
     crps_scores = []
     for observation, forecast_ensemble in zip(valid_losses, predictions):
-        crps = skill_evaluator.calculate_crps(observation, forecast_ensemble)
+        crps = calculate_crps(observation, forecast_ensemble)
         crps_scores.append(crps)
     
     avg_crps = np.mean(crps_scores)
