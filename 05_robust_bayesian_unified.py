@@ -117,7 +117,6 @@ from insurance_analysis_refactored.core import (
     InsuranceProductManager,
     
     # Premium and market analysis
-    TechnicalPremiumCalculator,
     MarketAcceptabilityAnalyzer,
     MultiObjectiveOptimizer,
     
@@ -137,6 +136,11 @@ from insurance_analysis_refactored.core.enhanced_spatial_analysis import Enhance
 from insurance_analysis_refactored.core.saffir_simpson_products import (
     generate_steinmann_2023_products,
     validate_steinmann_compatibility
+)
+
+from insurance_analysis_refactored.core.technical_premium_calculator import (
+    TechnicalPremiumCalculator,
+    TechnicalPremiumConfig
 )
 
 # Bayesian Uncertainty Framework
@@ -189,6 +193,48 @@ for key, filepath in data_files.items():
             print(f"   ⚠️ {key.capitalize()} data not found: {file_path}")
     except Exception as e:
         print(f"   ❌ Error loading {key}: {e}")
+
+# %%
+# ============================================================================
+# HELPER FUNCTIONS FOR UNIFIED ANALYSIS
+# ============================================================================
+
+def calculate_step_payouts(product, parametric_indices):
+    """
+    Calculate payouts using step function logic
+    計算階梯式賠付
+    """
+    payouts = np.zeros(len(parametric_indices))
+    
+    for i, index_value in enumerate(parametric_indices):
+        # Step function payout logic
+        for j, threshold in enumerate(product.thresholds):
+            if index_value >= threshold:
+                # Use payout ratio * max_payout as actual payout amount
+                payouts[i] = product.payouts[j] * product.max_payout
+    
+    return payouts
+
+def convert_payout_structure_to_parametric_product(payout_structure):
+    """
+    Convert PayoutStructure to ParametricProduct for compatibility
+    轉換賠付結構為參數型產品
+    """
+    from insurance_analysis_refactored.core import ParametricProduct, ParametricIndexType, PayoutFunctionType
+    
+    # Convert payout ratios to actual amounts
+    payout_amounts = [ratio * payout_structure.max_payout for ratio in payout_structure.payouts]
+    
+    return ParametricProduct(
+        product_id=payout_structure.product_id,
+        name=f"Unified Product {payout_structure.product_id}",
+        description=f"{payout_structure.structure_type} threshold product",
+        index_type=ParametricIndexType.CAT_IN_CIRCLE,
+        payout_function_type=PayoutFunctionType.STEP,
+        trigger_thresholds=payout_structure.thresholds,
+        payout_amounts=payout_amounts,
+        max_payout=payout_structure.max_payout
+    )
 
 # %%
 # ============================================================================
@@ -267,7 +313,7 @@ def run_unified_analysis():
     # Evaluate all products
     skill_results = {}
     for product in products[:10] if args.quick_test else products:
-        payouts = engine.calculate_payouts(product, parametric_indices)
+        payouts = calculate_step_payouts(product, parametric_indices)
         scores = evaluator.evaluate_all_skills(payouts, observed_losses)
         skill_results[product.product_id] = scores
     
@@ -345,7 +391,9 @@ def run_unified_analysis():
     # ========================================================================
     print("\n💰 Step 5: Technical Premium Optimization")
     
-    premium_calculator = TechnicalPremiumCalculator()
+    # Create config and calculator
+    premium_config = TechnicalPremiumConfig()
+    premium_calculator = TechnicalPremiumCalculator(premium_config)
     
     # Calculate premiums for top products
     premium_results = {}
@@ -357,12 +405,13 @@ def run_unified_analysis():
     for product_id, _ in top_products:
         product = next((p for p in products if p.product_id == product_id), None)
         if product:
-            premium = premium_calculator.calculate_technical_premium(
-                product=product,
-                historical_losses=observed_losses,
-                confidence_level=0.95
+            # Convert PayoutStructure to ParametricProduct for technical calculator
+            product_params = convert_payout_structure_to_parametric_product(product)
+            premium_result = premium_calculator.calculate_technical_premium(
+                product_params=product_params,
+                hazard_indices=parametric_indices
             )
-            premium_results[product_id] = premium
+            premium_results[product_id] = premium_result.technical_premium
     
     results.technical_premiums = premium_results
     print(f"   ✅ Calculated premiums for {len(premium_results)} products")

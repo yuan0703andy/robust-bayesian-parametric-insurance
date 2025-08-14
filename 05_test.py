@@ -116,7 +116,11 @@ print("\n📦 Loading framework components...")
 from insurance_analysis_refactored.core import (
     ParametricInsuranceEngine,
     SkillScoreEvaluator,
+)
+
+from insurance_analysis_refactored.core.technical_premium_calculator import (
     TechnicalPremiumCalculator,
+    TechnicalPremiumConfig
 )
 
 from insurance_analysis_refactored.core.saffir_simpson_products import (
@@ -179,6 +183,48 @@ else:
 print(f"   Data shape: {len(observed_losses)} years")
 print(f"   Loss range: ${np.min(observed_losses)/1e6:.1f}M - ${np.max(observed_losses)/1e6:.1f}M")
 print(f"   Wind range: {np.min(parametric_indices):.1f} - {np.max(parametric_indices):.1f} m/s")
+
+# %%
+# ============================================================================
+# HELPER FUNCTIONS FOR TESTING
+# ============================================================================
+
+def calculate_step_payouts(product, parametric_indices):
+    """
+    Calculate payouts using step function logic
+    計算階梯式賠付
+    """
+    payouts = np.zeros(len(parametric_indices))
+    
+    for i, index_value in enumerate(parametric_indices):
+        # Step function payout logic
+        for j, threshold in enumerate(product.thresholds):
+            if index_value >= threshold:
+                # Use payout ratio * max_payout as actual payout amount
+                payouts[i] = product.payouts[j] * product.max_payout
+    
+    return payouts
+
+def convert_payout_structure_to_parametric_product(payout_structure):
+    """
+    Convert PayoutStructure to ParametricProduct for compatibility
+    轉換賠付結構為參數型產品
+    """
+    from insurance_analysis_refactored.core import ParametricProduct, ParametricIndexType, PayoutFunctionType
+    
+    # Convert payout ratios to actual amounts
+    payout_amounts = [ratio * payout_structure.max_payout for ratio in payout_structure.payouts]
+    
+    return ParametricProduct(
+        product_id=payout_structure.product_id,
+        name=f"Test Product {payout_structure.product_id}",
+        description=f"{payout_structure.structure_type} threshold product",
+        index_type=ParametricIndexType.CAT_IN_CIRCLE,
+        payout_function_type=PayoutFunctionType.STEP,
+        trigger_thresholds=payout_structure.thresholds,
+        payout_amounts=payout_amounts,
+        max_payout=payout_structure.max_payout
+    )
 
 # %%
 # ============================================================================
@@ -259,7 +305,8 @@ def run_test_analysis() -> TestResults:
             if i % 50 == 0:  # Progress indicator
                 print(f"   Progress: {i}/{len(products)} products evaluated")
                 
-            payouts = engine.calculate_payouts(product, parametric_indices)
+            # Calculate payouts using step function
+            payouts = calculate_step_payouts(product, parametric_indices)
             scores = evaluator.evaluate_all_skills(
                 payouts, 
                 observed_losses,
@@ -372,17 +419,20 @@ def run_test_analysis() -> TestResults:
     print("\n🧪 Test 5: Technical Premium Calculation")
     
     try:
-        premium_calculator = TechnicalPremiumCalculator()
+        # Create config and calculator
+        premium_config = TechnicalPremiumConfig()
+        premium_calculator = TechnicalPremiumCalculator(premium_config)
         
         # Only calculate for top 5 products
         premium_count = 0
         for product_info in results.top_products[:5]:
             product = next((p for p in products if p.product_id == product_info['id']), None)
             if product:
-                premium = premium_calculator.calculate_technical_premium(
-                    product=product,
-                    historical_losses=observed_losses,
-                    confidence_level=0.95
+                # Convert PayoutStructure to ParametricProduct for technical calculator
+                product_params = convert_payout_structure_to_parametric_product(product)
+                premium_result = premium_calculator.calculate_technical_premium(
+                    product_params=product_params,
+                    hazard_indices=parametric_indices
                 )
                 premium_count += 1
         
