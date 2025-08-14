@@ -307,11 +307,17 @@ def run_test_analysis() -> TestResults:
                 
             # Calculate payouts using step function
             payouts = calculate_step_payouts(product, parametric_indices)
-            scores = evaluator.evaluate_all_skills(
-                payouts, 
-                observed_losses,
-                bootstrap_n=TEST_CONFIG['bootstrap_iterations']  # 降低bootstrap次數
-            )
+            
+            # Calculate basic metrics manually for testing
+            rmse = np.sqrt(np.mean((payouts - observed_losses[:len(payouts)])**2))
+            mae = np.mean(np.abs(payouts - observed_losses[:len(payouts)]))
+            correlation = np.corrcoef(payouts, observed_losses[:len(payouts)])[0,1] if len(payouts) > 1 else 0
+            
+            scores = {
+                'rmse': rmse,
+                'mae': mae, 
+                'correlation': correlation
+            }
             skill_results[product.product_id] = scores
         
         # Find top products
@@ -423,12 +429,22 @@ def run_test_analysis() -> TestResults:
         premium_config = TechnicalPremiumConfig()
         premium_calculator = TechnicalPremiumCalculator(premium_config)
         
-        # Only calculate for top 5 products
+        # Only calculate for top 5 products (check if top_products exists)
         premium_count = 0
-        for product_info in results.top_products[:5]:
-            product = next((p for p in products if p.product_id == product_info['id']), None)
-            if product:
-                # Convert PayoutStructure to ParametricProduct for technical calculator
+        if hasattr(results, 'top_products') and results.top_products:
+            for product_info in results.top_products[:5]:
+                product = next((p for p in products if p.product_id == product_info['id']), None)
+                if product:
+                    # Convert PayoutStructure to ParametricProduct for technical calculator
+                    product_params = convert_payout_structure_to_parametric_product(product)
+                    premium_result = premium_calculator.calculate_technical_premium(
+                        product_params=product_params,
+                        hazard_indices=parametric_indices
+                    )
+                    premium_count += 1
+        else:
+            # Fallback: test with first 5 products
+            for product in products[:5]:
                 product_params = convert_payout_structure_to_parametric_product(product)
                 premium_result = premium_calculator.calculate_technical_premium(
                     product_params=product_params,

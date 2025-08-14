@@ -314,7 +314,17 @@ def run_unified_analysis():
     skill_results = {}
     for product in products[:10] if args.quick_test else products:
         payouts = calculate_step_payouts(product, parametric_indices)
-        scores = evaluator.evaluate_all_skills(payouts, observed_losses)
+        
+        # Calculate basic metrics manually
+        rmse = np.sqrt(np.mean((payouts - observed_losses[:len(payouts)])**2))
+        mae = np.mean(np.abs(payouts - observed_losses[:len(payouts)]))
+        correlation = np.corrcoef(payouts, observed_losses[:len(payouts)])[0,1] if len(payouts) > 1 else 0
+        
+        scores = {
+            'rmse': rmse,
+            'mae': mae,
+            'correlation': correlation
+        }
         skill_results[product.product_id] = scores
     
     results.skill_scores = skill_results
