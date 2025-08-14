@@ -466,20 +466,26 @@ def save_results(results: UnifiedAnalysisResults):
 
 # %%
 # ============================================================================
-# MAIN EXECUTION
+# MAIN EXECUTION - Jupyter Cell Style
 # ============================================================================
-if __name__ == "__main__":
-    try:
-        # Run unified analysis
-        analysis_results = run_unified_analysis()
-        
-        # Save results
-        save_results(analysis_results)
-        
-        print("\n🎉 Analysis completed successfully!")
-        
-    except Exception as e:
-        print(f"\n❌ Analysis failed: {e}")
-        import traceback
-        traceback.print_exc()
-        sys.exit(1)
+
+print("🚀 Starting unified robust Bayesian analysis...")
+
+try:
+    # Run unified analysis
+    analysis_results = run_unified_analysis()
+    
+    # Save results
+    save_results(analysis_results)
+    
+    print("\n🎉 Analysis completed successfully!")
+    print("📊 Results summary:")
+    print(f"   • Hardware: {analysis_results.hardware_config}")
+    print(f"   • MCMC samples: {analysis_results.mcmc_samples:,}")
+    print(f"   • Products analyzed: {len(analysis_results.skill_scores)}")
+    print(f"   • Execution time: {analysis_results.execution_time:.1f}s")
+    
+except Exception as e:
+    print(f"\n❌ Analysis failed: {e}")
+    import traceback
+    traceback.print_exc()

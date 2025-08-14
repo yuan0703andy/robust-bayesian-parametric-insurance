@@ -447,47 +447,52 @@ def run_test_analysis() -> TestResults:
 # ============================================================================
 # MAIN EXECUTION
 # ============================================================================
-if __name__ == "__main__":
-    print("\n🏁 Starting validation test...")
+# %%
+# ============================================================================
+# MAIN TEST EXECUTION - Jupyter Cell Style  
+# ============================================================================
+
+print("\n🏁 Starting validation test...")
+
+try:
+    # Run test analysis
+    test_results = run_test_analysis()
     
-    try:
-        # Run test analysis
-        test_results = run_test_analysis()
+    # Save test results
+    output_dir = Path("results/test_validation")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Save summary
+    with open(output_dir / f"test_results_{hardware_level}.pkl", 'wb') as f:
+        pickle.dump(test_results, f)
+    
+    # Create summary report
+    summary = {
+        'hardware': test_results.hardware,
+        'execution_time': test_results.execution_time,
+        'products_tested': test_results.products_count,
+        'mcmc_samples': test_results.total_samples,
+        'all_tests_passed': all([
+            test_results.skill_scores_valid,
+            test_results.bayesian_converged,
+            test_results.contamination_valid,
+            test_results.premiums_valid
+        ]),
+        'gpu_speedup': test_results.gpu_speedup
+    }
+    
+    import json
+    with open(output_dir / f"test_summary_{hardware_level}.json", 'w') as f:
+        json.dump(summary, f, indent=2)
+    
+    print(f"\n💾 Test results saved to {output_dir}")
+    
+    if summary['all_tests_passed']:
+        print("✅ ALL TESTS PASSED - Ready for production!")
+    else:
+        print("⚠️ Some tests failed - Check error log")
         
-        # Save test results
-        output_dir = Path("results/test_validation")
-        output_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Save summary
-        with open(output_dir / f"test_results_{hardware_level}.pkl", 'wb') as f:
-            pickle.dump(test_results, f)
-        
-        # Create summary report
-        summary = {
-            'hardware': test_results.hardware,
-            'execution_time': test_results.execution_time,
-            'products_tested': test_results.products_count,
-            'mcmc_samples': test_results.total_samples,
-            'all_tests_passed': all([
-                test_results.skill_scores_valid,
-                test_results.bayesian_converged,
-                test_results.contamination_valid,
-                test_results.premiums_valid
-            ]),
-            'gpu_speedup': test_results.gpu_speedup
-        }
-        
-        import json
-        with open(output_dir / f"test_summary_{hardware_level}.json", 'w') as f:
-            json.dump(summary, f, indent=2)
-        
-        print(f"\n💾 Test results saved to {output_dir}")
-        
-        # Exit code based on test results
-        sys.exit(0 if summary['all_tests_passed'] else 1)
-        
-    except Exception as e:
-        print(f"\n❌ Test failed with error: {e}")
-        import traceback
-        traceback.print_exc()
-        sys.exit(2)
+except Exception as e:
+    print(f"\n❌ Test failed with error: {e}")
+    import traceback
+    traceback.print_exc()
