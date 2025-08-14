@@ -242,7 +242,7 @@ def run_unified_analysis():
         print(f"   Using {len(products)} loaded products")
     else:
         print("   Generating Steinmann 2023 products...")
-        products = generate_steinmann_2023_products()
+        products, summary = generate_steinmann_2023_products()
         print(f"   Generated {len(products)} products")
     
     # ========================================================================

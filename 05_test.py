@@ -229,7 +229,7 @@ def run_test_analysis() -> TestResults:
     
     try:
         # Generate ALL products as defined in framework
-        products = generate_steinmann_2023_products()
+        products, summary = generate_steinmann_2023_products()
         results.products_count = len(products)
         print(f"   ✅ Generated {len(products)} products (full set)")
         
