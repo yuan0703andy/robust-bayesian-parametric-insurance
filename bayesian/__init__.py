@@ -157,6 +157,23 @@ from .basis_risk_weight_sensitivity import (
     WeightSensitivityAnalyzer,
 )
 
+# GPU Setup (GPU設置) - NEW
+try:
+    from .gpu_setup import (
+        GPUConfig,
+        setup_gpu_environment,
+        get_optimized_mcmc_config,
+        DualGPU_MCMC_Optimizer
+    )
+    HAS_GPU_SETUP = True
+except ImportError as e:
+    HAS_GPU_SETUP = False
+    # Silently continue without GPU setup
+    GPUConfig = None
+    setup_gpu_environment = None
+    get_optimized_mcmc_config = None
+    DualGPU_MCMC_Optimizer = None
+
 # =============================================================================
 # Public API (5個核心獨立模組)
 # =============================================================================
@@ -191,6 +208,10 @@ __all__ = [
     'ProbabilisticLossDistributionGenerator',
     'WeightSensitivityAnalyzer',
     'configure_pymc_environment',
+    
+    # === GPU優化 ===
+    'GPUConfig', 'setup_gpu_environment', 'get_optimized_mcmc_config',
+    'DualGPU_MCMC_Optimizer',
     
     # === 新增：空間效應組件 ===
     'SpatialEffectsAnalyzer',            # 空間效應分析器
