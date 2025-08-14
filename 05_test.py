@@ -10,14 +10,12 @@ Author: Research Team
 Date: 2025-01-14
 """
 
-import os
 import sys
 import numpy as np
-import pandas as pd
 import pickle
 import warnings
 from pathlib import Path
-from typing import Dict, List, Tuple, Optional, Any
+from typing import Dict, List
 from dataclasses import dataclass
 import time
 
@@ -57,7 +55,7 @@ hardware_level = "cpu_only"  # Default
 mcmc_kwargs = None
 
 try:
-    from bayesian.gpu_setup import GPUConfig, setup_gpu_environment
+    from bayesian.gpu_setup import setup_gpu_environment
     
     # Always try GPU if available
     gpu_config = setup_gpu_environment(enable_gpu=True)
@@ -114,39 +112,13 @@ print(f"📊 Total test samples: {total_samples:,} (reduced for quick validation
 # ============================================================================
 print("\n📦 Loading framework components...")
 
-# Configuration
-from config.settings import (
-    NC_BOUNDS, YEAR_RANGE, RESOLUTION,
-    IMPACT_FUNC_PARAMS, EXPOSURE_PARAMS
-)
-
-# Insurance Analysis Framework - COMPLETE, NO CHANGES
+# Only import what we actually use
 from insurance_analysis_refactored.core import (
-    # Core engines
     ParametricInsuranceEngine,
     SkillScoreEvaluator,
-    InsuranceProductManager,
-    
-    # Premium and market analysis
     TechnicalPremiumCalculator,
-    MarketAcceptabilityAnalyzer,
-    MultiObjectiveOptimizer,
-    
-    # Spatial analysis
-    EnhancedCatInCircleAnalyzer,
-    
-    # Input adapters
-    InputAdapter,
-    CLIMADAInputAdapter,
-    BayesianInputAdapter,
-    
-    # Product types
-    ParametricProduct,
-    PayoutFunctionType,
-    ParametricIndexType
 )
 
-# Steinmann products - FULL PRODUCT SET (不降低)
 from insurance_analysis_refactored.core.saffir_simpson_products import (
     generate_steinmann_2023_products,
     validate_steinmann_compatibility
@@ -154,22 +126,13 @@ from insurance_analysis_refactored.core.saffir_simpson_products import (
 
 # Bayesian Framework
 from bayesian import (
-    # Hierarchical models
     ParametricHierarchicalModel,
     ModelSpec,
     MCMCConfig,
     LikelihoodFamily,
     PriorScenario,
-    
-    # Robust methods
-    MixedPredictiveEstimation,
-    ModelClassAnalyzer,
-    
-    # Contamination
     EpsilonContaminationClass,
     create_typhoon_contamination_spec,
-    
-    # Environment
     configure_pymc_environment
 )
 

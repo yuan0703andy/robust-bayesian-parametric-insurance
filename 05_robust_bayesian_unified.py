@@ -121,9 +121,6 @@ from insurance_analysis_refactored.core import (
     MarketAcceptabilityAnalyzer,
     MultiObjectiveOptimizer,
     
-    # Spatial analysis
-    EnhancedCatInCircleAnalyzer,
-    
     # Input adapters for flexibility
     InputAdapter,
     CLIMADAInputAdapter,
@@ -135,7 +132,8 @@ from insurance_analysis_refactored.core import (
     ParametricIndexType
 )
 
-# Steinmann products
+# Specialized imports (not in __init__.py)
+from insurance_analysis_refactored.core.enhanced_spatial_analysis import EnhancedCatInCircleAnalyzer
 from insurance_analysis_refactored.core.saffir_simpson_products import (
     generate_steinmann_2023_products,
     validate_steinmann_compatibility
