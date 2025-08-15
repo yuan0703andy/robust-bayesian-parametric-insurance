@@ -210,13 +210,50 @@ print("=" * 80)
 
 # Extract observed losses for Bayesian analysis
 observed_losses = []
+all_losses = []
 for event_id, loss in event_losses.items():
+    all_losses.append(loss)
     if loss > 0:  # Only use non-zero losses
         observed_losses.append(loss)
 
 observed_losses = np.array(observed_losses)  # Use all non-zero losses
-print(f"🎯 Analyzing {len(observed_losses)} observed loss events...")
+all_losses = np.array(all_losses)
+
+# Check if sample size is adequate for Bayesian analysis
+n_data = len(observed_losses)
+n_models = 48  # Total models to compare
+
+print(f"\n📊 Event Loss Statistics:")
+print(f"   Total events simulated: {len(all_losses)}")
+print(f"   Non-zero loss events: {n_data} ({100*n_data/len(all_losses) if len(all_losses) > 0 else 0:.1f}%)")
+print(f"   Zero loss events: {len(all_losses) - n_data}")
+
+# Warning if sample size is too small
+if n_data < 200:
+    print(f"\n   ⚠️ WARNING: Only {n_data} non-zero events - may be insufficient for robust Bayesian analysis")
+    print(f"   💡 Recommendations:")
+    print(f"      1) Include smaller losses (e.g., loss > $100k instead of > 0)")
+    print(f"      2) Expand simulation time range or add more synthetic tracks")
+    print(f"      3) Use data augmentation techniques")
+    print(f"   📈 Rule of thumb: Need ~10-20 observations per model parameter")
+    print(f"   📈 With {n_models} models, ideally need 500+ observations")
+
+print(f"\n🎯 Analyzing {n_data} observed loss events with {n_models} competing models...")
 print(f"   Loss range: ${np.min(observed_losses)/1e6:.1f}M - ${np.max(observed_losses)/1e6:.1f}M")
+print(f"   Model comparison: Each model fits all {n_data} data points")
+
+# Assess sample size adequacy for Bayesian model comparison
+if n_data < 50:
+    print(f"   ⚠️ 樣本量過小 ({n_data} < 50) - 模型比較可能不穩定")
+    print(f"   💡 建議: 使用簡單模型或增加數據")
+elif n_data < 100:
+    print(f"   ⚠️ 樣本量偏小 ({n_data} < 100) - 適合簡單參數模型")
+    print(f"   💡 建議: 避免過度複雜的階層模型")
+elif n_data < 200:
+    print(f"   ✅ 樣本量適中 ({n_data}) - 可進行穩健的模型比較")
+    print(f"   💡 建議: 使用DIC/WAIC進行模型選擇")
+else:
+    print(f"   🎯 大樣本 ({n_data}) - 理想的統計功效和模型識別能力")
 
 # Run robust Bayesian model ensemble analysis
 print("\n🚀 Running robust Bayesian MCMC analysis...")
