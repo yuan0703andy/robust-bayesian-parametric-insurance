@@ -34,9 +34,9 @@ class DualGPU_MCMC_Optimizer:
         env_vars = {
             # JAX GPU配置
             'JAX_PLATFORMS': 'cuda,cpu',
-            'JAX_ENABLE_X64': 'True',
-            'XLA_PYTHON_CLIENT_PREALLOCATE': 'false',
-            'XLA_PYTHON_CLIENT_MEM_FRACTION': '0.8',
+            'JAX_ENABLE_X64': 'False',
+            'XLA_PYTHON_CLIENT_PREALLOCATE': 'alse',
+            'XLA_PYTHON_CLIENT_MEM_FRACTION': '0.95',
             'XLA_PYTHON_CLIENT_ALLOCATOR': 'platform',
             
             # CUDA優化
