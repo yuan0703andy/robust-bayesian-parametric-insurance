@@ -111,13 +111,13 @@ if IS_HPC:
 if IS_HPC:
     print("🚀 HPC GPU Environment Setup - Configuring for Dual RTX A5000 (24GB each)")
     
-    # Configure environment for HPC dual-GPU system
+    # Configure environment for HPC dual-GPU system - MAXIMUM PERFORMANCE
     hpc_env_vars = {
-        # JAX GPU Configuration for RTX A5000 (24GB each - optimized for speed)
+        # JAX GPU Configuration for RTX A5000 (24GB each - MAXIMIZED)
         'JAX_PLATFORMS': 'cuda,cpu',
         'JAX_ENABLE_X64': 'False',  # Use float32 for speed and memory efficiency
-        'XLA_PYTHON_CLIENT_PREALLOCATE': 'false',
-        'XLA_PYTHON_CLIENT_MEM_FRACTION': '0.75',  # Reduced for float32 efficiency
+        'XLA_PYTHON_CLIENT_PREALLOCATE': 'true',   # 預分配記憶體
+        'XLA_PYTHON_CLIENT_MEM_FRACTION': '0.9',   # 使用90% GPU記憶體
         'XLA_PYTHON_CLIENT_ALLOCATOR': 'platform',
         'JAX_PLATFORM_NAME': 'gpu',
         
@@ -125,11 +125,11 @@ if IS_HPC:
         'CUDA_VISIBLE_DEVICES': '0,1',  # Use both A5000 GPUs
         'CUDA_DEVICE_ORDER': 'PCI_BUS_ID',
         
-        # CPU Threading Control (conservative for stability)
-        'OMP_NUM_THREADS': '8',     # Reduced to prevent overload
-        'MKL_NUM_THREADS': '8',
-        'OPENBLAS_NUM_THREADS': '8', 
-        'NUMBA_NUM_THREADS': '8',
+        # CPU Threading Control (MAXIMIZED for dual-GPU)
+        'OMP_NUM_THREADS': '16',    # 增加線程數
+        'MKL_NUM_THREADS': '16',
+        'OPENBLAS_NUM_THREADS': '16', 
+        'NUMBA_NUM_THREADS': '16',
         
         # PyMC/ArviZ optimization + FORCE GPU
         'PYMC_COMPUTE_TEST_VALUE': 'ignore',
@@ -143,11 +143,13 @@ if IS_HPC:
         os.environ[key] = value
         print(f"   ✅ {key} = {value}")
     
-    print("\n⚡ HPC Hardware Target:")
-    print("   🖥️  CPU: 16+ cores")
-    print("   🎯 GPU: 2 × RTX A5000 (24GB each)")
-    print("   💾 Total GPU Memory: 48GB (float32 optimized)")
-    print("   🚀 Expected: 8-12x speedup with float32 speed advantage")
+    print("\n⚡ HPC Hardware Target - MAXIMUM PERFORMANCE:")
+    print("   🖥️  CPU: 16+ cores (increased threading)")
+    print("   🎯 GPU: 2 × RTX A5000 (24GB each) - 90% memory utilization")
+    print("   💾 Total GPU Memory: 43.2GB allocated (48GB × 0.9)")
+    print("   ⚡ Power Target: 400W+ total (200W per GPU)")
+    print("   🚀 Expected: 12-20x speedup with maximum parallelization")
+    print("   📊 Target GPU Usage: 90%+ on both GPUs simultaneously")
     
 else:
     print("💻 Local Development Environment Setup")
@@ -332,17 +334,19 @@ if gpu_config:
         print(f"💻 Using local GPU-optimized MCMC: {gpu_config.hardware_level}")
 else:
     if IS_HPC:
-        # HPC configuration optimized for speed testing with GPU
+        # HPC MAXIMUM GPU configuration for dual RTX A5000 (24GB each)
         mcmc_config_dict = {
-            "n_samples": 1000,      # Reduced for speed testing
-            "n_warmup": 500,        # Reduced warmup
-            "n_chains": 8,          # Reduced chains for faster testing
-            "cores": 8,             # Reduced cores
-            "target_accept": 0.85,  # Lower acceptance for speed
+            "n_samples": 3000,       # 大樣本數充分利用GPU
+            "n_warmup": 1500,        # 充足warmup
+            "n_chains": 24,          # 高並行鏈數 (每GPU 12鏈)
+            "cores": 24,             # 匹配鏈數
+            "target_accept": 0.92,   # 高精度
             "backend": "pytensor",
-            "nuts_sampler": "numpyro"  # Force NumPyro GPU sampler
+            "nuts_sampler": "numpyro",  # Force NumPyro GPU sampler
+            "chain_method": "parallel"  # 並行鏈執行
         }
-        print("🚀 Using HPC GPU-forced MCMC configuration (NumPyro backend)")
+        print("🚀 Using HPC MAXIMUM GPU configuration (dual RTX A5000 optimized)")
+        print("   🎯 Target: 90%+ GPU utilization on both GPUs")
     else:
         # Local development with ultra-conservative settings to avoid kernel crash
         mcmc_config_dict = {

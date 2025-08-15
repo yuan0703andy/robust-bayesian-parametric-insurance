@@ -651,10 +651,12 @@ class ParametricHierarchicalModel:
                 
                 # FORCE NumPyro for GPU acceleration
                 sampler_kwargs["nuts_sampler"] = "numpyro"
+                sampler_kwargs["chain_method"] = "parallel"  # 並行鏈執行
                 print(f"    🚀 FORCING NumPyro (JAX) sampler for GPU acceleration")
                 print(f"    🎯 JAX backend: {jax.default_backend()}")
                 print(f"    🎯 JAX devices: {devices}")
                 print(f"    🎯 Has GPU detected: {has_gpu}")
+                print(f"    🔗 Chain method: parallel")
                 
                 if not has_gpu:
                     print(f"    ⚠️ WARNING: Forcing NumPyro despite no GPU detection")
@@ -1083,9 +1085,11 @@ class ParametricHierarchicalModel:
                              for d in devices)
                 if has_gpu:
                     sampler_kwargs["nuts_sampler"] = "numpyro"
+                    sampler_kwargs["chain_method"] = "parallel"  # 並行鏈執行
                     print(f"    🚀 FORCING NumPyro (JAX) sampler for GPU acceleration (second call)")
                     print(f"    🎯 JAX backend: {jax.default_backend()}")
                     print(f"    🎯 JAX devices: {devices}")
+                    print(f"    🔗 Chain method: parallel")
             except ImportError:
                 print(f"    ⚠️ JAX not available, using default sampler")
             
