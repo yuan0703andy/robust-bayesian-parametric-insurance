@@ -105,6 +105,8 @@ def parse_arguments():
                        help='Enable high-performance mode for workstation/server systems')
     parser.add_argument('--robust-sampling', action='store_true',
                        help='Enable robust sampling mode for difficult convergence (slower but more stable)')
+    parser.add_argument('--balanced-mode', action='store_true',
+                       help='Enable balanced mode (good convergence + reasonable speed) - RECOMMENDED')
     parser.add_argument('--verbose', action='store_true',
                        help='Enable verbose output')
     return parser.parse_args()
@@ -230,7 +232,8 @@ def setup_cpu_environment(args, system_info):
         quick_test=args.quick_test,
         max_cores=max_cores,
         max_chains=max_chains,
-        robust_sampling=args.robust_sampling
+        robust_sampling=args.robust_sampling,
+        balanced_mode=args.balanced_mode
     )
     
     # Display sampling mode
@@ -239,6 +242,11 @@ def setup_cpu_environment(args, system_info):
         print("   • Ultra-conservative settings")
         print("   • Slower but maximum stability")
         print("   • Designed to eliminate divergences")
+    elif args.balanced_mode:
+        print("🎯 Balanced mode enabled:")
+        print("   • Good convergence + reasonable speed")
+        print("   • Recommended for most use cases")
+        print("   • Should eliminate divergences quickly")
     
     print(f"📊 CPU Configuration:")
     print(f"   Cores to use: {n_cores}/{system_info['n_cores']}")

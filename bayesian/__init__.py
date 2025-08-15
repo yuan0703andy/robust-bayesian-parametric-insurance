@@ -158,7 +158,7 @@ from .basis_risk_weight_sensitivity import (
 )
 
 # CPU Optimization Config (CPU優化配置) - UPDATED
-def get_cpu_optimized_mcmc_config(n_cores=None, quick_test=False, max_cores=None, max_chains=None, robust_sampling=False):
+def get_cpu_optimized_mcmc_config(n_cores=None, quick_test=False, max_cores=None, max_chains=None, robust_sampling=False, balanced_mode=False):
     """
     Get CPU-optimized MCMC configuration with flexible scaling
     
@@ -173,7 +173,9 @@ def get_cpu_optimized_mcmc_config(n_cores=None, quick_test=False, max_cores=None
     max_chains : int, optional
         Maximum chains to use (auto-scale if None)
     robust_sampling : bool
-        Enable robust sampling for difficult convergence
+        Enable robust sampling for difficult convergence (slow but very stable)
+    balanced_mode : bool
+        Enable balanced mode (good convergence + reasonable speed)
     """
     import multiprocessing
     total_cores = multiprocessing.cpu_count()
@@ -212,15 +214,23 @@ def get_cpu_optimized_mcmc_config(n_cores=None, quick_test=False, max_cores=None
         # Scale chains intelligently with available cores
         n_chains = min(max_chains, n_cores)
         
-        # Adjust samples based on chains and robust sampling mode
+        # Adjust samples based on mode
         if robust_sampling:
-            # 極穩健模式：更多warmup，更高接受率，更少鏈數
-            n_chains = min(4, max_chains)  # 限制鏈數提高穩定性
+            # 極穩健模式：最慢但最穩定
+            n_chains = min(4, max_chains)
             n_samples = 1500
-            n_warmup = 1000  # 大量warmup確保收斂
-            target_accept = 0.99  # 極高接受率
-            step_size = 0.05  # 非常小的步長
+            n_warmup = 1000
+            target_accept = 0.99
+            step_size = 0.05
             max_treedepth = 15
+        elif balanced_mode:
+            # 🎯 平衡模式：好的收斂性 + 合理速度
+            n_chains = min(8, max_chains)  # 允許更多鏈
+            n_samples = 600   # 減少樣本數
+            n_warmup = 300    # 中等warmup
+            target_accept = 0.92  # 高但不極端
+            step_size = 0.08  # 中等步長
+            max_treedepth = 12
         else:
             # 標準高性能模式
             if n_chains >= 8:
