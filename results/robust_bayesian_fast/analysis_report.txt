@@ -1,0 +1,29 @@
+Fast Bayesian Analysis Report
+==================================================
+
+Execution Time: 0.01 seconds
+Method: Analytical Bayesian Estimation
+
+Best Models:
+  AIC: lognormal
+  BIC: lognormal
+  DIC: lognormal
+
+Model Comparison:
+  lognormal:
+    AIC: 18526.34
+    BIC: 18534.71
+    DIC: 18524.34
+  gamma:
+    AIC: 528613455304527183872.00
+    BIC: 528613455304527183872.00
+    DIC: 528613455304527183872.00
+  weibull:
+    AIC: 18652.01
+    BIC: 18660.38
+    DIC: 18650.01
+
+Prediction Performance:
+  RMSE: $55936.9M
+  MAE: $55874.5M
+  Correlation: -0.0000
