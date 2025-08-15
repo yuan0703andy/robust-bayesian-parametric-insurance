@@ -43,8 +43,9 @@ class DualGPU_MCMC_Optimizer:
             'CUDA_VISIBLE_DEVICES': '0,1',  # 使用兩個GPU
             'CUDA_DEVICE_ORDER': 'PCI_BUS_ID',
             
-            # PyTensor GPU配置
-            'PYTENSOR_FLAGS': 'device=cuda,floatX=float32,optimizer=fast_run,allow_gc=True',
+            # PyTensor 配置 (移除已棄用的 CUDA 後端，使用 JAX 替代)
+            # 'PYTENSOR_FLAGS': 'device=cuda,floatX=float32,optimizer=fast_run,allow_gc=True',  # 舊版本已移除
+            'JAX_PLATFORM_NAME': 'gpu',  # JAX 使用 GPU
             
             # 線程控制 (重要：避免過度並行)
             'OMP_NUM_THREADS': '8',    # 限制OpenMP線程
@@ -145,13 +146,14 @@ import numpy as np
 # Environment setup (run this first)
 def setup_dual_gpu_environment():
     """Setup environment for dual-GPU MCMC"""
-    env_vars = {{
+    env_vars = {
         'JAX_PLATFORMS': 'cuda,cpu',
         'CUDA_VISIBLE_DEVICES': '0,1',
-        'PYTENSOR_FLAGS': 'device=cuda,floatX=float32,optimizer=fast_run',
+        'JAX_PLATFORM_NAME': 'gpu',
+        # 'PYTENSOR_FLAGS': 'device=cuda,floatX=float32,optimizer=fast_run',  # 舊版本已移除
         'OMP_NUM_THREADS': '8',
         'MKL_NUM_THREADS': '8',
-    }}
+    }
     
     for key, value in env_vars.items():
         os.environ[key] = value

@@ -49,7 +49,8 @@ os.environ.update({
     'CUDA_VISIBLE_DEVICES': '0,1',  # 使用雙GPU
     'XLA_PYTHON_CLIENT_PREALLOCATE': 'false',
     'XLA_PYTHON_CLIENT_MEM_FRACTION': '0.8',
-    'PYTENSOR_FLAGS': 'device=cuda,floatX=float32,optimizer=fast_run,allow_gc=True',
+    # 'PYTENSOR_FLAGS': 'device=cuda,floatX=float32,optimizer=fast_run,allow_gc=True',  # 舊版本已移除
+    'JAX_PLATFORM_NAME': 'gpu',  # 使用 JAX GPU 後端
     'OMP_NUM_THREADS': '8',         # 控制線程數
     'MKL_NUM_THREADS': '8',
     'OPENBLAS_NUM_THREADS': '8',
