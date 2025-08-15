@@ -158,7 +158,7 @@ from .basis_risk_weight_sensitivity import (
 )
 
 # CPU Optimization Config (CPU優化配置) - UPDATED
-def get_cpu_optimized_mcmc_config(n_cores=None, quick_test=False, max_cores=None, max_chains=None):
+def get_cpu_optimized_mcmc_config(n_cores=None, quick_test=False, max_cores=None, max_chains=None, robust_sampling=False):
     """
     Get CPU-optimized MCMC configuration with flexible scaling
     
@@ -172,6 +172,8 @@ def get_cpu_optimized_mcmc_config(n_cores=None, quick_test=False, max_cores=None
         Maximum cores to use (no limit if None)
     max_chains : int, optional
         Maximum chains to use (auto-scale if None)
+    robust_sampling : bool
+        Enable robust sampling for difficult convergence
     """
     import multiprocessing
     total_cores = multiprocessing.cpu_count()
@@ -197,34 +199,54 @@ def get_cpu_optimized_mcmc_config(n_cores=None, quick_test=False, max_cores=None
     if quick_test:
         return {
             "n_samples": 200,
-            "n_warmup": 100,
+            "n_warmup": 150,  # 增加warmup樣本
             "n_chains": min(2, max_chains),
             "cores": min(n_cores, 4),  # Conservative for testing
-            "target_accept": 0.80,
-            "backend": "pytensor"
+            "target_accept": 0.90,  # 提高接受率
+            "backend": "pytensor",
+            "init": "adapt_diag",
+            "max_treedepth": 10,
+            "step_size": 0.2  # 快速測試用較大步長
         }
     else:
         # Scale chains intelligently with available cores
         n_chains = min(max_chains, n_cores)
         
-        # Adjust samples based on chains (more chains = fewer samples per chain)
-        if n_chains >= 8:
-            n_samples = 800   # More chains, fewer samples per chain
-            n_warmup = 400
-        elif n_chains >= 6:
-            n_samples = 1000  # Balanced
-            n_warmup = 500
+        # Adjust samples based on chains and robust sampling mode
+        if robust_sampling:
+            # 極穩健模式：更多warmup，更高接受率，更少鏈數
+            n_chains = min(4, max_chains)  # 限制鏈數提高穩定性
+            n_samples = 1500
+            n_warmup = 1000  # 大量warmup確保收斂
+            target_accept = 0.99  # 極高接受率
+            step_size = 0.05  # 非常小的步長
+            max_treedepth = 15
         else:
-            n_samples = 1200  # Fewer chains, more samples per chain
-            n_warmup = 600
+            # 標準高性能模式
+            if n_chains >= 8:
+                n_samples = 800   # More chains, fewer samples per chain
+                n_warmup = 400
+            elif n_chains >= 6:
+                n_samples = 1000  # Balanced
+                n_warmup = 500
+            else:
+                n_samples = 1200  # Fewer chains, more samples per chain
+                n_warmup = 600
+            target_accept = 0.95
+            step_size = 0.1
+            max_treedepth = 12
         
         return {
             "n_samples": n_samples,
             "n_warmup": n_warmup,
             "n_chains": n_chains,
             "cores": n_cores,
-            "target_accept": 0.85,
-            "backend": "pytensor"
+            "target_accept": target_accept,
+            "backend": "pytensor",
+            # 增強的採樣器設置
+            "init": "adapt_diag",
+            "max_treedepth": max_treedepth,
+            "step_size": step_size
         }
 
 # =============================================================================

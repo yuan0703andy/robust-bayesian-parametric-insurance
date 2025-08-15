@@ -103,6 +103,8 @@ def parse_arguments():
                        help='Maximum MCMC chains to use (auto-scale if not specified)')
     parser.add_argument('--high-performance', action='store_true',
                        help='Enable high-performance mode for workstation/server systems')
+    parser.add_argument('--robust-sampling', action='store_true',
+                       help='Enable robust sampling mode for difficult convergence (slower but more stable)')
     parser.add_argument('--verbose', action='store_true',
                        help='Enable verbose output')
     return parser.parse_args()
@@ -227,8 +229,16 @@ def setup_cpu_environment(args, system_info):
         n_cores=n_cores, 
         quick_test=args.quick_test,
         max_cores=max_cores,
-        max_chains=max_chains
+        max_chains=max_chains,
+        robust_sampling=args.robust_sampling
     )
+    
+    # Display sampling mode
+    if args.robust_sampling:
+        print("🛡️ Robust sampling mode enabled:")
+        print("   • Ultra-conservative settings")
+        print("   • Slower but maximum stability")
+        print("   • Designed to eliminate divergences")
     
     print(f"📊 CPU Configuration:")
     print(f"   Cores to use: {n_cores}/{system_info['n_cores']}")
@@ -341,7 +351,7 @@ def run_bayesian_analysis(data, mcmc_config_dict, insurance_results, args):
         print("⚠️ Skipping Bayesian analysis (insufficient data or missing framework)")
         return None
     
-    # Create MCMC configuration
+    # Create MCMC configuration with enhanced settings
     mcmc_config = MCMCConfig(
         n_samples=mcmc_config_dict["n_samples"],
         n_warmup=mcmc_config_dict["n_warmup"],
@@ -349,6 +359,13 @@ def run_bayesian_analysis(data, mcmc_config_dict, insurance_results, args):
         cores=mcmc_config_dict["cores"],
         target_accept=mcmc_config_dict["target_accept"]
     )
+    
+    # Store additional sampler settings for PyMC
+    sampler_kwargs = {
+        "init": mcmc_config_dict.get("init", "adapt_diag"),
+        "max_treedepth": mcmc_config_dict.get("max_treedepth", 12),
+        "step_size": mcmc_config_dict.get("step_size", 0.1)
+    }
     
     # Create analyzer configuration (CPU-optimized)
     analyzer_config = AnalyzerConfig(
