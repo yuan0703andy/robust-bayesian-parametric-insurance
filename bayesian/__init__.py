@@ -157,22 +157,31 @@ from .basis_risk_weight_sensitivity import (
     WeightSensitivityAnalyzer,
 )
 
-# GPU Setup (GPU設置) - NEW
-try:
-    from .gpu_setup import (
-        GPUConfig,
-        setup_gpu_environment,
-        get_optimized_mcmc_config,
-        DualGPU_MCMC_Optimizer
-    )
-    HAS_GPU_SETUP = True
-except ImportError as e:
-    HAS_GPU_SETUP = False
-    # Silently continue without GPU setup
-    GPUConfig = None
-    setup_gpu_environment = None
-    get_optimized_mcmc_config = None
-    DualGPU_MCMC_Optimizer = None
+# CPU Optimization Config (CPU優化配置) - UPDATED
+def get_cpu_optimized_mcmc_config(n_cores=None, quick_test=False):
+    """Get CPU-optimized MCMC configuration"""
+    import multiprocessing
+    if n_cores is None:
+        n_cores = min(multiprocessing.cpu_count(), 8)  # Cap at 8 cores
+    
+    if quick_test:
+        return {
+            "n_samples": 200,
+            "n_warmup": 100,
+            "n_chains": 2,
+            "cores": min(n_cores, 2),
+            "target_accept": 0.80,
+            "backend": "pytensor"
+        }
+    else:
+        return {
+            "n_samples": 1000,
+            "n_warmup": 500,
+            "n_chains": min(4, n_cores),
+            "cores": n_cores,
+            "target_accept": 0.85,
+            "backend": "pytensor"
+        }
 
 # =============================================================================
 # Public API (5個核心獨立模組)
@@ -209,9 +218,8 @@ __all__ = [
     'WeightSensitivityAnalyzer',
     'configure_pymc_environment',
     
-    # === GPU優化 ===
-    'GPUConfig', 'setup_gpu_environment', 'get_optimized_mcmc_config',
-    'DualGPU_MCMC_Optimizer',
+    # === CPU優化 ===
+    'get_cpu_optimized_mcmc_config',
     
     # === 新增：空間效應組件 ===
     'SpatialEffectsAnalyzer',            # 空間效應分析器

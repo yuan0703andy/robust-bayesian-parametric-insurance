@@ -1,8 +1,0 @@
-{
-  "hardware": "cpu_only",
-  "execution_time": 2.483875036239624,
-  "products_tested": 70,
-  "mcmc_samples": 200,
-  "all_tests_passed": false,
-  "gpu_speedup": 1.0
-}
