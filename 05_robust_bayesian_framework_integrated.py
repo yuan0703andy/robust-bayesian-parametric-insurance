@@ -122,16 +122,20 @@ if IS_HPC:
     
     # Configure environment for HPC dual-GPU system - DUAL GPU FORCED
     hpc_env_vars = {
-        # JAX雙GPU強制配置 - 關鍵修復
+        # JAX雙GPU強制配置 - 更激進的雙GPU強制
         'JAX_PLATFORMS': 'cuda',  # 只用CUDA，移除CPU fallback
         'JAX_ENABLE_X64': 'False',
         'JAX_PLATFORM_NAME': 'gpu',
-        'XLA_FLAGS': '--xla_force_host_platform_device_count=2 --xla_gpu_force_compilation_parallelism=2',  # 強制2個設備 + 並行編譯
+        'XLA_FLAGS': '--xla_force_host_platform_device_count=2 --xla_gpu_force_compilation_parallelism=2 --xla_gpu_enable_async_all_reduce=true --xla_gpu_cuda_runtime_aware_device_assignment=true',  # 更激進的雙GPU配置
         
         # 記憶體和並行配置 - 激進使用95%記憶體
         'XLA_PYTHON_CLIENT_PREALLOCATE': 'true',
         'XLA_PYTHON_CLIENT_MEM_FRACTION': '0.95',  # 激進使用95% GPU記憶體
         'XLA_PYTHON_CLIENT_ALLOCATOR': 'platform',
+        
+        # 強制多設備並行配置
+        'JAX_ENABLE_COMPILATION_CACHE': '0',  # 禁用緩存強制重新編譯
+        'JAX_PLATFORMS_ORDER': 'cuda,cpu',   # 優先CUDA
         
         # CUDA雙GPU配置
         'CUDA_VISIBLE_DEVICES': '0,1',  # 確保兩個GPU都可見
@@ -361,9 +365,10 @@ else:
             "nuts_sampler": "numpyro",  # Force NumPyro GPU sampler
             "chain_method": "parallel", # 並行鏈執行
             
-            # 🔥 關鍵雙GPU參數 - 從fix_dual_gpu.py
+            # 🔥 關鍵雙GPU參數 - 從fix_dual_gpu.py + 強制分配
             "num_devices": 2,        # 明確指定2個設備
             "chains_per_device": 16, # 每設備16條鏈 (32/2=16)
+            "chain_device_assignment": [0] * 16 + [1] * 16,  # 明確指定鏈到設備映射
             
             # 🔥 性能參數 - 從maximize_gpu_load.py
             "return_inferencedata": True,
