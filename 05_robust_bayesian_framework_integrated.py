@@ -131,10 +131,11 @@ if IS_HPC:
         'OPENBLAS_NUM_THREADS': '8', 
         'NUMBA_NUM_THREADS': '8',
         
-        # PyMC/ArviZ optimization + GPU forcing
+        # PyMC/ArviZ optimization + FORCE GPU
         'PYMC_COMPUTE_TEST_VALUE': 'ignore',
         'PYTENSOR_OPTIMIZER_VERBOSE': '0',
-        'PYTENSOR_FLAGS': 'device=cuda,floatX=float32,optimizer=fast_run',
+        'PYTENSOR_FLAGS': 'device=cuda,floatX=float32,optimizer=fast_run,force_device=True',
+        'THEANO_FLAGS': 'device=cuda,floatX=float32,force_device=True',
     }
     
     print("🔧 Setting HPC environment variables:")

@@ -649,12 +649,15 @@ class ParametricHierarchicalModel:
                              'rtx' in str(getattr(d, 'device_kind', str(d))).lower()
                              for d in devices)
                 
-                if has_gpu and jax.default_backend() != 'cpu':
-                    sampler_kwargs["nuts_sampler"] = "numpyro"
-                    print(f"    🚀 Using NumPyro (JAX) sampler for GPU acceleration")
-                    print(f"    🎯 JAX backend: {jax.default_backend()}")
-                else:
-                    print(f"    💻 Using default PyMC sampler - JAX backend: {jax.default_backend()}")
+                # FORCE NumPyro for GPU acceleration
+                sampler_kwargs["nuts_sampler"] = "numpyro"
+                print(f"    🚀 FORCING NumPyro (JAX) sampler for GPU acceleration")
+                print(f"    🎯 JAX backend: {jax.default_backend()}")
+                print(f"    🎯 JAX devices: {devices}")
+                print(f"    🎯 Has GPU detected: {has_gpu}")
+                
+                if not has_gpu:
+                    print(f"    ⚠️ WARNING: Forcing NumPyro despite no GPU detection")
             except ImportError:
                 print("    💻 JAX not available, using default PyMC sampler (CPU)")
             except Exception as e:
@@ -1059,16 +1062,34 @@ class ParametricHierarchicalModel:
                 raise ValueError(f"不支援的概似函數: {self.model_spec.likelihood_family}")
             
             print("  ⚙️ 執行MCMC採樣...")
-            trace = pm.sample(
-                draws=self.mcmc_config.n_samples,
-                tune=self.mcmc_config.n_warmup,
-                chains=self.mcmc_config.n_chains,
-                cores=self.mcmc_config.cores,
-                random_seed=self.mcmc_config.random_seed,
-                target_accept=self.mcmc_config.target_accept,
-                return_inferencedata=True,
-                progressbar=self.mcmc_config.progressbar
-            )
+            
+            # FORCE NumPyro for GPU acceleration (second pm.sample call)
+            sampler_kwargs = {
+                "draws": self.mcmc_config.n_samples,
+                "tune": self.mcmc_config.n_warmup,
+                "chains": self.mcmc_config.n_chains,
+                "cores": self.mcmc_config.cores,
+                "random_seed": self.mcmc_config.random_seed,
+                "target_accept": self.mcmc_config.target_accept,
+                "return_inferencedata": True,
+                "progressbar": self.mcmc_config.progressbar
+            }
+            
+            # Force NumPyro for GPU acceleration
+            try:
+                import jax
+                devices = jax.devices()
+                has_gpu = any('gpu' in str(d).lower() or 'cuda' in str(d).lower() 
+                             for d in devices)
+                if has_gpu:
+                    sampler_kwargs["nuts_sampler"] = "numpyro"
+                    print(f"    🚀 FORCING NumPyro (JAX) sampler for GPU acceleration (second call)")
+                    print(f"    🎯 JAX backend: {jax.default_backend()}")
+                    print(f"    🎯 JAX devices: {devices}")
+            except ImportError:
+                print(f"    ⚠️ JAX not available, using default sampler")
+            
+            trace = pm.sample(**sampler_kwargs)
             
             # 提取後驗樣本
             print("  📊 提取後驗樣本...")
