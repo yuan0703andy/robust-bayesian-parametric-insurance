@@ -37,10 +37,27 @@ def check_jax_gpu():
     print("\n🔍 Testing JAX GPU detection...")
     
     devices = jax.devices()
-    gpu_devices = [d for d in devices if d.device_kind == 'gpu']
+    
+    # Improved GPU detection logic matching gpu_config.py
+    gpu_devices = []
+    for d in devices:
+        device_str = str(d).lower()
+        device_kind_str = d.device_kind.lower()
+        # Check for CUDA devices or GPU-related keywords
+        if ('cuda' in device_str or 
+            'gpu' in device_kind_str or 
+            'geforce' in device_kind_str or 
+            'rtx' in device_kind_str or
+            'gtx' in device_kind_str or
+            'tesla' in device_kind_str or
+            'quadro' in device_kind_str):
+            gpu_devices.append(d)
+            print(f"    ✅ GPU device found: {d} (kind: {d.device_kind})")
     
     print(f"   📊 JAX devices: {devices}")
     print(f"   🎯 GPU devices: {gpu_devices}")
+    print(f"   🔍 Device kinds: {[d.device_kind for d in devices]}")
+    print(f"   🔍 JAX backend: {jax.default_backend()}")
     
     if len(gpu_devices) >= 2:
         print("   ✅ Dual GPU detected by JAX!")
@@ -50,6 +67,7 @@ def check_jax_gpu():
         return True
     else:
         print("   ❌ No GPU devices detected by JAX")
+        print("   💡 Devices found but not recognized as GPU by detection logic")
         return False
 
 def bayesian_regression_model(X, y=None):
