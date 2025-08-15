@@ -334,7 +334,26 @@ class ModelClassAnalyzer:
                 
                 print(f"      ✅ 擬合成功")
                 print(f"         DIC: {result.dic:.2f}")
-                print(f"         收斂: {result.diagnostics.convergence_summary()['overall_convergence']}")
+                
+                # 詳細診斷信息
+                conv_summary = result.diagnostics.convergence_summary()
+                print(f"         收斂: {conv_summary['overall_convergence']}")
+                print(f"         詳細診斷:")
+                print(f"           Max R-hat: {conv_summary.get('max_rhat', 'N/A'):.4f}")
+                print(f"           Min ESS: {conv_summary.get('min_ess_bulk', 'N/A'):.0f}")
+                print(f"           發散數: {conv_summary.get('n_divergent', 'N/A')}")
+                print(f"           能量錯誤: {conv_summary.get('energy_error', 'N/A')}")
+                
+                # 如果仍有問題，給出具體建議
+                if not conv_summary['overall_convergence']:
+                    print(f"         🔧 收斂問題分析:")
+                    if conv_summary.get('max_rhat', 1.0) > 1.01:
+                        print(f"           • R-hat過高 ({conv_summary.get('max_rhat', 'N/A'):.4f} > 1.01)")
+                    if conv_summary.get('min_ess_bulk', 1000) < 400:
+                        print(f"           • ESS過低 ({conv_summary.get('min_ess_bulk', 'N/A'):.0f} < 400)")
+                    if conv_summary.get('n_divergent', 0) > 0:
+                        print(f"           • 仍有發散 ({conv_summary.get('n_divergent', 'N/A')} 個)")
+                    print(f"           💡 建議: 增加warmup樣本或使用--robust-sampling")
                 
             except Exception as e:
                 print(f"      ❌ 擬合失敗: {str(e)[:100]}...")

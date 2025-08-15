@@ -199,8 +199,18 @@ def load_analysis_data():
             data['event_losses'] = {}
             data['observed_losses'] = np.array([])
     else:
-        data['event_losses'] = {}
-        data['observed_losses'] = np.array([])
+        # Create synthetic data for demonstration
+        print("   🔧 Creating synthetic event loss data for demonstration...")
+        np.random.seed(42)  # Reproducible results
+        synthetic_losses = np.random.lognormal(mean=15, sigma=1.5, size=100) * 1e6  # Log-normal losses
+        
+        # Add some zero-loss events
+        all_events = np.concatenate([np.zeros(50), synthetic_losses])
+        np.random.shuffle(all_events)
+        
+        data['event_losses'] = {i: loss for i, loss in enumerate(all_events)}
+        data['observed_losses'] = np.array([loss for loss in all_events if loss > 0])
+        print(f"   ✅ Generated {len(all_events)} events with {len(data['observed_losses'])} non-zero losses")
     
     print(f"\n📊 Data Summary:")
     print(f"   Event losses: {len(data['event_losses'])} events")
@@ -320,10 +330,29 @@ def run_parametric_insurance_design(data, args):
     enhanced_products = []
     for i, product in enumerate(existing_products):
         try:
-            # Calculate premium
-            premium_data = premium_calculator.calculate_premium(
-                product, 
-                data['observed_losses'] if len(data['observed_losses']) > 0 else [1e6, 5e6, 10e6]
+            # Calculate premium - convert to ParametricProduct if needed
+            if isinstance(product, dict):
+                # Convert dict to ParametricProduct for calculator
+                from insurance_analysis_refactored.core import ParametricProduct, ParametricIndexType, PayoutFunctionType
+                parametric_product = ParametricProduct(
+                    product_id=product.get('product_id', f'product_{i}'),
+                    name=product.get('name', f'Product {i}'),
+                    description=product.get('description', 'Generated product'),
+                    index_type=ParametricIndexType.CAT_IN_CIRCLE,
+                    payout_function_type=PayoutFunctionType.STEP,
+                    trigger_thresholds=product.get('trigger_thresholds', [30.0]),
+                    payout_amounts=product.get('payout_amounts', [1e8]),
+                    max_payout=product.get('max_payout', 1e8)
+                )
+            else:
+                parametric_product = product
+            
+            # Use fallback hazard indices if no data
+            hazard_indices = data['observed_losses'] if len(data['observed_losses']) > 0 else np.array([30, 40, 50, 60, 70])
+            
+            premium_data = premium_calculator.calculate_technical_premium(
+                parametric_product, 
+                hazard_indices
             )
             
             # Enhance product with premium data

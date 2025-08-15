@@ -1,0 +1,19 @@
+CPU-Optimized Robust Bayesian Analysis Report
+============================================================
+
+Analysis completed: 2025-08-16 03:35:12
+Version: CPU-Optimized v1.0
+Quick test mode: False
+
+Data Summary:
+  Total events: 0
+  Non-zero losses: 0
+  Mean loss: $0.0M
+  Max loss: $0.0M
+
+Analysis Components:
+  Insurance products: 0
+  Bayesian analysis: ❌
+  Market analysis: ❌
+
+Skill Score Summary:

@@ -227,9 +227,9 @@ def get_cpu_optimized_mcmc_config(n_cores=None, quick_test=False, max_cores=None
             # 🎯 平衡模式：好的收斂性 + 合理速度
             n_chains = min(8, max_chains)  # 允許更多鏈
             n_samples = 600   # 減少樣本數
-            n_warmup = 300    # 中等warmup
-            target_accept = 0.92  # 高但不極端
-            step_size = 0.08  # 中等步長
+            n_warmup = 500    # 🔧 增加warmup以改善收斂
+            target_accept = 0.95  # 🔧 提高target_accept
+            step_size = 0.05  # 🔧 更小步長確保穩定
             max_treedepth = 12
         else:
             # 標準高性能模式
