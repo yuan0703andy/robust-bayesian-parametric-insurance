@@ -1,0 +1,13 @@
+CPU-Only Bayesian Analysis Summary
+==================================================
+
+Best Distribution: weibull
+Number of Losses: 485
+Best AIC: 18491.78
+Bootstrap Iterations: 100
+
+Distribution Rankings (by AIC):
+1. weibull: AIC = 18491.78
+2. lognormal: AIC = 18528.34
+3. gamma: AIC = 18564.80
+4. exponential: AIC = 20782.15
