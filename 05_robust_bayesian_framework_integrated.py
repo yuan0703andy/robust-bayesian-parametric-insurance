@@ -69,18 +69,25 @@ import socket
 
 def detect_environment():
     """Detect if running on HPC or local development environment"""
+    # FORCE HPC MODE for now - can be changed based on actual environment
+    # Set to True if running on HPC, False for local development
+    FORCE_HPC_MODE = True  # 🔥 CHANGE THIS BASED ON YOUR ENVIRONMENT
+    
+    if FORCE_HPC_MODE:
+        return True
+    
     hostname = socket.gethostname().lower()
     system = platform.system().lower()
     
     # Check for NVIDIA GPUs first - strong HPC indicator
     try:
         import subprocess
-        result = subprocess.run(['nvidia-smi'], capture_output=True, text=True)
+        result = subprocess.run(['nvidia-smi'], capture_output=True, text=True, timeout=5)
         has_nvidia = result.returncode == 0
     except:
         has_nvidia = False
     
-    # HPC detection patterns (更精確的檢測)
+    # HPC detection patterns
     hpc_patterns = ['hpc', 'cluster', 'slurm', 'pbs', 'node', 'compute', 'borsuk']
     is_hpc = any(pattern in hostname for pattern in hpc_patterns)
     
@@ -91,7 +98,6 @@ def detect_environment():
     # Check for SLURM environment
     has_slurm = 'SLURM_JOB_ID' in os.environ or 'SLURM_NTASKS' in os.environ
     
-    # Force HPC if NVIDIA GPUs detected (RTX A5000 indicates HPC)
     return is_hpc or has_hpc_paths or has_slurm or has_nvidia
 
 IS_HPC = detect_environment()
@@ -130,7 +136,7 @@ if IS_HPC:
         
         # 記憶體和並行配置 - 穩定配置避免kernel crash
         'XLA_PYTHON_CLIENT_PREALLOCATE': 'false',  # 動態分配避免OOM
-        'XLA_PYTHON_CLIENT_MEM_FRACTION': '0.8',   # 降低到80%避免崩潰
+        'XLA_PYTHON_CLIENT_MEM_FRACTION': '0.5',   # 降低到50%避免崩潰
         'XLA_PYTHON_CLIENT_ALLOCATOR': 'platform',
         
         # 強制多設備並行配置
@@ -149,13 +155,13 @@ if IS_HPC:
         
         # NumPyro多設備配置
         'NUMPYRO_PLATFORM': 'gpu',
-        'NUMPYRO_NUM_CHAINS': '32',  # 增加到32條鏈
+        'NUMPYRO_NUM_CHAINS': '4',  # 減少到4條鏈避免記憶體不足
         
         # CPU線程最大化 - 支持32條鏈
-        'OMP_NUM_THREADS': '32',
-        'MKL_NUM_THREADS': '32',
-        'OPENBLAS_NUM_THREADS': '32', 
-        'NUMBA_NUM_THREADS': '32',
+        'OMP_NUM_THREADS': '8',
+        'MKL_NUM_THREADS': '8',
+        'OPENBLAS_NUM_THREADS': '8', 
+        'NUMBA_NUM_THREADS': '8',
         
         # PyTensor最大化 - 移除GPU device配置避免錯誤
         'PYMC_COMPUTE_TEST_VALUE': 'ignore',
@@ -168,13 +174,13 @@ if IS_HPC:
         os.environ[key] = value
         print(f"   ✅ {key} = {value}")
     
-    print("\n⚡ HPC Hardware Target - MAXIMUM PERFORMANCE:")
-    print("   🖥️  CPU: 16+ cores (increased threading)")
-    print("   🎯 GPU: 2 × RTX A5000 (24GB each) - 90% memory utilization")
-    print("   💾 Total GPU Memory: 43.2GB allocated (48GB × 0.9)")
-    print("   ⚡ Power Target: 400W+ total (200W per GPU)")
-    print("   🚀 Expected: 12-20x speedup with maximum parallelization")
-    print("   📊 Target GPU Usage: 90%+ on both GPUs simultaneously")
+    print("\n⚡ HPC Hardware Target - STABLE PERFORMANCE:")
+    print("   🖥️  CPU: 8 cores (conservative threading)")
+    print("   🎯 GPU: 2 × RTX A5000 (24GB each) - 50% memory utilization")
+    print("   💾 Total GPU Memory: 24GB allocated (48GB × 0.5)")
+    print("   ⚡ Power Target: 200-300W total")
+    print("   🚀 Expected: Stable execution without crashes")
+    print("   📊 Target GPU Usage: 50-70% for stability")
     
 else:
     print("💻 Local Development Environment Setup")
@@ -291,7 +297,7 @@ def verify_dual_gpu_setup():
             
             if len(gpu_info) >= 2:
                 print("   ✅ DUAL RTX A5000 DETECTED via nvidia-smi!")
-                print("   🎯 Will configure 12 chains per GPU (24 total)")
+                print("   🎯 Will configure 2 chains per GPU (4 total)")
                 return True, gpu_info
             else:
                 print("   ⚠️ Single GPU detected via nvidia-smi")
@@ -381,7 +387,7 @@ if IS_HPC:
     dual_gpu_ready = True
     detected_gpus = ["RTX A5000 #0", "RTX A5000 #1"]
     print("   ✅ DUAL RTX A5000 ASSUMED on HPC environment")
-    print("   🎯 Will configure 12 chains per GPU (24 total)")
+    print("   🎯 Will configure 2 chains per GPU (4 total)")
 else:
     # Only run verification on local development
     dual_gpu_ready, detected_gpus = verify_dual_gpu_setup()
@@ -391,7 +397,10 @@ if dual_gpu_ready:
     print("   🔥 Forcing NumPyro to use BOTH GPUs for maximum parallelization")
     
     # Force JAX to use both devices explicitly
-    import jax
+    try:
+        import jax
+    except ImportError:
+        pass
     import os
     
     # Additional runtime GPU forcing
@@ -400,7 +409,7 @@ if dual_gpu_ready:
     
     # Print device mapping
     for i, gpu in enumerate(detected_gpus):
-        print(f"   📍 GPU {i}: {gpu} - Will run 12 MCMC chains")
+        print(f"   📍 GPU {i}: {gpu} - Will run 2 MCMC chains")
         
 else:
     print(f"\n⚠️ Dual GPU setup failed - detected {len(detected_gpus)} GPUs")
@@ -483,23 +492,23 @@ else:
     if IS_HPC:
         # HPC STABLE HIGH PERFORMANCE configuration - 穩定高性能配置
         mcmc_config_dict = {
-            "n_samples": 2000,       # 穩定配置：2000樣本避免OOM
-            "n_warmup": 1000,        # 穩定warmup：1000
-            "n_chains": 24,          # 減少到24條鏈 (每GPU 12條)
-            "cores": 24,             # 匹配鏈數
-            "target_accept": 0.90,   # 稍微降低精度提高穩定性
+            "n_samples": 500,        # 穩定配置：500樣本避免OOM
+            "n_warmup": 200,         # 穩定warmup：200
+            "n_chains": 4,           # 減少到4條鏈避免記憶體不足
+            "cores": 4,              # 匹配鏈數
+            "target_accept": 0.85,   # 降低精度提高穩定性
             "backend": "pytensor",
             "nuts_sampler": "numpyro",  # Force NumPyro GPU sampler
             "chain_method": "parallel", # 並行鏈執行
             
-            # 🔥 關鍵雙GPU參數 - 強制雙GPU分配
+            # 🔥 關鍵雙GPU參數 - 保守雙GPU分配
             "num_devices": 2,        # 明確指定2個設備  
-            "chains_per_device": 12, # 每設備12條鏈 (24/2=12)
-            "chain_device_assignment": [0] * 12 + [1] * 12,  # 強制鏈到設備映射
+            "chains_per_device": 2,  # 每設備2條鏈 (4/2=2)
+            "chain_device_assignment": [0, 0, 1, 1],  # 保守鏈到設備映射
             
             # 額外的NumPyro多設備參數
-            "num_chains_per_device": 12,  # NumPyro專用參數
-            "device_map": {i: i // 12 for i in range(24)},  # 設備映射字典
+            "num_chains_per_device": 2,  # NumPyro專用參數
+            "device_map": {0: 0, 1: 0, 2: 1, 3: 1},  # 設備映射字典
             
             # 🔥 性能參數 - 從maximize_gpu_load.py
             "return_inferencedata": True,
@@ -510,14 +519,14 @@ else:
         print("   🎯 Target: 80%+ GPU utilization on both GPUs (stable)")
         print("   ⚡ Target: 150W+ power consumption per GPU") 
         print("   💾 Target: 19GB+ memory usage per GPU (80% of 24GB)")
-        print(f"   📊 Total MCMC samples: {24 * 2000:,} (24 chains × 2000 samples)")
+        print(f"   📊 Total MCMC samples: {4 * 500:,} (4 chains × 500 samples)")
         print("   🔥 Optimized for stability while maximizing dual GPU usage!")
         
         # 強制雙GPU分配提醒
-        print("\\n🚨 DUAL GPU ALLOCATION ENFORCEMENT:")
-        print("   🔒 Chain 0-11  → GPU 0 (RTX A5000 #0)")
-        print("   🔒 Chain 12-23 → GPU 1 (RTX A5000 #1)")
-        print("   📊 Expected result: Both GPUs showing 80%+ usage")
+        print("\n🚨 DUAL GPU ALLOCATION (CONSERVATIVE):")
+        print("   🔒 Chain 0-1 → GPU 0 (RTX A5000 #0)")
+        print("   🔒 Chain 2-3 → GPU 1 (RTX A5000 #1)")
+        print("   📊 Expected result: Both GPUs showing 30-50% usage")
     else:
         # Local development with ultra-conservative settings to avoid kernel crash
         mcmc_config_dict = {
@@ -561,7 +570,7 @@ if IS_HPC and "nuts_sampler" in mcmc_config_dict:
     print(f"   Sampler: {mcmc_config.nuts_sampler}")
     print(f"   Chain method: {mcmc_config.chain_method}")
     print(f"   Backend: {mcmc_config.backend}")
-    print(f"   Chains per GPU: 12 (total 24)")
+    print(f"   Chains per GPU: 2 (total 4)")
 
 # Create analyzer configuration based on environment
 if IS_HPC:
@@ -648,16 +657,21 @@ def log_hpc_performance(phase_name):
     except (ImportError, FileNotFoundError, subprocess.SubprocessError):
         print("   📊 GPU monitoring unavailable")
         
-    # Check JAX GPU detection
+    # Check JAX GPU detection (with error handling)
     try:
         import jax
-        devices = jax.devices()
-        gpu_devices = [d for d in devices if 'gpu' in str(d).lower() or 'cuda' in str(d).lower()]
-        print(f"   🔍 JAX detected devices: {len(gpu_devices)} GPU, {len(devices)-len(gpu_devices)} CPU")
-        if gpu_devices:
-            print(f"   ✅ JAX GPU devices available: {gpu_devices}")
-        else:
-            print(f"   ⚠️ JAX not detecting GPU devices - using CPU only")
+        # Use safe device detection
+        try:
+            devices = jax.devices()
+            gpu_devices = [d for d in devices if 'gpu' in str(d).lower() or 'cuda' in str(d).lower()]
+            print(f"   🔍 JAX detected devices: {len(gpu_devices)} GPU, {len(devices)-len(gpu_devices)} CPU")
+            if gpu_devices:
+                print(f"   ✅ JAX GPU devices available: {gpu_devices}")
+            else:
+                print(f"   ⚠️ JAX not detecting GPU devices - using CPU only")
+        except RuntimeError as e:
+            # Handle JAX backend errors gracefully
+            print(f"   ⚠️ JAX device detection error (expected on CPU-only systems): {str(e)[:50]}...")
     except ImportError:
         print("   ⚠️ JAX not available for device detection")
 
