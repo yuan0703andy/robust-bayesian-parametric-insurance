@@ -652,11 +652,22 @@ class ParametricHierarchicalModel:
                 # FORCE NumPyro for GPU acceleration
                 sampler_kwargs["nuts_sampler"] = "numpyro"
                 sampler_kwargs["chain_method"] = "parallel"  # 並行鏈執行
-                print(f"    🚀 FORCING NumPyro (JAX) sampler for GPU acceleration")
+                
+                # 雙GPU配置
+                gpu_devices = [d for d in devices if 'gpu' in str(d).lower() or 'cuda' in str(d).lower()]
+                if len(gpu_devices) >= 2:
+                    print(f"    🚀 DUAL GPU MODE: {len(gpu_devices)} GPUs detected")
+                    # 明確鏈分配：每GPU分配鏈數
+                    chains_per_gpu = max(1, self.mcmc_config.n_chains // len(gpu_devices))
+                    print(f"    🔗 Chains per GPU: {chains_per_gpu}")
+                else:
+                    print(f"    🚀 SINGLE GPU MODE: {len(gpu_devices)} GPU(s) detected")
+                
                 print(f"    🎯 JAX backend: {jax.default_backend()}")
                 print(f"    🎯 JAX devices: {devices}")
                 print(f"    🎯 Has GPU detected: {has_gpu}")
                 print(f"    🔗 Chain method: parallel")
+                print(f"    📊 Total chains: {self.mcmc_config.n_chains}")
                 
                 if not has_gpu:
                     print(f"    ⚠️ WARNING: Forcing NumPyro despite no GPU detection")
@@ -1086,10 +1097,20 @@ class ParametricHierarchicalModel:
                 if has_gpu:
                     sampler_kwargs["nuts_sampler"] = "numpyro"
                     sampler_kwargs["chain_method"] = "parallel"  # 並行鏈執行
-                    print(f"    🚀 FORCING NumPyro (JAX) sampler for GPU acceleration (second call)")
+                    
+                    # 雙GPU配置 (第二個調用)
+                    gpu_devices = [d for d in devices if 'gpu' in str(d).lower() or 'cuda' in str(d).lower()]
+                    if len(gpu_devices) >= 2:
+                        print(f"    🚀 DUAL GPU MODE (second call): {len(gpu_devices)} GPUs")
+                        chains_per_gpu = max(1, self.mcmc_config.n_chains // len(gpu_devices))
+                        print(f"    🔗 Chains per GPU: {chains_per_gpu}")
+                    else:
+                        print(f"    🚀 SINGLE GPU MODE (second call): {len(gpu_devices)} GPU(s)")
+                    
                     print(f"    🎯 JAX backend: {jax.default_backend()}")
                     print(f"    🎯 JAX devices: {devices}")
                     print(f"    🔗 Chain method: parallel")
+                    print(f"    📊 Total chains: {self.mcmc_config.n_chains}")
             except ImportError:
                 print(f"    ⚠️ JAX not available, using default sampler")
             

@@ -111,30 +111,37 @@ if IS_HPC:
 if IS_HPC:
     print("🚀 HPC GPU Environment Setup - Configuring for Dual RTX A5000 (24GB each)")
     
-    # Configure environment for HPC dual-GPU system - MAXIMUM PERFORMANCE
+    # Configure environment for HPC dual-GPU system - DUAL GPU FORCED
     hpc_env_vars = {
-        # JAX GPU Configuration for RTX A5000 (24GB each - MAXIMIZED)
-        'JAX_PLATFORMS': 'cuda,cpu',
-        'JAX_ENABLE_X64': 'False',  # Use float32 for speed and memory efficiency
-        'XLA_PYTHON_CLIENT_PREALLOCATE': 'true',   # 預分配記憶體
-        'XLA_PYTHON_CLIENT_MEM_FRACTION': '0.9',   # 使用90% GPU記憶體
-        'XLA_PYTHON_CLIENT_ALLOCATOR': 'platform',
+        # JAX雙GPU強制配置 - 關鍵修復
+        'JAX_PLATFORMS': 'cuda',  # 只用CUDA，移除CPU fallback
+        'JAX_ENABLE_X64': 'False',
         'JAX_PLATFORM_NAME': 'gpu',
+        'XLA_FLAGS': '--xla_force_host_platform_device_count=2 --xla_gpu_force_compilation_parallelism=2',  # 強制2個設備 + 並行編譯
         
-        # CUDA Configuration for RTX A5000
-        'CUDA_VISIBLE_DEVICES': '0,1',  # Use both A5000 GPUs
+        # 記憶體和並行配置 - 激進使用95%記憶體
+        'XLA_PYTHON_CLIENT_PREALLOCATE': 'true',
+        'XLA_PYTHON_CLIENT_MEM_FRACTION': '0.95',  # 激進使用95% GPU記憶體
+        'XLA_PYTHON_CLIENT_ALLOCATOR': 'platform',
+        
+        # CUDA雙GPU配置
+        'CUDA_VISIBLE_DEVICES': '0,1',  # 確保兩個GPU都可見
         'CUDA_DEVICE_ORDER': 'PCI_BUS_ID',
         
-        # CPU Threading Control (MAXIMIZED for dual-GPU)
-        'OMP_NUM_THREADS': '16',    # 增加線程數
-        'MKL_NUM_THREADS': '16',
-        'OPENBLAS_NUM_THREADS': '16', 
-        'NUMBA_NUM_THREADS': '16',
+        # NumPyro多設備配置
+        'NUMPYRO_PLATFORM': 'gpu',
+        'NUMPYRO_NUM_CHAINS': '32',  # 增加到32條鏈
         
-        # PyMC/ArviZ optimization + FORCE GPU
+        # CPU線程最大化 - 支持32條鏈
+        'OMP_NUM_THREADS': '32',
+        'MKL_NUM_THREADS': '32',
+        'OPENBLAS_NUM_THREADS': '32', 
+        'NUMBA_NUM_THREADS': '32',
+        
+        # PyTensor最大化 - 從maximize_gpu_load.py同步
         'PYMC_COMPUTE_TEST_VALUE': 'ignore',
         'PYTENSOR_OPTIMIZER_VERBOSE': '0',
-        'PYTENSOR_FLAGS': 'device=cuda,floatX=float32,optimizer=fast_run,force_device=True',
+        'PYTENSOR_FLAGS': 'device=cuda,floatX=float32,optimizer=fast_run,force_device=True,allow_gc=False',  # 禁用垃圾回收提升性能
         'THEANO_FLAGS': 'device=cuda,floatX=float32,force_device=True',
     }
     
@@ -334,19 +341,32 @@ if gpu_config:
         print(f"💻 Using local GPU-optimized MCMC: {gpu_config.hardware_level}")
 else:
     if IS_HPC:
-        # HPC MAXIMUM GPU configuration for dual RTX A5000 (24GB each)
+        # HPC MAXIMUM LOAD configuration - 同步maximize_gpu_load.py激進配置
         mcmc_config_dict = {
-            "n_samples": 3000,       # 大樣本數充分利用GPU
-            "n_warmup": 1500,        # 充足warmup
-            "n_chains": 24,          # 高並行鏈數 (每GPU 12鏈)
-            "cores": 24,             # 匹配鏈數
-            "target_accept": 0.92,   # 高精度
+            "n_samples": 5000,       # 🔥 更激進：5000樣本 (從maximize_gpu_load.py)
+            "n_warmup": 2500,        # 🔥 更激進：2500 warmup
+            "n_chains": 32,          # 32條鏈 (每GPU 16條)
+            "cores": 32,             # 匹配鏈數
+            "target_accept": 0.95,   # 高精度增加計算負載
             "backend": "pytensor",
             "nuts_sampler": "numpyro",  # Force NumPyro GPU sampler
-            "chain_method": "parallel"  # 並行鏈執行
+            "chain_method": "parallel", # 並行鏈執行
+            
+            # 🔥 關鍵雙GPU參數 - 從fix_dual_gpu.py
+            "num_devices": 2,        # 明確指定2個設備
+            "chains_per_device": 16, # 每設備16條鏈 (32/2=16)
+            
+            # 🔥 性能參數 - 從maximize_gpu_load.py
+            "return_inferencedata": True,
+            "progress_bar": True,
+            "compute_convergence_checks": True  # 增加計算量
         }
-        print("🚀 Using HPC MAXIMUM GPU configuration (dual RTX A5000 optimized)")
+        print("🔥 Using HPC MAXIMUM LOAD configuration (push RTX A5000 to limits)")
         print("   🎯 Target: 90%+ GPU utilization on both GPUs")
+        print("   ⚡ Target: 200W+ power consumption per GPU") 
+        print("   💾 Target: 22GB+ memory usage per GPU (95% of 24GB)")
+        print(f"   📊 Total MCMC samples: {32 * 5000:,} (32 chains × 5000 samples)")
+        print("   🔥 This is the MOST AGGRESSIVE configuration for maximum GPU load!")
     else:
         # Local development with ultra-conservative settings to avoid kernel crash
         mcmc_config_dict = {
