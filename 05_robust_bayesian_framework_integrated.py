@@ -21,45 +21,104 @@ import pickle
 import json
 from typing import Dict, List, Tuple, Optional, Any
 
-# HPC GPU Environment Configuration - FIRST PRIORITY
-print("🚀 HPC GPU Environment Setup - Configuring for Dual RTX 2080 Ti")
+# Smart Environment Detection and Configuration
+print("🔧 Smart Environment Detection...")
 print("=" * 80)
 
-# Configure environment for HPC dual-GPU system BEFORE any imports
-hpc_env_vars = {
-    # JAX GPU Configuration for RTX 2080 Ti
-    'JAX_PLATFORMS': 'cuda,cpu',
-    'JAX_ENABLE_X64': 'True', 
-    'XLA_PYTHON_CLIENT_PREALLOCATE': 'false',
-    'XLA_PYTHON_CLIENT_MEM_FRACTION': '0.8',
-    'XLA_PYTHON_CLIENT_ALLOCATOR': 'platform',
-    'JAX_PLATFORM_NAME': 'gpu',
-    
-    # CUDA Configuration for RTX 2080 Ti
-    'CUDA_VISIBLE_DEVICES': '0,1',  # Use both GPUs
-    'CUDA_DEVICE_ORDER': 'PCI_BUS_ID',
-    
-    # CPU Threading Control for 16-core system
-    'OMP_NUM_THREADS': '16',    # Use all 16 cores
-    'MKL_NUM_THREADS': '16',
-    'OPENBLAS_NUM_THREADS': '16', 
-    'NUMBA_NUM_THREADS': '16',
-    
-    # PyMC/ArviZ optimization
-    'PYMC_COMPUTE_TEST_VALUE': 'ignore',
-    'PYTENSOR_OPTIMIZER_VERBOSE': '0',
-}
+# Detect if we're on HPC or local development
+import platform
+import socket
 
-print("🔧 Setting HPC environment variables:")
-for key, value in hpc_env_vars.items():
-    os.environ[key] = value
-    print(f"   ✅ {key} = {value}")
+def detect_environment():
+    """Detect if running on HPC or local development environment"""
+    hostname = socket.gethostname().lower()
+    system = platform.system().lower()
+    
+    # HPC detection patterns
+    hpc_patterns = ['hpc', 'cluster', 'slurm', 'pbs', 'node', 'compute']
+    is_hpc = any(pattern in hostname for pattern in hpc_patterns)
+    
+    # Additional checks
+    hpc_paths = ['/hpc/', '/cluster/', '/scratch/']
+    has_hpc_paths = any(os.path.exists(path) for path in hpc_paths)
+    
+    return is_hpc or has_hpc_paths
 
-print("\n⚡ HPC Hardware Target:")
-print("   🖥️  CPU: 16 cores")
-print("   🎯 GPU: 2 × RTX 2080 Ti")
-print("   💾 Memory: High-capacity")
-print("   🚀 Expected: 4-6x speedup over single GPU")
+IS_HPC = detect_environment()
+print(f"🔍 Environment detected: {'HPC' if IS_HPC else 'Local Development'}")
+
+if IS_HPC:
+    print("🚀 HPC GPU Environment Setup - Configuring for Dual RTX 2080 Ti")
+    
+    # Configure environment for HPC dual-GPU system
+    hpc_env_vars = {
+        # JAX GPU Configuration for RTX 2080 Ti
+        'JAX_PLATFORMS': 'cuda,cpu',
+        'JAX_ENABLE_X64': 'True', 
+        'XLA_PYTHON_CLIENT_PREALLOCATE': 'false',
+        'XLA_PYTHON_CLIENT_MEM_FRACTION': '0.8',
+        'XLA_PYTHON_CLIENT_ALLOCATOR': 'platform',
+        'JAX_PLATFORM_NAME': 'gpu',
+        
+        # CUDA Configuration for RTX 2080 Ti
+        'CUDA_VISIBLE_DEVICES': '0,1',  # Use both GPUs
+        'CUDA_DEVICE_ORDER': 'PCI_BUS_ID',
+        
+        # CPU Threading Control for 16-core system
+        'OMP_NUM_THREADS': '16',    # Use all 16 cores
+        'MKL_NUM_THREADS': '16',
+        'OPENBLAS_NUM_THREADS': '16', 
+        'NUMBA_NUM_THREADS': '16',
+        
+        # PyMC/ArviZ optimization
+        'PYMC_COMPUTE_TEST_VALUE': 'ignore',
+        'PYTENSOR_OPTIMIZER_VERBOSE': '0',
+    }
+    
+    print("🔧 Setting HPC environment variables:")
+    for key, value in hpc_env_vars.items():
+        os.environ[key] = value
+        print(f"   ✅ {key} = {value}")
+    
+    print("\n⚡ HPC Hardware Target:")
+    print("   🖥️  CPU: 16 cores")
+    print("   🎯 GPU: 2 × RTX 2080 Ti")
+    print("   💾 Memory: High-capacity")
+    print("   🚀 Expected: 4-6x speedup over single GPU")
+    
+else:
+    print("💻 Local Development Environment Setup")
+    
+    # Safe local development configuration
+    local_env_vars = {
+        # Conservative JAX settings for local
+        'JAX_PLATFORMS': 'cpu',  # CPU-only for safety
+        'JAX_ENABLE_X64': 'True',
+        
+        # Local CPU threading (8 cores for M3 MacBook)
+        'OMP_NUM_THREADS': '4',    # Conservative threading
+        'MKL_NUM_THREADS': '4',
+        'OPENBLAS_NUM_THREADS': '4',
+        'NUMBA_NUM_THREADS': '4',
+        
+        # PyMC optimization for local
+        'PYMC_COMPUTE_TEST_VALUE': 'ignore',
+        'PYTENSOR_OPTIMIZER_VERBOSE': '0',
+        
+        # Fix PROJ database path issues
+        'PROJ_DATA': '',  # Clear any HPC-specific paths
+    }
+    
+    print("🔧 Setting local development environment variables:")
+    for key, value in local_env_vars.items():
+        os.environ[key] = value
+        print(f"   ✅ {key} = {value}")
+    
+    print("\n💻 Local Hardware Target:")
+    print("   🖥️  CPU: 8 cores (Apple M3)")
+    print("   🎯 GPU: Apple M3 (Metal)")
+    print("   💾 Memory: Unified memory")
+    print("   🧪 Mode: Development and testing")
 
 # Import GPU setup module FIRST
 print("\n🔧 Loading GPU setup module...")
@@ -183,27 +242,44 @@ print(f"   Spatial analysis indices: {len(spatial_results) if spatial_results el
 
 # %%
 print("\n" + "=" * 80)
-print("Phase 1: HPC GPU-Optimized Bayesian Model Ensemble Analysis")
-print("階段1：HPC GPU優化貝氏模型集成分析")
+phase_title = "HPC GPU-Optimized" if IS_HPC else "Local Development"
+print(f"Phase 1: {phase_title} Bayesian Model Ensemble Analysis")
+print(f"階段1：{phase_title}貝氏模型集成分析")
 print("=" * 80)
 
-# Create HPC-optimized MCMC configuration
+# Create environment-appropriate MCMC configuration
 if gpu_config:
     mcmc_config_dict = gpu_config.get_mcmc_config()
-    print(f"🚀 Using HPC GPU-optimized MCMC: {gpu_config.hardware_level}")
+    if IS_HPC:
+        print(f"🚀 Using HPC GPU-optimized MCMC: {gpu_config.hardware_level}")
+    else:
+        print(f"💻 Using local GPU-optimized MCMC: {gpu_config.hardware_level}")
 else:
-    # HPC CPU-only fallback with 16 cores
-    mcmc_config_dict = {
-        "n_samples": 3000,      # Increased for HPC
-        "n_warmup": 1500,       # Increased warmup
-        "n_chains": 16,         # Use all 16 cores
-        "cores": 16,            # All cores
-        "target_accept": 0.95,  # Higher acceptance for stability
-        "backend": "pytensor"
-    }
-    print("💻 Using HPC 16-core CPU MCMC configuration")
+    if IS_HPC:
+        # HPC CPU-only fallback with 16 cores
+        mcmc_config_dict = {
+            "n_samples": 3000,      # Increased for HPC
+            "n_warmup": 1500,       # Increased warmup
+            "n_chains": 16,         # Use all 16 cores
+            "cores": 16,            # All cores
+            "target_accept": 0.95,  # Higher acceptance for stability
+            "backend": "pytensor"
+        }
+        print("💻 Using HPC 16-core CPU MCMC configuration")
+    else:
+        # Local development with conservative settings
+        mcmc_config_dict = {
+            "n_samples": 1000,      # Reduced for local testing
+            "n_warmup": 500,        # Reduced warmup
+            "n_chains": 4,          # Conservative chains
+            "cores": 4,             # Conservative cores
+            "target_accept": 0.90,  # Standard acceptance
+            "backend": "pytensor"
+        }
+        print("💻 Using local development MCMC configuration")
 
-print(f"📊 HPC MCMC Configuration:")
+config_title = "HPC" if IS_HPC else "Local"
+print(f"📊 {config_title} MCMC Configuration:")
 print(f"   Chains: {mcmc_config_dict['n_chains']}")
 print(f"   Samples per chain: {mcmc_config_dict['n_samples']}")
 print(f"   Total samples: {mcmc_config_dict['n_chains'] * mcmc_config_dict['n_samples']:,}")
@@ -222,12 +298,12 @@ mcmc_config = MCMCConfig(
     target_accept=mcmc_config_dict["target_accept"]
 )
 
-# Create analyzer configuration for HPC
+# Create analyzer configuration based on environment
 analyzer_config = AnalyzerConfig(
     mcmc_config=mcmc_config,
     use_mpe=True,
-    parallel_execution=True,    # Enable parallel for HPC
-    max_workers=16,             # Use all 16 cores
+    parallel_execution=IS_HPC,           # Parallel only on HPC
+    max_workers=16 if IS_HPC else 1,     # 16 cores on HPC, sequential locally
     model_selection_criterion='dic',
     calculate_ranges=True,
     calculate_weights=True
@@ -240,7 +316,7 @@ model_class_spec = ModelClassSpec(
     contamination_distribution="typhoon"
 )
 
-print(f"📊 HPC Model ensemble configuration:")
+print(f"📊 {config_title} Model ensemble configuration:")
 print(f"   Total models: {model_class_spec.get_model_count()}")
 print(f"   ε-contamination values: {model_class_spec.epsilon_values}")
 print(f"   Parallel execution: {analyzer_config.parallel_execution}")
@@ -248,7 +324,7 @@ print(f"   Max workers: {analyzer_config.max_workers}")
 
 # Create model analyzer
 analyzer = ModelClassAnalyzer(model_class_spec, analyzer_config)
-print("✅ HPC-optimized Bayesian analyzer created")
+print(f"✅ {config_title}-optimized Bayesian analyzer created")
 
 # %%
 print("\n" + "=" * 80)
