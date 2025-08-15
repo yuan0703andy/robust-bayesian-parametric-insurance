@@ -22,7 +22,10 @@ import json
 from typing import Dict, List, Tuple, Optional, Any
 
 # Configure environment before importing heavy libraries
-os.environ['PYTENSOR_FLAGS'] = 'device=cpu,floatX=float32,optimizer=fast_compile'
+# Note: GPU configuration will be handled by GPU setup module if available
+# Only set default CPU config if PYTENSOR_FLAGS not already set
+if 'PYTENSOR_FLAGS' not in os.environ:
+    os.environ['PYTENSOR_FLAGS'] = 'device=cpu,floatX=float32,optimizer=fast_compile'
 
 # Configure matplotlib for Chinese support
 plt.rcParams['font.sans-serif'] = ['Heiti TC']

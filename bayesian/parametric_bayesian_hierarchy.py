@@ -624,16 +624,29 @@ class ParametricHierarchicalModel:
                 raise ValueError(f"脆弱度建模不支援概似函數: {self.model_spec.likelihood_family}")
             
             print("  ⚙️ 執行MCMC採樣（脆弱度建模）...")
-            trace = pm.sample(
-                draws=self.mcmc_config.n_samples,
-                tune=self.mcmc_config.n_warmup,
-                chains=self.mcmc_config.n_chains,
-                cores=self.mcmc_config.cores,
-                random_seed=self.mcmc_config.random_seed,
-                target_accept=self.mcmc_config.target_accept,
-                return_inferencedata=True,
-                progressbar=self.mcmc_config.progressbar
-            )
+            
+            # Check if GPU/JAX is available for NumPyro sampler
+            sampler_kwargs = {
+                "draws": self.mcmc_config.n_samples,
+                "tune": self.mcmc_config.n_warmup,
+                "chains": self.mcmc_config.n_chains,
+                "cores": self.mcmc_config.cores,
+                "random_seed": self.mcmc_config.random_seed,
+                "target_accept": self.mcmc_config.target_accept,
+                "return_inferencedata": True,
+                "progressbar": self.mcmc_config.progressbar
+            }
+            
+            # Try to use NumPyro (JAX) sampler for GPU acceleration
+            try:
+                import jax
+                if len(jax.devices()) > 0 and any('gpu' in str(d).lower() or 'cuda' in str(d).lower() for d in jax.devices()):
+                    sampler_kwargs["nuts_sampler"] = "numpyro"
+                    print("    🚀 Using NumPyro (JAX) sampler for GPU acceleration")
+            except ImportError:
+                print("    💻 Using default PyMC sampler (CPU)")
+            
+            trace = pm.sample(**sampler_kwargs)
             
             # 提取後驗樣本
             print("  📊 提取脆弱度後驗樣本...")
