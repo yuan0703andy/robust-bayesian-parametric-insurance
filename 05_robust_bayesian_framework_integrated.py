@@ -128,14 +128,20 @@ if IS_HPC:
         'JAX_PLATFORM_NAME': 'gpu',
         'XLA_FLAGS': '--xla_force_host_platform_device_count=2 --xla_gpu_force_compilation_parallelism=2 --xla_gpu_enable_async_all_reduce=true --xla_gpu_cuda_runtime_aware_device_assignment=true',  # 更激進的雙GPU配置
         
-        # 記憶體和並行配置 - 激進使用95%記憶體
-        'XLA_PYTHON_CLIENT_PREALLOCATE': 'true',
-        'XLA_PYTHON_CLIENT_MEM_FRACTION': '0.95',  # 激進使用95% GPU記憶體
+        # 記憶體和並行配置 - 穩定配置避免kernel crash
+        'XLA_PYTHON_CLIENT_PREALLOCATE': 'false',  # 動態分配避免OOM
+        'XLA_PYTHON_CLIENT_MEM_FRACTION': '0.8',   # 降低到80%避免崩潰
         'XLA_PYTHON_CLIENT_ALLOCATOR': 'platform',
         
         # 強制多設備並行配置
         'JAX_ENABLE_COMPILATION_CACHE': '0',  # 禁用緩存強制重新編譯
         'JAX_PLATFORMS_ORDER': 'cuda,cpu',   # 優先CUDA
+        'JAX_FORCE_HOST_PLATFORM_DEVICE_COUNT': '2',  # 額外強制2設備
+        'JAX_DISABLE_MOST_OPTIMIZATIONS': '0',  # 啟用優化但保持多設備
+        
+        # 強制NCCL多GPU通信
+        'NCCL_DEBUG': 'INFO',  # NCCL調試信息
+        'NCCL_P2P_DISABLE': '0',  # 啟用GPU間直接通信
         
         # CUDA雙GPU配置
         'CUDA_VISIBLE_DEVICES': '0,1',  # 確保兩個GPU都可見
@@ -266,6 +272,57 @@ from bayesian import (
 print("✅ Complete Bayesian framework loaded successfully")
 
 # %%
+# Dual GPU Verification Function
+def verify_dual_gpu_setup():
+    """驗證雙GPU配置是否正確"""
+    print("\n🔍 Verifying Dual GPU Setup...")
+    
+    try:
+        import jax
+        import jax.numpy as jnp
+        
+        # 檢測所有設備
+        all_devices = jax.devices()
+        gpu_devices = [d for d in all_devices if 'gpu' in str(d).lower() or 'cuda' in str(d).lower()]
+        
+        print(f"   📊 Total JAX devices: {len(all_devices)}")
+        print(f"   🎯 GPU devices found: {len(gpu_devices)}")
+        
+        for i, device in enumerate(gpu_devices):
+            print(f"      GPU {i}: {device}")
+        
+        if len(gpu_devices) >= 2:
+            print("   ✅ DUAL GPU DETECTED - Ready for parallel MCMC!")
+            
+            # 測試雙GPU並行計算
+            print("   🧪 Testing dual GPU computation...")
+            
+            # 在不同GPU上放置數據
+            x0 = jax.device_put(jnp.ones((1000, 1000)), gpu_devices[0])
+            x1 = jax.device_put(jnp.ones((1000, 1000)), gpu_devices[1])
+            
+            # 並行計算
+            result0 = jnp.sum(x0 * 2.0)
+            result1 = jnp.sum(x1 * 3.0)
+            
+            print(f"      GPU 0 result: {result0:.0f} on {result0.device()}")
+            print(f"      GPU 1 result: {result1:.0f} on {result1.device()}")
+            print("   🎉 DUAL GPU COMPUTATION SUCCESSFUL!")
+            
+            return True, gpu_devices
+            
+        elif len(gpu_devices) == 1:
+            print("   ⚠️ Only 1 GPU detected - will use single GPU mode")
+            return False, gpu_devices
+        else:
+            print("   ❌ No GPU devices detected - falling back to CPU")
+            return False, []
+            
+    except Exception as e:
+        print(f"   ❌ GPU verification failed: {e}")
+        return False, []
+
+# %%
 # GPU-Optimized Environment Setup
 print("\n🔧 Setting up GPU-optimized environment...")
 
@@ -291,6 +348,33 @@ else:
     # Only configure PyMC if no GPU setup available
     configure_pymc_environment()
     print("✅ PyMC environment configured for CPU")
+
+# %%
+# CRITICAL: Verify Dual GPU Setup
+dual_gpu_ready, detected_gpus = verify_dual_gpu_setup()
+
+if dual_gpu_ready:
+    print(f"\n🎉 DUAL GPU VERIFIED: {len(detected_gpus)} RTX A5000 GPUs ready!")
+    print("   🔥 Forcing NumPyro to use BOTH GPUs for maximum parallelization")
+    
+    # Force JAX to use both devices explicitly
+    import jax
+    import os
+    
+    # Additional runtime GPU forcing
+    os.environ['CUDA_VISIBLE_DEVICES'] = '0,1'  # Ensure both visible
+    os.environ['JAX_MEMORY_PREALLOCATION'] = 'false'  # Dynamic allocation
+    
+    # Print device mapping
+    for i, gpu in enumerate(detected_gpus):
+        print(f"   📍 GPU {i}: {gpu} - Will run 12 MCMC chains")
+        
+else:
+    print(f"\n⚠️ Dual GPU setup failed - detected {len(detected_gpus)} GPUs")
+    if len(detected_gpus) == 1:
+        print("   💡 Will use single GPU mode with all chains")
+    else:
+        print("   💡 Will fallback to CPU mode")
 
 # %%
 # Load data from previous steps
@@ -354,33 +438,43 @@ if False:  # Disable gpu_config override to force our maximum settings
         print(f"💻 Using local GPU-optimized MCMC: {gpu_config.hardware_level}")
 else:
     if IS_HPC:
-        # HPC MAXIMUM LOAD configuration - 同步maximize_gpu_load.py激進配置
+        # HPC STABLE HIGH PERFORMANCE configuration - 穩定高性能配置
         mcmc_config_dict = {
-            "n_samples": 5000,       # 🔥 更激進：5000樣本 (從maximize_gpu_load.py)
-            "n_warmup": 2500,        # 🔥 更激進：2500 warmup
-            "n_chains": 32,          # 32條鏈 (每GPU 16條)
-            "cores": 32,             # 匹配鏈數
-            "target_accept": 0.95,   # 高精度增加計算負載
+            "n_samples": 2000,       # 穩定配置：2000樣本避免OOM
+            "n_warmup": 1000,        # 穩定warmup：1000
+            "n_chains": 24,          # 減少到24條鏈 (每GPU 12條)
+            "cores": 24,             # 匹配鏈數
+            "target_accept": 0.90,   # 稍微降低精度提高穩定性
             "backend": "pytensor",
             "nuts_sampler": "numpyro",  # Force NumPyro GPU sampler
             "chain_method": "parallel", # 並行鏈執行
             
-            # 🔥 關鍵雙GPU參數 - 從fix_dual_gpu.py + 強制分配
-            "num_devices": 2,        # 明確指定2個設備
-            "chains_per_device": 16, # 每設備16條鏈 (32/2=16)
-            "chain_device_assignment": [0] * 16 + [1] * 16,  # 明確指定鏈到設備映射
+            # 🔥 關鍵雙GPU參數 - 強制雙GPU分配
+            "num_devices": 2,        # 明確指定2個設備  
+            "chains_per_device": 12, # 每設備12條鏈 (24/2=12)
+            "chain_device_assignment": [0] * 12 + [1] * 12,  # 強制鏈到設備映射
+            
+            # 額外的NumPyro多設備參數
+            "num_chains_per_device": 12,  # NumPyro專用參數
+            "device_map": {i: i // 12 for i in range(24)},  # 設備映射字典
             
             # 🔥 性能參數 - 從maximize_gpu_load.py
             "return_inferencedata": True,
             "progress_bar": True,
             "compute_convergence_checks": True  # 增加計算量
         }
-        print("🔥 Using HPC MAXIMUM LOAD configuration (push RTX A5000 to limits)")
-        print("   🎯 Target: 90%+ GPU utilization on both GPUs")
-        print("   ⚡ Target: 200W+ power consumption per GPU") 
-        print("   💾 Target: 22GB+ memory usage per GPU (95% of 24GB)")
-        print(f"   📊 Total MCMC samples: {32 * 5000:,} (32 chains × 5000 samples)")
-        print("   🔥 This is the MOST AGGRESSIVE configuration for maximum GPU load!")
+        print("🔥 Using HPC STABLE HIGH PERFORMANCE configuration (balanced load)")
+        print("   🎯 Target: 80%+ GPU utilization on both GPUs (stable)")
+        print("   ⚡ Target: 150W+ power consumption per GPU") 
+        print("   💾 Target: 19GB+ memory usage per GPU (80% of 24GB)")
+        print(f"   📊 Total MCMC samples: {24 * 2000:,} (24 chains × 2000 samples)")
+        print("   🔥 Optimized for stability while maximizing dual GPU usage!")
+        
+        # 強制雙GPU分配提醒
+        print("\\n🚨 DUAL GPU ALLOCATION ENFORCEMENT:")
+        print("   🔒 Chain 0-11  → GPU 0 (RTX A5000 #0)")
+        print("   🔒 Chain 12-23 → GPU 1 (RTX A5000 #1)")
+        print("   📊 Expected result: Both GPUs showing 80%+ usage")
     else:
         # Local development with ultra-conservative settings to avoid kernel crash
         mcmc_config_dict = {
