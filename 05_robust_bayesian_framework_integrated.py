@@ -332,8 +332,9 @@ print(f"Phase 1: {phase_title} Bayesian Model Ensemble Analysis")
 print(f"階段1：{phase_title}貝氏模型集成分析")
 print("=" * 80)
 
-# Create environment-appropriate MCMC configuration
-if gpu_config:
+# Create environment-appropriate MCMC configuration - FORCE MAXIMUM LOAD
+# 🔥 OVERRIDE gpu_config to use our maximum load configuration
+if False:  # Disable gpu_config override to force our maximum settings
     mcmc_config_dict = gpu_config.get_mcmc_config()
     if IS_HPC:
         print(f"🚀 Using HPC GPU-optimized MCMC: {gpu_config.hardware_level}")
