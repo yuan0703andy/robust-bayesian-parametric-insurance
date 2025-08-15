@@ -44,7 +44,7 @@ print("正在準備CLIMADA真實數據...")
 print(f"   🌀 目標區域: North Carolina {NC_BOUNDS}")
 print(f"   📅 分析期間: {YEAR_RANGE[0]}-{YEAR_RANGE[1]}")
 
-tracks = get_regional_tracks(NC_BOUNDS, YEAR_RANGE, nb_synth=3)
+tracks = get_regional_tracks(NC_BOUNDS, YEAR_RANGE, nb_synth=15)
 print(f"   ✅ 獲取 {len(tracks.data)} 條軌跡")
 
 # 創建災害場
@@ -144,9 +144,9 @@ if successful_years:
     
     # 保存到pickle
     import pickle
-    with open('climada_complete_data.pkl', 'wb') as f:
+    with open('results/climada_data/climada_complete_data.pkl', 'wb') as f:
         pickle.dump(climada_complete_data, f)
-    print("💾 數據已保存到 climada_complete_data.pkl")
+    print("💾 數據已保存到 results/climada_data/climada_complete_data.pkl")
     
 else:
     print("   ❌ 無法創建曝險數據")
