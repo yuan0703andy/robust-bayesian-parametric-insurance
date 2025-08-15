@@ -214,14 +214,17 @@ for event_id, loss in event_losses.items():
     if loss > 0:  # Only use non-zero losses
         observed_losses.append(loss)
 
-observed_losses = np.array(observed_losses[:100])  # Use first 100 non-zero losses
+observed_losses = np.array(observed_losses)  # Use all non-zero losses
 print(f"🎯 Analyzing {len(observed_losses)} observed loss events...")
 print(f"   Loss range: ${np.min(observed_losses)/1e6:.1f}M - ${np.max(observed_losses)/1e6:.1f}M")
 
 # Run robust Bayesian model ensemble analysis
 print("\n🚀 Running robust Bayesian MCMC analysis...")
 if gpu_config:
-    print(f"   Using {gpu_config.hardware_level} acceleration")
+    if gpu_config.hardware_level == "cpu_only":
+        print(f"   Using {gpu_config.hardware_level} (no GPU hardware detected)")
+    else:
+        print(f"   Using {gpu_config.hardware_level} acceleration")
 
 ensemble_results = analyzer.analyze_model_class(observed_losses)
 

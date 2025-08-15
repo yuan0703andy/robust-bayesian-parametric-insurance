@@ -43,7 +43,12 @@ class GPUConfig:
             # Detect hardware capability
             import jax
             devices = jax.devices()
+            print(f"🔍 JAX devices detected: {devices}")
+            
             gpu_devices = [d for d in devices if d.device_kind == 'gpu']
+            print(f"🔍 GPU devices found: {gpu_devices}")
+            print(f"🔍 Device kinds: {[d.device_kind for d in devices]}")
+            print(f"🔍 JAX backend: {jax.default_backend()}")
             
             if len(gpu_devices) >= 2:
                 self.hardware_level = "dual_gpu"
@@ -54,6 +59,7 @@ class GPUConfig:
             else:
                 self.hardware_level = "cpu_only"
                 print("💻 CPU-only configuration")
+                print("💡 Possible causes: JAX CPU-only install, missing CUDA drivers, or GPU not visible")
                 
         except ImportError:
             print("⚠️ JAX not available, using CPU-only")
