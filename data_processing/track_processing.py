@@ -6,7 +6,7 @@ import numpy as np
 from climada.hazard import TCTracks
 
 
-def get_regional_tracks(bounds, year_range, nb_synth=5):
+def get_regional_tracks(bounds, year_range, nb_synth=10):
     """
     獲取並篩選區域颱風軌跡
     

@@ -303,7 +303,7 @@ def main():
     
     # 步驟 1: 載入 CLIMADA 數據
     # Step 1: Load CLIMADA data
-    data_path = "climada_complete_data.pkl"
+    data_path = "results/climada_data/climada_complete_data.pkl"
     climada_data = load_climada_data(data_path)
     
     if climada_data is None:
