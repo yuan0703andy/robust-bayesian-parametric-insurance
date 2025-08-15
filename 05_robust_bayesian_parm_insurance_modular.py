@@ -158,8 +158,7 @@ def run_bayesian_analysis(data, mcmc_config_dict, gpu_config=None):
         n_warmup=mcmc_config_dict["n_warmup"], 
         n_chains=mcmc_config_dict["n_chains"],
         cores=mcmc_config_dict["cores"],
-        target_accept=mcmc_config_dict["target_accept"],
-        backend=mcmc_config_dict.get("backend", "pytensor")
+        target_accept=mcmc_config_dict["target_accept"]
     )
     
     # Create analyzer configuration

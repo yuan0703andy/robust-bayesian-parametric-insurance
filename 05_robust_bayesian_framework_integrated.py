@@ -79,15 +79,21 @@ if HAS_GPU_SETUP:
         gpu_config = setup_gpu_environment(enable_gpu=True)
         gpu_config.print_performance_summary()
         print("✅ GPU acceleration configured")
+        
+        # Don't call configure_pymc_environment() - GPU setup already configured everything
+        print("✅ Using GPU-optimized PyMC environment (configured by GPU setup)")
+        
     except Exception as e:
         print(f"⚠️ GPU setup failed, using CPU: {e}")
         gpu_config = None
+        # Only configure PyMC if GPU setup failed
+        configure_pymc_environment()
+        print("✅ PyMC environment configured for CPU")
 else:
     print("💻 Using CPU-only configuration")
-
-# Configure PyMC environment
-configure_pymc_environment()
-print("✅ PyMC environment configured")
+    # Only configure PyMC if no GPU setup available
+    configure_pymc_environment()
+    print("✅ PyMC environment configured for CPU")
 
 # %%
 # Load data from previous steps
@@ -166,8 +172,7 @@ mcmc_config = MCMCConfig(
     n_warmup=mcmc_config_dict["n_warmup"],
     n_chains=mcmc_config_dict["n_chains"],
     cores=mcmc_config_dict["cores"],
-    target_accept=mcmc_config_dict["target_accept"],
-    backend=mcmc_config_dict.get("backend", "pytensor")
+    target_accept=mcmc_config_dict["target_accept"]
 )
 
 # Create analyzer configuration
