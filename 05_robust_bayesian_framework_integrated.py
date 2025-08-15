@@ -21,12 +21,12 @@ import pickle
 import json
 from typing import Dict, List, Tuple, Optional, Any
 
-# Configure environment for stability
-os.environ['OMP_NUM_THREADS'] = '1'
-os.environ['MKL_NUM_THREADS'] = '1'
-os.environ['OPENBLAS_NUM_THREADS'] = '1'
-os.environ['NUMBA_NUM_THREADS'] = '1'
-os.environ['PYTENSOR_FLAGS'] = 'device=cpu,floatX=float32,optimizer=fast_compile'
+# Configure environment for MCMC MULTIPROCESSING (not multithreading!)
+os.environ['OMP_NUM_THREADS'] = '1'      # 🎯 1 thread per process - let MCMC chains handle parallelism
+os.environ['MKL_NUM_THREADS'] = '1'      # 🎯 Prevent thread oversubscription 
+os.environ['OPENBLAS_NUM_THREADS'] = '1' # 🎯 Each MCMC chain = separate process
+os.environ['NUMBA_NUM_THREADS'] = '1'    # 🎯 Clean process-level parallelism
+os.environ['PYTENSOR_FLAGS'] = 'device=cpu,floatX=float64,mode=FAST_RUN,optimizer=fast_run'  # 🚀 Optimized compilation
 
 # Configure matplotlib for Chinese support
 plt.rcParams['font.sans-serif'] = ['Heiti TC']
@@ -68,10 +68,38 @@ from bayesian import (
 print("✅ All modules loaded successfully")
 
 # %%
-# PyMC Environment Setup
-print("\n🚀 Setting up optimized PyMC environment...")
-configure_pymc_environment()
-print("✅ PyMC environment configured for HPC")
+# Hardware Detection and Performance Setup
+print("\n🔍 Detecting hardware capabilities...")
+hardware_level = "cpu_only"
+mcmc_kwargs = None
+
+try:
+    from bayesian.gpu_setup import setup_gpu_environment
+    
+    # Auto-detect best configuration
+    gpu_config = setup_gpu_environment(enable_gpu=True)
+    gpu_config.print_performance_summary()
+    
+    # Get optimized configuration
+    mcmc_kwargs = gpu_config.get_pymc_sampler_kwargs()
+    hardware_level = gpu_config.hardware_level
+    
+    # Use GPU backend if available
+    backend = "gpu" if "gpu" in hardware_level else "cpu"
+    
+except ImportError:
+    print("⚠️ GPU setup not available, using CPU")
+    backend = "cpu"
+
+# Configure PyMC environment with optimal settings
+print(f"\n🚀 Setting up MAXIMUM PERFORMANCE PyMC environment ({hardware_level})...")
+configure_pymc_environment(
+    backend=backend,     # 🎯 Auto-detected optimal backend
+    mode="FAST_RUN",     # 🚀 Maximum execution speed
+    n_threads=1,         # 🎯 1 thread per process for MCMC multiprocessing
+    verbose=True
+)
+print(f"✅ PyMC environment configured for MAXIMUM PERFORMANCE ({hardware_level})")
 
 # %%
 # Load data from previous steps
@@ -125,9 +153,9 @@ print("階段1：貝氏不確定性量化")
 print("=" * 80)
 
 # Initialize probabilistic loss generator
-print("\n🎲 Initializing probabilistic loss distribution generator...")
+print("\n🎲 Initializing HIGH-PERFORMANCE probabilistic loss distribution generator...")
 loss_generator = ProbabilisticLossDistributionGenerator(
-    n_monte_carlo_samples=500,
+    n_monte_carlo_samples=2000,  # 🚀 4x more samples for better accuracy
     hazard_uncertainty_std=0.15,
     exposure_uncertainty_log_std=0.20,
     vulnerability_uncertainty_std=0.10
@@ -135,21 +163,21 @@ loss_generator = ProbabilisticLossDistributionGenerator(
 
 # Generate probabilistic distributions for key events
 print("   Generating Bayesian uncertainty distributions...")
-sample_event_ids = list(event_losses.keys())[:50]  # Focus on first 50 events
+sample_event_ids = list(event_losses.keys())[:200]  # 🚀 Process 4x more events with 8 cores
 bayesian_loss_distributions = {}
 
 for i, event_id in enumerate(sample_event_ids):
-    if i % 10 == 0:
+    if i % 25 == 0:  # 🚀 Update progress every 25 events (better for 200 events)
         print(f"   Processing event {i+1}/{len(sample_event_ids)}...")
     
     base_loss = event_losses[event_id]
     if base_loss > 0:
         # Generate realistic uncertainty distribution
         log_std = 0.3
-        samples = np.random.lognormal(np.log(max(base_loss, 1)), log_std, 500)
+        samples = np.random.lognormal(np.log(max(base_loss, 1)), log_std, 2000)  # 🚀 Match generator config
         bayesian_loss_distributions[event_id] = samples
     else:
-        bayesian_loss_distributions[event_id] = np.zeros(500)
+        bayesian_loss_distributions[event_id] = np.zeros(2000)  # 🚀 Match sample size
 
 print(f"   ✅ Generated {len(bayesian_loss_distributions)} Bayesian distributions")
 
