@@ -45,7 +45,8 @@ class GPUConfig:
             devices = jax.devices()
             print(f"🔍 JAX devices detected: {devices}")
             
-            gpu_devices = [d for d in devices if d.device_kind == 'gpu']
+            # 修正 GPU 檢測邏輯 - JAX 在 CUDA 設備上 device_kind 是 GPU 名稱，不是 'gpu'
+            gpu_devices = [d for d in devices if 'cuda' in str(d).lower() or 'gpu' in d.device_kind.lower()]
             print(f"🔍 GPU devices found: {gpu_devices}")
             print(f"🔍 Device kinds: {[d.device_kind for d in devices]}")
             print(f"🔍 JAX backend: {jax.default_backend()}")
