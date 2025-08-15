@@ -36,7 +36,7 @@ class DualGPU_MCMC_Optimizer:
             'JAX_PLATFORMS': 'cuda,cpu',
             'JAX_ENABLE_X64': 'False',
             'XLA_PYTHON_CLIENT_PREALLOCATE': 'false',
-            'XLA_PYTHON_CLIENT_MEM_FRACTION': '0.95',
+            'XLA_PYTHON_CLIENT_MEM_FRACTION': '0.8',  # 降低到80%避免kernel crash
             'XLA_PYTHON_CLIENT_ALLOCATOR': 'platform',
             
             # CUDA優化

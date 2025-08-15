@@ -326,9 +326,14 @@ def verify_dual_gpu_setup():
 # GPU-Optimized Environment Setup
 print("\n🔧 Setting up GPU-optimized environment...")
 
-# Auto-detect and setup GPU configuration
+# Force disable GPU setup module on HPC to use our custom configuration
 gpu_config = None
-if HAS_GPU_SETUP:
+if IS_HPC:
+    print("🔥 HPC Mode: Using custom dual GPU configuration (bypassing GPU setup module)")
+    # Don't use GPU setup module on HPC - use our optimized config
+    configure_pymc_environment()
+    print("✅ PyMC environment configured with custom HPC settings")
+elif HAS_GPU_SETUP:
     try:
         gpu_config = setup_gpu_environment(enable_gpu=True)
         gpu_config.print_performance_summary()
