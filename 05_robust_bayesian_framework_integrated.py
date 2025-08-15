@@ -226,7 +226,7 @@ else:
 # Import GPU setup module FIRST
 print("\n🔧 Loading GPU setup module...")
 try:
-    from bayesian.gpu_setup import GPUConfig, setup_gpu_environment
+    from bayesian.gpu_setup.gpu_config import GPUConfig, setup_gpu_environment
     HAS_GPU_SETUP = True
     print("✅ GPU setup module loaded successfully")
 except ImportError as e:
@@ -352,8 +352,14 @@ elif HAS_GPU_SETUP:
         gpu_config.print_performance_summary()
         print("✅ GPU acceleration configured")
         
-        # Don't call configure_pymc_environment() - GPU setup already configured everything
-        print("✅ Using GPU-optimized PyMC environment (configured by GPU setup)")
+        # Use NumPyro config instead of PyMC GPU config
+        if gpu_config.hardware_level != "cpu_only":
+            print("✅ Using NumPyro GPU configuration (bypassing PyMC GPU issues)")
+            numpyro_config = gpu_config.get_numpyro_mcmc_config()
+            print(f"🎯 NumPyro config: {numpyro_config}")
+        else:
+            print("✅ Using CPU configuration with PyMC")
+            configure_pymc_environment()
         
     except Exception as e:
         print(f"⚠️ GPU setup failed, using CPU: {e}")
@@ -455,14 +461,24 @@ print(f"Phase 1: {phase_title} Bayesian Model Ensemble Analysis")
 print(f"階段1：{phase_title}貝氏模型集成分析")
 print("=" * 80)
 
-# Create environment-appropriate MCMC configuration - FORCE MAXIMUM LOAD
-# 🔥 OVERRIDE gpu_config to use our maximum load configuration
-if False:  # Disable gpu_config override to force our maximum settings
-    mcmc_config_dict = gpu_config.get_mcmc_config()
-    if IS_HPC:
-        print(f"🚀 Using HPC GPU-optimized MCMC: {gpu_config.hardware_level}")
-    else:
-        print(f"💻 Using local GPU-optimized MCMC: {gpu_config.hardware_level}")
+# Create environment-appropriate MCMC configuration
+# Use NumPyro GPU config when available, fallback to custom config
+if gpu_config and gpu_config.hardware_level != "cpu_only":
+    # Use NumPyro GPU configuration
+    numpyro_mcmc_config = gpu_config.get_numpyro_mcmc_config()
+    print(f"🚀 Using NumPyro GPU-optimized MCMC: {gpu_config.hardware_level}")
+    print(f"🎯 NumPyro config: {numpyro_mcmc_config}")
+    
+    # Convert NumPyro config to our format
+    mcmc_config_dict = {
+        "n_samples": numpyro_mcmc_config["num_samples"],
+        "n_warmup": numpyro_mcmc_config["num_warmup"], 
+        "n_chains": numpyro_mcmc_config["num_chains"],
+        "cores": numpyro_mcmc_config["num_chains"],
+        "target_accept": 0.90,
+        "backend": "numpyro",
+        "chain_method": numpyro_mcmc_config["chain_method"]
+    }
 else:
     if IS_HPC:
         # HPC STABLE HIGH PERFORMANCE configuration - 穩定高性能配置
@@ -719,46 +735,22 @@ else:
 
 log_hpc_performance("Analysis Start")
 
-# Force GPU sampling on HPC by setting PyMC sampling kwargs
+# Configure NumPyro GPU sampling on HPC (bypassing PyMC GPU issues)
 if IS_HPC and dual_gpu_ready:
-    print("\n🔥 Forcing PyMC to use NumPyro GPU sampler...")
+    print("\n🔥 Using NumPyro GPU sampler (bypassing PyMC GPU backend issues)...")
+    print("   ⚠️ PyMC GPU backend has compatibility issues - using NumPyro directly")
+    print("   💡 This avoids the 'old GPU back-end removed from PyTensor' error")
     
-    # Set global PyMC sampling defaults for GPU
-    import pymc as pm
+    # Set NumPyro-specific environment for GPU
+    import os
+    os.environ['NUMPYRO_PLATFORM'] = 'gpu'
+    os.environ['JAX_PLATFORM_NAME'] = 'gpu'
     
-    # Store original sample function
-    original_sample = pm.sample
-    
-    def gpu_sample(*args, **kwargs):
-        """Wrapper to force GPU sampling parameters"""
-        # Override with our GPU parameters
-        gpu_kwargs = {
-            'nuts_sampler': 'numpyro',
-            'chains': 24,
-            'cores': 24,
-            'chain_method': 'parallel',
-            'draws': 2000,
-            'tune': 1000,
-            'target_accept': 0.90,
-            'progressbar': True,
-            'return_inferencedata': True
-        }
-        # Update with our GPU settings
-        kwargs.update(gpu_kwargs)
-        print(f"   🎯 Forcing GPU sampling: {kwargs}")
-        return original_sample(*args, **kwargs)
-    
-    # Monkey patch PyMC sample function
-    pm.sample = gpu_sample
-    print("   ✅ PyMC sample function patched for GPU acceleration")
+    print("   ✅ NumPyro GPU environment configured")
 
 ensemble_results = analyzer.analyze_model_class(observed_losses)
 
-# Restore original function if we patched it
-if IS_HPC and dual_gpu_ready:
-    import pymc as pm
-    pm.sample = original_sample
-    print("   🔧 PyMC sample function restored")
+# Analysis complete - no need to restore anything (no monkey patching)
 
 log_hpc_performance("MCMC Analysis Complete")
 
