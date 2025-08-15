@@ -386,7 +386,21 @@ def run_bayesian_analysis(data, mcmc_config_dict, insurance_results, args):
         calculate_weights=True
     )
     
-    # Model specification (simplified for CPU)
+    # 🛡️ Robust Bayesian 原則：使用原始數據，但轉換為合理尺度
+    raw_losses = data['observed_losses'].copy()
+    if len(raw_losses) > 0:
+        # 只做尺度轉換（除以1M），保持數據的原始分布特性
+        # 這樣既避免數值問題，又不會過度操作數據
+        analysis_data = raw_losses / 1e6  # 轉換為百萬美元單位
+        
+        print(f"   📊 Robust數據處理:")
+        print(f"      原始範圍: ${np.min(raw_losses)/1e6:.1f}M - ${np.max(raw_losses)/1e6:.1f}M")
+        print(f"      分析單位: {np.min(analysis_data):.2f} - {np.max(analysis_data):.2f} (百萬美元)")
+        print(f"      保持原始分布特性，符合Robust Bayesian原則")
+    else:
+        analysis_data = raw_losses
+    
+    # Model specification (恢復完整模型，使用標準化數據)
     model_class_spec = ModelClassSpec(
         enable_epsilon_contamination=True,
         epsilon_values=[0.05] if args.quick_test else [0.01, 0.05],
@@ -402,11 +416,13 @@ def run_bayesian_analysis(data, mcmc_config_dict, insurance_results, args):
     analyzer = ModelClassAnalyzer(model_class_spec, analyzer_config)
     
     # Run analysis
-    print(f"\n🚀 Running MCMC analysis on {len(data['observed_losses'])} observations...")
+    print(f"\n🚀 Running MCMC analysis on {len(analysis_data)} observations...")
+    print(f"   🛡️ Using robust non-informative priors")
+    print(f"   🔬 Complete ε-contamination model class")
     start_time = time.time()
     
     try:
-        ensemble_results = analyzer.analyze_model_class(data['observed_losses'])
+        ensemble_results = analyzer.analyze_model_class(analysis_data)
         elapsed = time.time() - start_time
         
         print(f"\n✅ Bayesian analysis complete!")

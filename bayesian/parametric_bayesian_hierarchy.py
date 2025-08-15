@@ -972,23 +972,35 @@ class ParametricHierarchicalModel:
         print("  🔬 使用PyMC構建階層模型...")
         
         with pm.Model() as hierarchical_model:
-            # 根據事前情境設置超參數
-            hyperparams = self._get_hyperparameters()
+            # 根據事前情境和數據尺度設置超參數
+            hyperparams = self._get_hyperparameters(observations)
             
-            # Level 4: 超參數模型
+            # 🎯 重新參數化策略 1: Non-Centered Parameterization (Neal's Funnel避免)
+            # 將 hierarchical 依賴關係重新參數化為獨立參數
+            
+            # Level 4: 超參數模型 (保持原樣)
             alpha = pm.Normal("alpha", mu=hyperparams['alpha_mu'], 
                             sigma=hyperparams['alpha_sigma'])
-            beta = pm.HalfNormal("beta", sigma=hyperparams['beta_sigma'])
             
-            # Level 3: 參數模型
-            phi = pm.Normal("phi", mu=alpha, sigma=beta)
+            # 🔧 重新參數化: 使用對數尺度避免HalfNormal的幾何問題
+            log_beta = pm.Normal("log_beta", mu=np.log(hyperparams['beta_sigma']), sigma=0.5)
+            beta = pm.Deterministic("beta", pt.exp(log_beta))
             
-            # Level 2: 過程模型  
-            tau = pm.HalfNormal("tau", sigma=hyperparams['tau_sigma'])
-            theta = pm.Normal("theta", mu=phi, sigma=tau)
+            # 🔧 重新參數化: Non-centered parameterization for phi
+            phi_raw = pm.Normal("phi_raw", mu=0, sigma=1)  # 標準正態
+            phi = pm.Deterministic("phi", alpha + beta * phi_raw)  # 轉換
             
-            # Level 1: 觀測模型 - 根據概似函數選擇
-            sigma_obs = pm.HalfNormal("sigma_obs", sigma=hyperparams['sigma_obs'])
+            # Level 2: 過程模型 - 同樣使用non-centered  
+            log_tau = pm.Normal("log_tau", mu=np.log(hyperparams['tau_sigma']), sigma=0.5)
+            tau = pm.Deterministic("tau", pt.exp(log_tau))
+            
+            # 🔧 重新參數化: Non-centered parameterization for theta
+            theta_raw = pm.Normal("theta_raw", mu=0, sigma=1)  # 標準正態
+            theta = pm.Deterministic("theta", phi + tau * theta_raw)  # 轉換
+            
+            # Level 1: 觀測模型 - 對數尺度參數化
+            log_sigma_obs = pm.Normal("log_sigma_obs", mu=np.log(hyperparams['sigma_obs']), sigma=0.5)
+            sigma_obs = pm.Deterministic("sigma_obs", pt.exp(log_sigma_obs))
             
             if self.model_spec.likelihood_family == LikelihoodFamily.NORMAL:
                 y_obs = pm.Normal("y_obs", mu=theta, sigma=sigma_obs, observed=observations)
@@ -1004,72 +1016,84 @@ class ParametricHierarchicalModel:
             elif self.model_spec.likelihood_family == LikelihoodFamily.LAPLACE:
                 y_obs = pm.Laplace("y_obs", mu=theta, b=sigma_obs, observed=observations)
             elif self.model_spec.likelihood_family == LikelihoodFamily.EPSILON_CONTAMINATION_FIXED:
-                # 固定ε的ε-contamination模型
-                print(f"    使用固定 ε-contamination (ε={self.model_spec.epsilon_contamination or 3.2/365:.4f})")
+                # 🔧 重新參數化的ε-contamination模型
+                print(f"    使用重新參數化的固定 ε-contamination")
                 
-                epsilon = self.model_spec.epsilon_contamination or 3.2/365  # 預設颱風頻率
+                epsilon = self.model_spec.epsilon_contamination or 3.2/365
                 
-                # 正常分佈成分: f₀(y|θ)
-                normal_dist = pm.Normal.dist(mu=theta, sigma=sigma_obs)
-                normal_logp = pm.logp(normal_dist, observations)
+                # 🎯 重新參數化策略 2: 簡化混合模型避免複雜幾何
+                # 使用離散混合而非連續混合，改善採樣效率
                 
-                # 污染分佈成分: q(y) - 使用優化的分布選擇系統
-                contamination_dist = self._create_contamination_distribution(
-                    location=theta, 
-                    scale=sigma_obs, 
-                    data_values=observations
-                )
+                # 為每個觀測點創建離散混合指示器
+                n_obs = len(observations)
                 
-                # 處理自定義分布（如GPD）vs 標準分布
-                if hasattr(contamination_dist, 'logp') and not hasattr(contamination_dist, 'dist'):
-                    # 自定義分布（GPD）
-                    contamination_logp = contamination_dist.logp(observations)
-                else:
-                    # 標準PyMC分布
-                    contamination_logp = pm.logp(contamination_dist, observations)
+                # 混合成分指示器 (Bernoulli)
+                mixture_indicator = pm.Bernoulli("mixture_indicator", p=epsilon, shape=n_obs)
                 
-                # 混合對數似然
-                normal_log_weight = pt.log(1 - epsilon) + normal_logp
-                contamination_log_weight = pt.log(epsilon) + contamination_logp
+                # 🔧 重新參數化: 分別為兩個成分定義參數
+                # 正常成分
+                theta_normal = theta
+                sigma_normal = sigma_obs
                 
-                mixture_logp = pt.logsumexp(pt.stack([normal_log_weight, contamination_log_weight], axis=0), axis=0)
+                # 污染成分 - 使用更簡單的重尾分布
+                # 避免複雜的Cauchy，使用Student-t代替
+                nu_contamination = 2.0  # 固定自由度，避免額外參數
+                sigma_contamination = sigma_obs * 3.0  # 更寬的尺度
                 
-                y_obs = pm.Potential("epsilon_contamination_likelihood", mixture_logp.sum())
+                # 🔧 混合似然使用switch函數 (更穩定的數值實現)
+                likelihood_normal = pm.Normal.dist(mu=theta_normal, sigma=sigma_normal)
+                likelihood_contamination = pm.StudentT.dist(nu=nu_contamination, mu=theta, sigma=sigma_contamination)
+                
+                # 對每個觀測點計算混合似然
+                def mixture_logp_func(obs_val, indicator):
+                    normal_logp = pm.logp(likelihood_normal, obs_val)
+                    contamination_logp = pm.logp(likelihood_contamination, obs_val)
+                    return pt.switch(indicator, contamination_logp, normal_logp)
+                
+                # 計算所有觀測點的對數似然
+                total_logp = pt.sum([mixture_logp_func(observations[i], mixture_indicator[i]) 
+                                   for i in range(n_obs)])
+                
+                y_obs = pm.Potential("epsilon_contamination_likelihood", total_logp)
                 
             elif self.model_spec.likelihood_family == LikelihoodFamily.EPSILON_CONTAMINATION_ESTIMATED:
-                # 估計ε的ε-contamination模型
-                print("    使用估計 ε-contamination (Beta先驗)")
+                # 🔧 重新參數化的估計ε版本
+                print("    使用重新參數化的估計 ε-contamination")
                 
-                # ε的Beta先驗
+                # 🔧 重新參數化: 使用logit變換避免Beta分布的邊界問題
                 alpha_eps, beta_eps = self.model_spec.epsilon_prior
-                epsilon = pm.Beta("epsilon", alpha=alpha_eps, beta=beta_eps)
                 
-                # 正常分佈成分
-                normal_dist = pm.Normal.dist(mu=theta, sigma=sigma_obs)
-                normal_logp = pm.logp(normal_dist, observations)
+                # logit(ε) ~ Normal，然後逆變換
+                logit_epsilon = pm.Normal("logit_epsilon", 
+                                         mu=np.log(alpha_eps/(alpha_eps + beta_eps)),  # logit of mean
+                                         sigma=1.0)
+                epsilon = pm.Deterministic("epsilon", pt.sigmoid(logit_epsilon))
                 
-                # 污染分佈成分: q(y) - 使用優化的分布選擇系統
-                contamination_dist = self._create_contamination_distribution(
-                    location=theta, 
-                    scale=sigma_obs, 
-                    data_values=observations
-                )
+                # 使用與固定版本相同的重新參數化混合模型
+                n_obs = len(observations)
                 
-                # 處理自定義分布（如GPD）vs 標準分布
-                if hasattr(contamination_dist, 'logp') and not hasattr(contamination_dist, 'dist'):
-                    # 自定義分布（GPD）
-                    contamination_logp = contamination_dist.logp(observations)
-                else:
-                    # 標準PyMC分布
-                    contamination_logp = pm.logp(contamination_dist, observations)
+                # 混合成分指示器
+                mixture_indicator = pm.Bernoulli("mixture_indicator_est", p=epsilon, shape=n_obs)
                 
-                # 混合對數似然
-                normal_log_weight = pt.log(1 - epsilon) + normal_logp
-                contamination_log_weight = pt.log(epsilon) + contamination_logp
+                # 正常成分和污染成分
+                theta_normal = theta
+                sigma_normal = sigma_obs
+                nu_contamination = 2.0
+                sigma_contamination = sigma_obs * 3.0
                 
-                mixture_logp = pt.logsumexp(pt.stack([normal_log_weight, contamination_log_weight], axis=0), axis=0)
+                # 混合似然
+                likelihood_normal = pm.Normal.dist(mu=theta_normal, sigma=sigma_normal)
+                likelihood_contamination = pm.StudentT.dist(nu=nu_contamination, mu=theta, sigma=sigma_contamination)
                 
-                y_obs = pm.Potential("epsilon_contamination_likelihood_estimated", mixture_logp.sum())
+                def mixture_logp_func_est(obs_val, indicator):
+                    normal_logp = pm.logp(likelihood_normal, obs_val)
+                    contamination_logp = pm.logp(likelihood_contamination, obs_val)
+                    return pt.switch(indicator, contamination_logp, normal_logp)
+                
+                total_logp = pt.sum([mixture_logp_func_est(observations[i], mixture_indicator[i]) 
+                                   for i in range(n_obs)])
+                
+                y_obs = pm.Potential("epsilon_contamination_likelihood_estimated", total_logp)
                 
             else:
                 raise ValueError(f"不支援的概似函數: {self.model_spec.likelihood_family}")
@@ -1163,7 +1187,7 @@ class ParametricHierarchicalModel:
         sample_var = np.var(observations)
         
         # 根據事前情境調整參數
-        hyperparams = self._get_hyperparameters()
+        hyperparams = self._get_hyperparameters(observations)
         
         # 生成模擬後驗樣本
         n_total_samples = self.mcmc_config.n_samples * self.mcmc_config.n_chains
@@ -1236,49 +1260,57 @@ class ParametricHierarchicalModel:
         print("✅ 簡化階層模型擬合完成")
         return result
     
-    def _get_hyperparameters(self) -> Dict[str, float]:
-        """根據事前情境獲取超參數"""
+    def _get_hyperparameters(self, observations: Optional[np.ndarray] = None) -> Dict[str, float]:
+        """根據Robust Bayesian理論獲取非資訊性/寬鬆先驗"""
         scenario = self.model_spec.prior_scenario
         
+        # 🛡️ Robust Bayesian 原則：使用非資訊性先驗，不依賴數據
+        # 這確保先驗不會過度影響後驗，讓數據說話
+        
         if scenario == PriorScenario.NON_INFORMATIVE:
+            # 極度非資訊性：Jeffreys 類型先驗
             return {
                 'alpha_mu': 0.0,
-                'alpha_sigma': 100.0,   # 非常寬
+                'alpha_sigma': 100.0,   # 非常寬，接近平坦先驗
                 'beta_sigma': 50.0,
                 'tau_sigma': 20.0,
                 'sigma_obs': 10.0
             }
         elif scenario == PriorScenario.WEAK_INFORMATIVE:
+            # 弱資訊性：稍微正則化但仍然寬鬆
             return {
                 'alpha_mu': 0.0,
-                'alpha_sigma': 10.0,    # 預設
+                'alpha_sigma': 10.0,    # 標準弱資訊先驗
                 'beta_sigma': 5.0,
-                'tau_sigma': 2.0,
-                'sigma_obs': 1.0
+                'tau_sigma': 2.5,
+                'sigma_obs': 2.5
             }
         elif scenario == PriorScenario.OPTIMISTIC:
+            # 樂觀：假設較低不確定性
             return {
                 'alpha_mu': 0.0,
-                'alpha_sigma': 5.0,     # 樂觀：較寬先驗
-                'beta_sigma': 3.0,
-                'tau_sigma': 1.5,
-                'sigma_obs': 0.8
+                'alpha_sigma': 5.0,     
+                'beta_sigma': 2.5,
+                'tau_sigma': 1.0,
+                'sigma_obs': 1.0
             }
         elif scenario == PriorScenario.PESSIMISTIC:
+            # 悲觀：假設較高不確定性，但仍 robust
             return {
                 'alpha_mu': 0.0,
-                'alpha_sigma': 0.5,     # 悲觀：較窄先驗
-                'beta_sigma': 0.3,
-                'tau_sigma': 0.2,
-                'sigma_obs': 0.1
+                'alpha_sigma': 20.0,     # 更寬以反映悲觀不確定性
+                'beta_sigma': 10.0,
+                'tau_sigma': 5.0,
+                'sigma_obs': 5.0
             }
         elif scenario == PriorScenario.CONSERVATIVE:
+            # 保守：中等資訊性
             return {
                 'alpha_mu': 0.0,
-                'alpha_sigma': 1.0,     # 保守：很窄的先驗
-                'beta_sigma': 0.5,
-                'tau_sigma': 0.3,
-                'sigma_obs': 0.2
+                'alpha_sigma': 3.0,     
+                'beta_sigma': 1.5,
+                'tau_sigma': 0.75,
+                'sigma_obs': 0.75
             }
         else:
             raise ValueError(f"未知的事前情境: {scenario}")
