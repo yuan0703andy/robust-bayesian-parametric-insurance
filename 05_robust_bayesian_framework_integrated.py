@@ -131,9 +131,10 @@ if IS_HPC:
         'OPENBLAS_NUM_THREADS': '8', 
         'NUMBA_NUM_THREADS': '8',
         
-        # PyMC/ArviZ optimization
+        # PyMC/ArviZ optimization + GPU forcing
         'PYMC_COMPUTE_TEST_VALUE': 'ignore',
         'PYTENSOR_OPTIMIZER_VERBOSE': '0',
+        'PYTENSOR_FLAGS': 'device=cuda,floatX=float32,optimizer=fast_run',
     }
     
     print("🔧 Setting HPC environment variables:")
@@ -330,16 +331,17 @@ if gpu_config:
         print(f"💻 Using local GPU-optimized MCMC: {gpu_config.hardware_level}")
 else:
     if IS_HPC:
-        # HPC configuration optimized for RTX A5000 (24GB each) with float32
+        # HPC configuration optimized for speed testing with GPU
         mcmc_config_dict = {
-            "n_samples": 3000,      # Increased for float32 efficiency
-            "n_warmup": 1500,       # Increased warmup
-            "n_chains": 16,         # More chains with float32
-            "cores": 16,            # More cores
-            "target_accept": 0.90,  # Balanced acceptance for speed
-            "backend": "pytensor"
+            "n_samples": 1000,      # Reduced for speed testing
+            "n_warmup": 500,        # Reduced warmup
+            "n_chains": 8,          # Reduced chains for faster testing
+            "cores": 8,             # Reduced cores
+            "target_accept": 0.85,  # Lower acceptance for speed
+            "backend": "pytensor",
+            "nuts_sampler": "numpyro"  # Force NumPyro GPU sampler
         }
-        print("🚀 Using HPC RTX A5000-optimized MCMC configuration (float32 speed)")
+        print("🚀 Using HPC GPU-forced MCMC configuration (NumPyro backend)")
     else:
         # Local development with ultra-conservative settings to avoid kernel crash
         mcmc_config_dict = {
@@ -439,16 +441,36 @@ def log_hpc_performance(phase_name):
     try:
         # Check GPU usage if available
         import subprocess
-        result = subprocess.run(['nvidia-smi', '--query-gpu=utilization.gpu,memory.used',
+        result = subprocess.run(['nvidia-smi', '--query-gpu=utilization.gpu,memory.used,power.draw',
                                '--format=csv,noheader,nounits'],
                               capture_output=True, text=True)
         if result.returncode == 0:
             gpu_stats = result.stdout.strip().split('\n')
             for i, stats in enumerate(gpu_stats):
-                util, mem = stats.split(', ')
-                print(f"   🎯 RTX 2080 Ti #{i}: {util}% GPU, {mem}MB memory")
+                util, mem, power = stats.split(', ')
+                print(f"   🎯 RTX A5000 #{i}: {util}% GPU, {mem}MB memory, {power}W power")
+                
+                # Check if GPU is actually being used
+                if float(util) < 5:
+                    print(f"   ⚠️ GPU #{i} usage is very low - may not be using GPU acceleration")
+                elif float(util) > 50:
+                    print(f"   ✅ GPU #{i} is actively computing")
+                    
     except (ImportError, FileNotFoundError, subprocess.SubprocessError):
-        print("   📊 GPU monitoring unavailable (install nvidia-ml-py for detailed stats)")
+        print("   📊 GPU monitoring unavailable")
+        
+    # Check JAX GPU detection
+    try:
+        import jax
+        devices = jax.devices()
+        gpu_devices = [d for d in devices if 'gpu' in str(d).lower() or 'cuda' in str(d).lower()]
+        print(f"   🔍 JAX detected devices: {len(gpu_devices)} GPU, {len(devices)-len(gpu_devices)} CPU")
+        if gpu_devices:
+            print(f"   ✅ JAX GPU devices available: {gpu_devices}")
+        else:
+            print(f"   ⚠️ JAX not detecting GPU devices - using CPU only")
+    except ImportError:
+        print("   ⚠️ JAX not available for device detection")
 
 # Start performance monitoring
 start_hpc_time = time.time()
