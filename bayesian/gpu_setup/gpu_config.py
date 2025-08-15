@@ -121,13 +121,35 @@ class GPUConfig:
                 "backend": "pytensor"
             }
     
+    def get_numpyro_mcmc_config(self) -> Dict[str, Any]:
+        """
+        Get NumPyro MCMC configuration (bypasses PyMC GPU issues)
+        獲取NumPyro MCMC配置（繞過PyMC GPU問題）
+        """
+        config = self.get_mcmc_config()
+        
+        numpyro_config = {
+            "num_samples": config["n_samples"],
+            "num_warmup": config["n_warmup"],
+            "num_chains": config["n_chains"],
+            "chain_method": "parallel" if self.hardware_level != "cpu_only" else "sequential",
+            "progress_bar": True,
+        }
+        
+        print(f"🎯 NumPyro MCMC config: {numpyro_config}")
+        return numpyro_config
+    
     def get_pymc_sampler_kwargs(self) -> Dict[str, Any]:
         """
         Get PyMC sampler kwargs for pm.sample()
         獲取PyMC採樣器參數用於pm.sample()
+        
+        WARNING: PyMC GPU backend has compatibility issues.
+        Consider using get_numpyro_mcmc_config() instead.
         """
         config = self.get_mcmc_config()
         
+        # Force CPU backend for PyMC due to GPU compatibility issues
         sampler_kwargs = {
             "draws": config["n_samples"],
             "tune": config["n_warmup"],
@@ -138,12 +160,9 @@ class GPUConfig:
             "return_inferencedata": True,
         }
         
-        # JAX-specific parameters
-        if config.get("backend") == "jax":
-            sampler_kwargs.update({
-                "nuts_sampler": "numpyro",
-                "chain_method": "parallel",
-            })
+        # Only use CPU backend for PyMC due to GPU issues
+        print("⚠️ Using CPU backend for PyMC due to GPU compatibility issues")
+        print("💡 Consider using NumPyro directly for GPU acceleration")
         
         return sampler_kwargs
     
