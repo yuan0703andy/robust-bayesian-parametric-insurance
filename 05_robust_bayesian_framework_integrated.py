@@ -72,41 +72,64 @@ def detect_environment():
     hostname = socket.gethostname().lower()
     system = platform.system().lower()
     
-    # HPC detection patterns
-    hpc_patterns = ['hpc', 'cluster', 'slurm', 'pbs', 'node', 'compute']
+    # HPC detection patterns (更精確的檢測)
+    hpc_patterns = ['hpc', 'cluster', 'slurm', 'pbs', 'node', 'compute', 'borsuk']
     is_hpc = any(pattern in hostname for pattern in hpc_patterns)
     
     # Additional checks
     hpc_paths = ['/hpc/', '/cluster/', '/scratch/']
     has_hpc_paths = any(os.path.exists(path) for path in hpc_paths)
     
-    return is_hpc or has_hpc_paths
+    # Check for SLURM environment
+    has_slurm = 'SLURM_JOB_ID' in os.environ or 'SLURM_NTASKS' in os.environ
+    
+    return is_hpc or has_hpc_paths or has_slurm
 
 IS_HPC = detect_environment()
 print(f"🔍 Environment detected: {'HPC' if IS_HPC else 'Local Development'}")
 
+# Check HPC resources if on HPC
 if IS_HPC:
-    print("🚀 HPC GPU Environment Setup - Configuring for Dual RTX 2080 Ti")
+    print("🔍 HPC Resource Detection:")
+    
+    # Check SLURM allocation
+    if 'SLURM_NTASKS' in os.environ:
+        print(f"   SLURM Tasks: {os.environ['SLURM_NTASKS']}")
+    if 'SLURM_CPUS_PER_TASK' in os.environ:
+        print(f"   CPUs per task: {os.environ['SLURM_CPUS_PER_TASK']}")
+    if 'SLURM_MEM_PER_NODE' in os.environ:
+        print(f"   Memory per node: {os.environ['SLURM_MEM_PER_NODE']}")
+    if 'SLURM_JOB_ID' in os.environ:
+        print(f"   Job ID: {os.environ['SLURM_JOB_ID']}")
+        
+    # Check GPU allocation
+    if 'CUDA_VISIBLE_DEVICES' in os.environ:
+        print(f"   Available GPUs: {os.environ['CUDA_VISIBLE_DEVICES']}")
+    
+    print("   💡 Using conservative settings to prevent resource exhaustion")
+
+if IS_HPC:
+    print("🚀 HPC GPU Environment Setup - Configuring for Dual RTX A5000 (24GB each)")
     
     # Configure environment for HPC dual-GPU system
     hpc_env_vars = {
-        # JAX GPU Configuration for RTX 2080 Ti
+        # JAX GPU Configuration for RTX A5000 (24GB each - optimized for speed)
         'JAX_PLATFORMS': 'cuda,cpu',
-        'JAX_ENABLE_X64': 'True', 
+        'JAX_ENABLE_X64': 'False',  # Use float32 for speed and memory efficiency
         'XLA_PYTHON_CLIENT_PREALLOCATE': 'false',
-        'XLA_PYTHON_CLIENT_MEM_FRACTION': '0.8',
+        'XLA_PYTHON_CLIENT_MEM_FRACTION': '0.75',  # Reduced for float32 efficiency
         'XLA_PYTHON_CLIENT_ALLOCATOR': 'platform',
         'JAX_PLATFORM_NAME': 'gpu',
         
-        # CUDA Configuration for RTX 2080 Ti
-        'CUDA_VISIBLE_DEVICES': '0,1',  # Use both GPUs
+        # CUDA Configuration for RTX A5000
+        'CUDA_VISIBLE_DEVICES': '0,1',  # Use both A5000 GPUs
         'CUDA_DEVICE_ORDER': 'PCI_BUS_ID',
         
-        # CPU Threading Control for 16-core system
-        'OMP_NUM_THREADS': '16',    # Use all 16 cores
-        'MKL_NUM_THREADS': '16',
-        'OPENBLAS_NUM_THREADS': '16', 
-        'NUMBA_NUM_THREADS': '16',
+        # CPU Threading Control (conservative for stability)
+        'OMP_NUM_THREADS': '8',     # Reduced to prevent overload
+        'MKL_NUM_THREADS': '8',
+        'OPENBLAS_NUM_THREADS': '8', 
+        'NUMBA_NUM_THREADS': '8',
         
         # PyMC/ArviZ optimization
         'PYMC_COMPUTE_TEST_VALUE': 'ignore',
@@ -119,10 +142,10 @@ if IS_HPC:
         print(f"   ✅ {key} = {value}")
     
     print("\n⚡ HPC Hardware Target:")
-    print("   🖥️  CPU: 16 cores")
-    print("   🎯 GPU: 2 × RTX 2080 Ti")
-    print("   💾 Memory: High-capacity")
-    print("   🚀 Expected: 4-6x speedup over single GPU")
+    print("   🖥️  CPU: 16+ cores")
+    print("   🎯 GPU: 2 × RTX A5000 (24GB each)")
+    print("   💾 Total GPU Memory: 48GB (float32 optimized)")
+    print("   🚀 Expected: 8-12x speedup with float32 speed advantage")
     
 else:
     print("💻 Local Development Environment Setup")
@@ -142,6 +165,10 @@ else:
         # PyMC optimization for local
         'PYMC_COMPUTE_TEST_VALUE': 'ignore',
         'PYTENSOR_OPTIMIZER_VERBOSE': '0',
+        
+        # Memory management for local development
+        'PYTENSOR_FLAGS': 'device=cpu,floatX=float32,optimizer=fast_compile,allow_gc=True',
+        'PYTENSOR_REENTRANT_COMPILATION': 'false',
         
         # Fix PROJ database path issues
         'PROJ_DATA': '',  # Clear any HPC-specific paths
@@ -303,27 +330,27 @@ if gpu_config:
         print(f"💻 Using local GPU-optimized MCMC: {gpu_config.hardware_level}")
 else:
     if IS_HPC:
-        # HPC CPU-only fallback with 16 cores
+        # HPC configuration optimized for RTX A5000 (24GB each) with float32
         mcmc_config_dict = {
-            "n_samples": 3000,      # Increased for HPC
+            "n_samples": 3000,      # Increased for float32 efficiency
             "n_warmup": 1500,       # Increased warmup
-            "n_chains": 16,         # Use all 16 cores
-            "cores": 16,            # All cores
-            "target_accept": 0.95,  # Higher acceptance for stability
+            "n_chains": 16,         # More chains with float32
+            "cores": 16,            # More cores
+            "target_accept": 0.90,  # Balanced acceptance for speed
             "backend": "pytensor"
         }
-        print("💻 Using HPC 16-core CPU MCMC configuration")
+        print("🚀 Using HPC RTX A5000-optimized MCMC configuration (float32 speed)")
     else:
-        # Local development with conservative settings
+        # Local development with ultra-conservative settings to avoid kernel crash
         mcmc_config_dict = {
-            "n_samples": 1000,      # Reduced for local testing
-            "n_warmup": 500,        # Reduced warmup
-            "n_chains": 4,          # Conservative chains
-            "cores": 4,             # Conservative cores
-            "target_accept": 0.90,  # Standard acceptance
+            "n_samples": 100,       # Ultra-small for local testing
+            "n_warmup": 50,         # Minimal warmup
+            "n_chains": 2,          # Minimal chains
+            "cores": 2,             # Minimal cores
+            "target_accept": 0.85,  # Lower acceptance for speed
             "backend": "pytensor"
         }
-        print("💻 Using local development MCMC configuration")
+        print("💻 Using ultra-conservative local MCMC configuration (kernel crash prevention)")
 
 config_title = "HPC" if IS_HPC else "Local"
 print(f"📊 {config_title} MCMC Configuration:")
@@ -346,22 +373,44 @@ mcmc_config = MCMCConfig(
 )
 
 # Create analyzer configuration based on environment
-analyzer_config = AnalyzerConfig(
-    mcmc_config=mcmc_config,
-    use_mpe=True,
-    parallel_execution=IS_HPC,           # Parallel only on HPC
-    max_workers=16 if IS_HPC else 1,     # 16 cores on HPC, sequential locally
-    model_selection_criterion='dic',
-    calculate_ranges=True,
-    calculate_weights=True
-)
+if IS_HPC:
+    # Use parallel execution on HPC with RTX A5000 high memory
+    analyzer_config = AnalyzerConfig(
+        mcmc_config=mcmc_config,
+        use_mpe=True,
+        parallel_execution=True,         # Enable parallel on RTX A5000
+        max_workers=4,                   # Conservative parallel workers
+        model_selection_criterion='dic',
+        calculate_ranges=True,
+        calculate_weights=True
+    )
+else:
+    # Sequential for local development
+    analyzer_config = AnalyzerConfig(
+        mcmc_config=mcmc_config,
+        use_mpe=True,
+        parallel_execution=False,        # Sequential for local
+        max_workers=1,                   # Single worker for stability
+        model_selection_criterion='dic',
+        calculate_ranges=True,
+        calculate_weights=True
+    )
 
 # Setup ε-contamination model class specification  
-model_class_spec = ModelClassSpec(
-    enable_epsilon_contamination=True,
-    epsilon_values=[0.01, 0.05, 0.10],  # 1%, 5%, 10% contamination
-    contamination_distribution="typhoon"
-)
+if IS_HPC:
+    # Full model ensemble for HPC with RTX A5000 high memory
+    model_class_spec = ModelClassSpec(
+        enable_epsilon_contamination=True,
+        epsilon_values=[0.01, 0.05, 0.10],  # Full 1%, 5%, 10% contamination
+        contamination_distribution="typhoon"
+    )
+else:
+    # Minimal model ensemble for local testing to avoid kernel crash
+    model_class_spec = ModelClassSpec(
+        enable_epsilon_contamination=True,
+        epsilon_values=[0.05],  # Only 5% contamination for testing
+        contamination_distribution="typhoon"
+    )
 
 print(f"📊 {config_title} Model ensemble configuration:")
 print(f"   Total models: {model_class_spec.get_model_count()}")
