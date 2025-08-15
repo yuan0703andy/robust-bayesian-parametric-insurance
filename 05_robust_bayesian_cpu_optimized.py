@@ -97,6 +97,12 @@ def parse_arguments():
                        help='Run with minimal samples for testing')
     parser.add_argument('--n-cores', type=int, default=None,
                        help='Number of CPU cores to use')
+    parser.add_argument('--max-cores', type=int, default=None,
+                       help='Maximum CPU cores to use (no limit if not specified)')
+    parser.add_argument('--max-chains', type=int, default=None,
+                       help='Maximum MCMC chains to use (auto-scale if not specified)')
+    parser.add_argument('--high-performance', action='store_true',
+                       help='Enable high-performance mode for workstation/server systems')
     parser.add_argument('--verbose', action='store_true',
                        help='Enable verbose output')
     return parser.parse_args()
@@ -109,15 +115,50 @@ def detect_environment():
     n_cores = multiprocessing.cpu_count()
     system = platform.system()
     
+    # Try to get memory info
+    try:
+        import psutil
+        memory_gb = psutil.virtual_memory().total / (1024**3)
+        has_psutil = True
+    except ImportError:
+        memory_gb = None
+        has_psutil = False
+    
+    # Determine system class
+    if n_cores >= 32:
+        system_class = "High-end Workstation/Server"
+        recommended_cores = n_cores  # Use all cores
+    elif n_cores >= 16:
+        system_class = "High-end Desktop"
+        recommended_cores = min(n_cores, 12)  # Leave some cores free
+    elif n_cores >= 8:
+        system_class = "Mid-range System"
+        recommended_cores = min(n_cores, 8)
+    else:
+        system_class = "Entry-level System"
+        recommended_cores = min(n_cores, 4)
+    
     print(f"\n🔍 System Detection:")
     print(f"   OS: {system}")
     print(f"   CPU cores: {n_cores}")
+    print(f"   System class: {system_class}")
     print(f"   Python: {platform.python_version()}")
+    if has_psutil and memory_gb:
+        print(f"   Memory: {memory_gb:.1f} GB")
+    
+    # Performance recommendations
+    if n_cores >= 16:
+        print(f"\n💡 High-performance system detected!")
+        print(f"   Consider using --high-performance flag")
+        print(f"   Optimal MCMC: {min(n_cores//2, 16)} chains × {n_cores} cores")
     
     return {
         'n_cores': n_cores,
         'system': system,
-        'recommended_cores': min(n_cores, 8)  # Cap for stability
+        'system_class': system_class,
+        'memory_gb': memory_gb,
+        'recommended_cores': recommended_cores,
+        'high_performance_capable': n_cores >= 16
     }
 
 def load_analysis_data():
@@ -171,12 +212,22 @@ def setup_cpu_environment(args, system_info):
     print("\n🔧 Setting up CPU-optimized environment...")
     
     # Determine cores to use
-    n_cores = args.n_cores if args.n_cores else system_info['recommended_cores']
+    if args.high_performance:
+        print("🚀 High-performance mode enabled")
+        n_cores = args.n_cores if args.n_cores else system_info['n_cores']  # Use all cores
+        max_cores = args.max_cores
+        max_chains = args.max_chains
+    else:
+        n_cores = args.n_cores if args.n_cores else system_info['recommended_cores']
+        max_cores = args.max_cores if args.max_cores else 8  # Conservative default
+        max_chains = args.max_chains if args.max_chains else 4  # Conservative default
     
-    # Get optimized MCMC configuration
+    # Get optimized MCMC configuration with new parameters
     mcmc_config_dict = get_cpu_optimized_mcmc_config(
         n_cores=n_cores, 
-        quick_test=args.quick_test
+        quick_test=args.quick_test,
+        max_cores=max_cores,
+        max_chains=max_chains
     )
     
     print(f"📊 CPU Configuration:")

@@ -158,26 +158,70 @@ from .basis_risk_weight_sensitivity import (
 )
 
 # CPU Optimization Config (CPU優化配置) - UPDATED
-def get_cpu_optimized_mcmc_config(n_cores=None, quick_test=False):
-    """Get CPU-optimized MCMC configuration"""
+def get_cpu_optimized_mcmc_config(n_cores=None, quick_test=False, max_cores=None, max_chains=None):
+    """
+    Get CPU-optimized MCMC configuration with flexible scaling
+    
+    Parameters:
+    -----------
+    n_cores : int, optional
+        Number of cores to use (auto-detected if None)
+    quick_test : bool
+        Use minimal settings for testing
+    max_cores : int, optional
+        Maximum cores to use (no limit if None)
+    max_chains : int, optional
+        Maximum chains to use (auto-scale if None)
+    """
     import multiprocessing
+    total_cores = multiprocessing.cpu_count()
+    
     if n_cores is None:
-        n_cores = min(multiprocessing.cpu_count(), 8)  # Cap at 8 cores
+        if max_cores is None:
+            # Remove the 8-core cap for high-performance systems
+            n_cores = total_cores
+        else:
+            n_cores = min(total_cores, max_cores)
+    
+    # Intelligent chain scaling based on available cores
+    if max_chains is None:
+        if n_cores >= 32:      # High-end workstation/server
+            max_chains = min(16, n_cores // 2)
+        elif n_cores >= 16:    # High-end desktop
+            max_chains = min(8, n_cores // 2)
+        elif n_cores >= 8:     # Mid-range system
+            max_chains = min(6, n_cores)
+        else:                  # Lower-end system
+            max_chains = min(4, n_cores)
     
     if quick_test:
         return {
             "n_samples": 200,
             "n_warmup": 100,
-            "n_chains": 2,
-            "cores": min(n_cores, 2),
+            "n_chains": min(2, max_chains),
+            "cores": min(n_cores, 4),  # Conservative for testing
             "target_accept": 0.80,
             "backend": "pytensor"
         }
     else:
+        # Scale chains intelligently with available cores
+        n_chains = min(max_chains, n_cores)
+        
+        # Adjust samples based on chains (more chains = fewer samples per chain)
+        if n_chains >= 8:
+            n_samples = 800   # More chains, fewer samples per chain
+            n_warmup = 400
+        elif n_chains >= 6:
+            n_samples = 1000  # Balanced
+            n_warmup = 500
+        else:
+            n_samples = 1200  # Fewer chains, more samples per chain
+            n_warmup = 600
+        
         return {
-            "n_samples": 1000,
-            "n_warmup": 500,
-            "n_chains": min(4, n_cores),
+            "n_samples": n_samples,
+            "n_warmup": n_warmup,
+            "n_chains": n_chains,
             "cores": n_cores,
             "target_accept": 0.85,
             "backend": "pytensor"
