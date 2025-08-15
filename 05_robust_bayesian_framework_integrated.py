@@ -72,6 +72,14 @@ def detect_environment():
     hostname = socket.gethostname().lower()
     system = platform.system().lower()
     
+    # Check for NVIDIA GPUs first - strong HPC indicator
+    try:
+        import subprocess
+        result = subprocess.run(['nvidia-smi'], capture_output=True, text=True)
+        has_nvidia = result.returncode == 0
+    except:
+        has_nvidia = False
+    
     # HPC detection patterns (更精確的檢測)
     hpc_patterns = ['hpc', 'cluster', 'slurm', 'pbs', 'node', 'compute', 'borsuk']
     is_hpc = any(pattern in hostname for pattern in hpc_patterns)
@@ -83,7 +91,8 @@ def detect_environment():
     # Check for SLURM environment
     has_slurm = 'SLURM_JOB_ID' in os.environ or 'SLURM_NTASKS' in os.environ
     
-    return is_hpc or has_hpc_paths or has_slurm
+    # Force HPC if NVIDIA GPUs detected (RTX A5000 indicates HPC)
+    return is_hpc or has_hpc_paths or has_slurm or has_nvidia
 
 IS_HPC = detect_environment()
 print(f"🔍 Environment detected: {'HPC' if IS_HPC else 'Local Development'}")
@@ -138,11 +147,10 @@ if IS_HPC:
         'OPENBLAS_NUM_THREADS': '32', 
         'NUMBA_NUM_THREADS': '32',
         
-        # PyTensor最大化 - 從maximize_gpu_load.py同步
+        # PyTensor最大化 - 移除GPU device配置避免錯誤
         'PYMC_COMPUTE_TEST_VALUE': 'ignore',
         'PYTENSOR_OPTIMIZER_VERBOSE': '0',
-        'PYTENSOR_FLAGS': 'device=cuda,floatX=float32,optimizer=fast_run,force_device=True,allow_gc=False',  # 禁用垃圾回收提升性能
-        'THEANO_FLAGS': 'device=cuda,floatX=float32,force_device=True',
+        'PYTENSOR_FLAGS': 'floatX=float32,optimizer=fast_run,allow_gc=False',  # 移除GPU配置，避免PyTensor錯誤
     }
     
     print("🔧 Setting HPC environment variables:")
