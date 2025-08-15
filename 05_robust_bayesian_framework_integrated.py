@@ -23,8 +23,18 @@ from typing import Dict, List, Tuple, Optional, Any
 
 # Configure environment before importing heavy libraries
 # Note: GPU configuration will be handled by GPU setup module if available
-# Only set default CPU config if PYTENSOR_FLAGS not already set
-if 'PYTENSOR_FLAGS' not in os.environ:
+# Import GPU setup module FIRST, before any PyMC imports
+print("🔧 Loading GPU setup module...")
+try:
+    from bayesian.gpu_setup import GPUConfig, setup_gpu_environment
+    HAS_GPU_SETUP = True
+    print("✅ GPU setup module loaded successfully")
+except ImportError as e:
+    HAS_GPU_SETUP = False
+    print(f"⚠️ GPU setup module not available: {e}")
+
+# Only set default CPU config if PYTENSOR_FLAGS not already set AND no GPU setup
+if 'PYTENSOR_FLAGS' not in os.environ and not HAS_GPU_SETUP:
     os.environ['PYTENSOR_FLAGS'] = 'device=cpu,floatX=float32,optimizer=fast_compile'
 
 # Configure matplotlib for Chinese support
@@ -37,16 +47,6 @@ print("穩健貝氏參數型保險分析 - 整合現有框架")
 print("=" * 80)
 print("\n⚡ Using existing insurance_analysis_refactored framework")
 print("⚡ 使用現有保險分析框架，避免重複實現\n")
-
-# Import GPU setup module first
-print("🔧 Loading GPU setup module...")
-try:
-    from bayesian.gpu_setup import GPUConfig, setup_gpu_environment
-    HAS_GPU_SETUP = True
-    print("✅ GPU setup module loaded successfully")
-except ImportError as e:
-    HAS_GPU_SETUP = False
-    print(f"⚠️ GPU setup module not available: {e}")
 
 # Import insurance analysis framework
 print("📦 Loading insurance analysis framework...")

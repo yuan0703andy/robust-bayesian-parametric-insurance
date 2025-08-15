@@ -640,11 +640,25 @@ class ParametricHierarchicalModel:
             # Try to use NumPyro (JAX) sampler for GPU acceleration
             try:
                 import jax
-                if len(jax.devices()) > 0 and any('gpu' in str(d).lower() or 'cuda' in str(d).lower() for d in jax.devices()):
+                devices = jax.devices()
+                print(f"    🔍 JAX devices detected: {devices}")
+                
+                # 更強健的 GPU 檢測邏輯
+                has_gpu = any('cuda' in str(d).lower() or 'gpu' in str(d).lower() or 
+                             'geforce' in str(getattr(d, 'device_kind', str(d))).lower() or
+                             'rtx' in str(getattr(d, 'device_kind', str(d))).lower()
+                             for d in devices)
+                
+                if has_gpu and jax.default_backend() != 'cpu':
                     sampler_kwargs["nuts_sampler"] = "numpyro"
-                    print("    🚀 Using NumPyro (JAX) sampler for GPU acceleration")
+                    print(f"    🚀 Using NumPyro (JAX) sampler for GPU acceleration")
+                    print(f"    🎯 JAX backend: {jax.default_backend()}")
+                else:
+                    print(f"    💻 Using default PyMC sampler - JAX backend: {jax.default_backend()}")
             except ImportError:
-                print("    💻 Using default PyMC sampler (CPU)")
+                print("    💻 JAX not available, using default PyMC sampler (CPU)")
+            except Exception as e:
+                print(f"    ⚠️ GPU detection failed: {e}, using CPU sampler")
             
             trace = pm.sample(**sampler_kwargs)
             

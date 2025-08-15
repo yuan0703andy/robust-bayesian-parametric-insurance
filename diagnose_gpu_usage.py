@@ -9,6 +9,14 @@ Check if PyMC/JAX is actually using GPU acceleration
 
 import os
 import sys
+
+# 🔥 關鍵：在導入 PyMC 之前設置環境變數！
+print("🔧 Setting GPU environment BEFORE importing PyMC...")
+os.environ['PYTENSOR_FLAGS'] = 'device=cuda,floatX=float32,optimizer=fast_run,allow_gc=True'
+os.environ['CUDA_VISIBLE_DEVICES'] = '0,1'
+os.environ['JAX_PLATFORM_NAME'] = 'gpu'
+print("✅ Environment variables set")
+
 import time
 import numpy as np
 

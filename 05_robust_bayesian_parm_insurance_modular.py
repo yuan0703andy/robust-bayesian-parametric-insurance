@@ -21,7 +21,8 @@ import warnings
 from pathlib import Path
 
 # Configure environment before importing heavy libraries
-os.environ['PYTENSOR_FLAGS'] = 'device=cpu,floatX=float32,optimizer=fast_compile'
+# 移除這行，讓 GPU setup 模組來處理
+# os.environ['PYTENSOR_FLAGS'] = 'device=cpu,floatX=float32,optimizer=fast_compile'
 
 # Import GPU setup module
 try:
