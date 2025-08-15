@@ -12,6 +12,44 @@ Date: 2025-01-15
 
 import os
 import sys
+
+# CRITICAL: Fix PROJ paths BEFORE importing any geospatial libraries
+print("🔧 Comprehensive PROJ path cleanup...")
+
+# All possible PROJ-related environment variables
+proj_vars_to_check = [
+    'PROJ_DATA', 'PROJ_LIB', 'GDAL_DATA', 'GEOS_LIB', 'PROJ_NETWORK',
+    'PROJ_DEBUG', 'PROJ_CURL_CA_BUNDLE', 'PROJ_USER_WRITABLE_DIRECTORY',
+    'GDAL_DRIVER_PATH', 'GDAL_PLUGIN_PATH', 'GDAL_PYTHON_DRIVER_PATH',
+    'GEOTIFF_CSV', 'PROJ_SKIP_READ_USER_WRITABLE_DIRECTORY'
+]
+
+cleared_count = 0
+for var in proj_vars_to_check:
+    if var in os.environ:
+        old_val = os.environ[var]
+        # Check for HPC-specific paths
+        if any(pattern in old_val for pattern in ['/hpc/', '/cluster/', 'borsuklab', 'cat_modeling']):
+            del os.environ[var]
+            cleared_count += 1
+            print(f"   ❌ Cleared HPC path {var}: {old_val}")
+
+# Set safe PROJ environment
+safe_proj_vars = {
+    'PROJ_NETWORK': 'OFF',
+    'GDAL_DISABLE_READDIR_ON_OPEN': 'EMPTY_DIR',
+}
+
+for key, value in safe_proj_vars.items():
+    os.environ[key] = value
+    print(f"   ✅ Set safe {key} = {value}")
+
+if cleared_count > 0:
+    print(f"   🎯 Cleared {cleared_count} problematic HPC PROJ paths")
+else:
+    print("   ℹ️ No problematic HPC paths found")
+
+# Now safe to import other libraries
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -107,6 +145,8 @@ else:
         
         # Fix PROJ database path issues
         'PROJ_DATA': '',  # Clear any HPC-specific paths
+        'PROJ_LIB': '',   # Clear PROJ library paths
+        'GDAL_DATA': '',  # Clear GDAL data paths
     }
     
     print("🔧 Setting local development environment variables:")
@@ -119,6 +159,13 @@ else:
     print("   🎯 GPU: Apple M3 (Metal)")
     print("   💾 Memory: Unified memory")
     print("   🧪 Mode: Development and testing")
+    
+    # Additional PROJ fixes for local development
+    proj_vars_to_clear = ['PROJ_DATA', 'PROJ_LIB', 'GDAL_DATA', 'GEOS_LIB', 'PROJ_NETWORK']
+    for var in proj_vars_to_clear:
+        if var in os.environ:
+            print(f"   🔧 Clearing {var}: {os.environ[var]} → ''")
+            del os.environ[var]
 
 # Import GPU setup module FIRST
 print("\n🔧 Loading GPU setup module...")
