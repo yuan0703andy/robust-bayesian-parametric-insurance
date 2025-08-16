@@ -133,15 +133,22 @@ from .density_ratio_theory import (
     ModelComparisonResult
 )
 
-# ε-Contamination Theory (ε-污染理論框架) - NEW
+# ε-Contamination Theory (ε-污染理論框架) - UPDATED with MCMC
 from .epsilon_contamination import (
     EpsilonContaminationClass,
     EpsilonContaminationSpec,
     ContaminationEstimateResult,
     ContaminationDistributionClass,
+    # MCMC implementation classes - NEW
+    EpsilonContaminationMCMC,
+    MCMCConfig,
+    MCMCResult,
+    # Convenience functions
     create_typhoon_contamination_spec,
     quick_contamination_analysis,
-    demonstrate_dual_process_nature
+    demonstrate_dual_process_nature,
+    quick_epsilon_contamination_mcmc,
+    test_epsilon_contamination_integration
 )
 
 # CLIMADA Uncertainty Quantification (CLIMADA不確定性量化)
@@ -225,12 +232,12 @@ def get_cpu_optimized_mcmc_config(n_cores=None, quick_test=False, max_cores=None
             max_treedepth = 15
         elif balanced_mode:
             # 🎯 平衡模式：好的收斂性 + 合理速度
-            n_chains = min(8, max_chains)  # 允許更多鏈
-            n_samples = 600   # 減少樣本數
-            n_warmup = 500    # 🔧 增加warmup以改善收斂
-            target_accept = 0.95  # 🔧 提高target_accept
-            step_size = 0.05  # 🔧 更小步長確保穩定
-            max_treedepth = 12
+            n_chains = min(6, max_chains)  # 減少鏈數避免資源競爭
+            n_samples = 800   # 增加樣本數確保足夠統計量
+            n_warmup = 1000   # 🔧 大幅增加warmup確保完全收斂
+            target_accept = 0.98  # 🔧 進一步提高target_accept
+            step_size = 0.03  # 🔧 更保守的步長
+            max_treedepth = 15  # 🔧 增加tree depth允許更複雜路徑
         else:
             # 標準高性能模式
             if n_chains >= 8:
@@ -287,7 +294,8 @@ __all__ = [
     
     # === 理論基礎 ===
     'RobustBayesianFramework', 'DensityRatioClass',
-    'EpsilonContaminationClass', 'quick_contamination_analysis',
+    'EpsilonContaminationClass', 'EpsilonContaminationMCMC', 
+    'quick_contamination_analysis', 'quick_epsilon_contamination_mcmc',
     
     # === 支持組件 ===
     'ProbabilisticLossDistributionGenerator',

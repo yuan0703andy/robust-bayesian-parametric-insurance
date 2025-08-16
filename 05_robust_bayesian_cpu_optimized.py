@@ -1,15 +1,22 @@
 #!/usr/bin/env python3
 """
-05. Robust Bayesian Parametric Insurance Analysis - CPU Optimized
-穩健貝氏參數型保險分析 - CPU優化版本
+05. Robust Bayesian Parametric Insurance Analysis - CPU Optimized with ε-Contamination
+穩健貝氏參數型保險分析 - CPU優化ε-污染版本
 
-Complete implementation using CPU-optimized Bayesian analysis with 
+Complete implementation using CPU-optimized ε-contamination Bayesian analysis with 
 full insurance_analysis_refactored framework integration.
 
-完整實現使用CPU優化貝氏分析，整合所有insurance_analysis_refactored框架。
+完整實現使用CPU優化ε-污染貝氏分析，整合所有insurance_analysis_refactored框架。
+
+New Features:
+- Integrated ε-contamination theory: π(θ) = (1-ε)π₀(θ) + εq(θ) 
+- Complete 4-level hierarchical Bayesian model (不簡化)
+- Theoretical contamination estimation + MCMC inference
+- Extreme reparameterization for robust convergence
+- Dual-process modeling: normal weather + typhoon events
 
 Author: Research Team
-Date: 2025-01-15
+Date: 2025-01-16 (Updated with ε-contamination framework)
 """
 
 import os
@@ -28,11 +35,13 @@ os.environ['JAX_PLATFORMS'] = 'cpu'
 os.environ['PYTENSOR_FLAGS'] = 'device=cpu,floatX=float32,optimizer=fast_compile,allow_gc=True'
 
 print("=" * 80)
-print("05. Robust Bayesian Parametric Insurance - CPU Optimized")
-print("穩健貝氏參數型保險分析 - CPU優化版本")
+print("05. Robust Bayesian Parametric Insurance - CPU Optimized with ε-Contamination")
+print("穩健貝氏參數型保險分析 - CPU優化ε-污染版本")
 print("=" * 80)
 print("\n💻 CPU-only mode: Stable, fast, and reliable")
+print("🛡️ ε-Contamination framework: π(θ) = (1-ε)π₀(θ) + εq(θ)")
 print("🚀 Full insurance_analysis_refactored integration")
+print("🔬 Complete 4-level hierarchical Bayesian model (不簡化)")
 
 # Import frameworks
 print("\n📦 Loading frameworks...")
@@ -68,7 +77,7 @@ except ImportError as e:
         print("   ❌ Critical insurance framework components missing")
         sys.exit(1)
 
-# Import Bayesian framework (CPU-optimized)
+# Import Bayesian framework (CPU-optimized with ε-contamination)
 try:
     from bayesian import (
         ModelClassAnalyzer, 
@@ -77,13 +86,20 @@ try:
         MCMCConfig,
         get_cpu_optimized_mcmc_config,
         configure_pymc_environment,
-        ProbabilisticLossDistributionGenerator
+        ProbabilisticLossDistributionGenerator,
+        # NEW: Integrated ε-contamination framework
+        EpsilonContaminationMCMC,
+        MCMCConfig as EpsilonMCMCConfig,
+        quick_epsilon_contamination_mcmc,
+        quick_contamination_analysis
     )
-    print("   ✅ CPU-optimized Bayesian framework loaded")
+    print("   ✅ CPU-optimized Bayesian framework with ε-contamination loaded")
     HAS_BAYESIAN = True
+    HAS_EPSILON_CONTAMINATION = True
 except ImportError as e:
     print(f"   ⚠️ Bayesian framework limited: {e}")
     HAS_BAYESIAN = False
+    HAS_EPSILON_CONTAMINATION = False
 
 # Configure PyMC for CPU
 if HAS_BAYESIAN:
@@ -378,42 +394,15 @@ def run_parametric_insurance_design(data, args):
     }
 
 def run_bayesian_analysis(data, mcmc_config_dict, insurance_results, args):
-    """Run CPU-optimized Bayesian model ensemble analysis"""
+    """Run CPU-optimized ε-contamination Bayesian analysis"""
     print("\n" + "=" * 80)
-    print("Phase 2: CPU-Optimized Bayesian Analysis")
-    print("階段2：CPU優化貝氏分析")
+    print("Phase 2: CPU-Optimized ε-Contamination Bayesian Analysis")
+    print("階段2：CPU優化ε-污染貝氏分析")
     print("=" * 80)
     
-    if not HAS_BAYESIAN or len(data['observed_losses']) < 20:
-        print("⚠️ Skipping Bayesian analysis (insufficient data or missing framework)")
+    if not HAS_BAYESIAN or not HAS_EPSILON_CONTAMINATION or len(data['observed_losses']) < 10:
+        print("⚠️ Skipping ε-contamination analysis (insufficient data or missing framework)")
         return None
-    
-    # Create MCMC configuration with enhanced settings
-    mcmc_config = MCMCConfig(
-        n_samples=mcmc_config_dict["n_samples"],
-        n_warmup=mcmc_config_dict["n_warmup"],
-        n_chains=mcmc_config_dict["n_chains"],
-        cores=mcmc_config_dict["cores"],
-        target_accept=mcmc_config_dict["target_accept"]
-    )
-    
-    # Store additional sampler settings for PyMC
-    sampler_kwargs = {
-        "init": mcmc_config_dict.get("init", "adapt_diag"),
-        "max_treedepth": mcmc_config_dict.get("max_treedepth", 12),
-        "step_size": mcmc_config_dict.get("step_size", 0.1)
-    }
-    
-    # Create analyzer configuration (CPU-optimized)
-    analyzer_config = AnalyzerConfig(
-        mcmc_config=mcmc_config,
-        use_mpe=False,  # Disable for CPU stability
-        parallel_execution=False,  # Sequential for stability
-        max_workers=1,
-        model_selection_criterion='dic',
-        calculate_ranges=True,
-        calculate_weights=True
-    )
     
     # 🛡️ Robust Bayesian 原則：使用原始數據，但轉換為合理尺度
     raw_losses = data['observed_losses'].copy()
@@ -429,43 +418,165 @@ def run_bayesian_analysis(data, mcmc_config_dict, insurance_results, args):
     else:
         analysis_data = raw_losses
     
-    # Model specification (恢復完整模型，使用標準化數據)
-    model_class_spec = ModelClassSpec(
-        enable_epsilon_contamination=True,
-        epsilon_values=[0.05] if args.quick_test else [0.01, 0.05],
-        contamination_distribution="typhoon"
+    print(f"\n🔬 ε-Contamination Framework Configuration:")
+    
+    # Step 1: 理論污染程度估計
+    print(f"   Step 1: 理論污染程度估計...")
+    try:
+        contamination_estimate = quick_contamination_analysis(analysis_data)
+        theoretical_epsilon = contamination_estimate.epsilon_consensus
+        epsilon_uncertainty = contamination_estimate.epsilon_uncertainty
+        
+        print(f"      💡 理論建議: ε = {theoretical_epsilon:.3f} ± {epsilon_uncertainty:.3f}")
+        print(f"      🌪️ 解釋: {theoretical_epsilon:.1%} 颱風事件 + {(1-theoretical_epsilon):.1%} 正常天氣")
+        
+        # 根據理論估計調整ε範圍
+        if args.quick_test:
+            epsilon_values = [max(0.01, theoretical_epsilon)]
+        else:
+            epsilon_values = [
+                max(0.01, theoretical_epsilon - 0.03),
+                theoretical_epsilon,
+                min(0.15, theoretical_epsilon + 0.03)
+            ]
+    except Exception as e:
+        print(f"      ⚠️ 理論分析失敗: {e}")
+        epsilon_values = [0.05] if args.quick_test else [0.01, 0.05, 0.1]
+        theoretical_epsilon = None
+    
+    # Step 2: MCMC階層模型配置
+    print(f"   Step 2: MCMC階層模型配置...")
+    print(f"      分析ε值: {epsilon_values}")
+    print(f"      MCMC設置: {mcmc_config_dict['n_samples']} samples, {mcmc_config_dict['n_warmup']} warmup")
+    print(f"      🎯 目標接受率: {mcmc_config_dict['target_accept']} (極高收斂標準)")
+    
+    # Create ε-contamination MCMC configuration
+    epsilon_mcmc_config = EpsilonMCMCConfig(
+        n_samples=mcmc_config_dict["n_samples"],
+        n_warmup=mcmc_config_dict["n_warmup"],
+        n_chains=mcmc_config_dict["n_chains"],
+        target_accept=mcmc_config_dict["target_accept"],
+        max_treedepth=mcmc_config_dict.get("max_treedepth", 20),
+        standardize_data=True,
+        log_transform=False
     )
     
-    print(f"📊 Bayesian Configuration:")
-    print(f"   Model count: {model_class_spec.get_model_count()}")
-    print(f"   ε-contamination: {model_class_spec.epsilon_values}")
-    print(f"   Execution mode: Sequential (CPU stable)")
+    # Step 3: 執行綜合ε-contamination分析
+    print(f"\n🚀 執行綜合ε-contamination MCMC分析...")
+    print(f"   數據點數: {len(analysis_data)}")
+    print(f"   🛡️ 完整4層階層ε-contamination模型 (不簡化)")
+    print(f"   📊 理論框架: π(θ) = (1-ε)π₀(θ) + εq(θ)")
     
-    # Create analyzer
-    analyzer = ModelClassAnalyzer(model_class_spec, analyzer_config)
-    
-    # Run analysis
-    print(f"\n🚀 Running MCMC analysis on {len(analysis_data)} observations...")
-    print(f"   🛡️ Using robust non-informative priors")
-    print(f"   🔬 Complete ε-contamination model class")
     start_time = time.time()
     
     try:
-        ensemble_results = analyzer.analyze_model_class(analysis_data)
+        # 使用綜合分析函數
+        mcmc_sampler = EpsilonContaminationMCMC(epsilon_mcmc_config)
+        comprehensive_results = mcmc_sampler.comprehensive_contamination_analysis(
+            analysis_data, 
+            epsilon_values=epsilon_values,
+            include_theory=True
+        )
+        
         elapsed = time.time() - start_time
         
-        print(f"\n✅ Bayesian analysis complete!")
-        print(f"   Execution time: {elapsed:.1f} seconds")
-        print(f"   Best model: {ensemble_results.best_model}")
-        print(f"   Models evaluated: {len(ensemble_results.individual_results)}")
+        # 提取結果
+        mcmc_analysis = comprehensive_results.get('mcmc_analysis', {})
+        best_model = mcmc_analysis.get('best_model')
+        successful_models = mcmc_analysis.get('successful_models', [])
         
-        return ensemble_results
+        print(f"\n✅ ε-Contamination 分析完成!")
+        print(f"   執行時間: {elapsed:.1f} seconds")
+        print(f"   成功收斂: {len(successful_models)}/{len(epsilon_values)}")
+        
+        if best_model:
+            print(f"   🏆 最佳模型: ε = {best_model.epsilon_value:.3f}")
+            print(f"   📈 DIC評分: {best_model.dic:.2f}")
+            print(f"   🔬 收斂品質: R-hat = {best_model.rhat_max:.4f}")
+            print(f"   📊 有效樣本: ESS = {best_model.ess_min:.0f}")
+        
+        # 保存綜合報告
+        if args.verbose:
+            print(f"\n📄 綜合分析報告:")
+            print(comprehensive_results.get('comprehensive_report', '報告生成失敗'))
+        
+        # 創建兼容的結果格式
+        bayesian_results = {
+            'comprehensive_results': comprehensive_results,
+            'best_model': best_model,
+            'successful_models': successful_models,
+            'theoretical_epsilon': theoretical_epsilon,
+            'epsilon_uncertainty': epsilon_uncertainty if 'epsilon_uncertainty' in locals() else None,
+            'execution_time': elapsed,
+            'epsilon_contamination_framework': True,
+            'model_type': 'ε-contamination_hierarchical'
+        }
+        
+        return bayesian_results
         
     except Exception as e:
-        print(f"\n⚠️ Bayesian analysis failed: {e}")
+        print(f"\n⚠️ ε-Contamination 分析失敗: {e}")
         if args.verbose:
             import traceback
             traceback.print_exc()
+        
+        # 如果ε-contamination失敗，嘗試基本分析
+        print(f"\n🔄 Fallback to basic Bayesian analysis...")
+        return run_fallback_bayesian_analysis(data, mcmc_config_dict, args, analysis_data)
+
+
+def run_fallback_bayesian_analysis(data, mcmc_config_dict, args, analysis_data):
+    """Fallback basic Bayesian analysis if ε-contamination fails"""
+    try:
+        # Create MCMC configuration
+        mcmc_config = MCMCConfig(
+            n_samples=mcmc_config_dict["n_samples"],
+            n_warmup=mcmc_config_dict["n_warmup"],
+            n_chains=mcmc_config_dict["n_chains"],
+            cores=mcmc_config_dict["cores"],
+            target_accept=mcmc_config_dict["target_accept"]
+        )
+        
+        # Create analyzer configuration
+        analyzer_config = AnalyzerConfig(
+            mcmc_config=mcmc_config,
+            use_mpe=False,
+            parallel_execution=False,
+            max_workers=1,
+            model_selection_criterion='dic',
+            calculate_ranges=True,
+            calculate_weights=True
+        )
+        
+        # Model specification
+        model_class_spec = ModelClassSpec(
+            enable_epsilon_contamination=False,  # 基本模型
+            epsilon_values=[],
+            contamination_distribution="none"
+        )
+        
+        print(f"   基本Bayesian模型配置完成")
+        
+        # Create analyzer
+        analyzer = ModelClassAnalyzer(model_class_spec, analyzer_config)
+        
+        # Run analysis
+        start_time = time.time()
+        ensemble_results = analyzer.analyze_model_class(analysis_data)
+        elapsed = time.time() - start_time
+        
+        print(f"   ✅ 基本Bayesian分析完成 ({elapsed:.1f}s)")
+        
+        return {
+            'ensemble_results': ensemble_results,
+            'best_model': ensemble_results.best_model if ensemble_results else None,
+            'execution_time': elapsed,
+            'epsilon_contamination_framework': False,
+            'model_type': 'basic_hierarchical'
+        }
+        
+    except Exception as e:
+        print(f"   ❌ 基本Bayesian分析也失敗: {e}")
         return None
 
 def run_skill_evaluation(data, insurance_results, bayesian_results, args):
@@ -490,16 +601,38 @@ def run_skill_evaluation(data, insurance_results, bayesian_results, args):
                 len(data['observed_losses']), premium_value
             )
     
-    # 2. Bayesian model predictions
+    # 2. ε-contamination Bayesian model predictions
     if bayesian_results:
-        best_model_result = bayesian_results.individual_results[bayesian_results.best_model]
-        if hasattr(best_model_result, 'posterior_samples'):
-            posterior_samples = best_model_result.posterior_samples
-            if 'theta' in posterior_samples:
-                predictions_sources['bayesian_model'] = np.full(
-                    len(data['observed_losses']), 
-                    np.mean(posterior_samples['theta'])
-                )
+        if bayesian_results.get('epsilon_contamination_framework', False):
+            # New ε-contamination framework results
+            best_model = bayesian_results.get('best_model')
+            if best_model and hasattr(best_model, 'posterior_samples'):
+                posterior_samples = best_model.posterior_samples
+                if 'theta' in posterior_samples:
+                    predictions_sources['epsilon_contamination_model'] = np.full(
+                        len(data['observed_losses']), 
+                        np.mean(posterior_samples['theta'])
+                    )
+                    
+                # Add theoretical epsilon prediction
+                theoretical_epsilon = bayesian_results.get('theoretical_epsilon')
+                if theoretical_epsilon:
+                    predictions_sources['theoretical_contamination'] = np.full(
+                        len(data['observed_losses']), 
+                        theoretical_epsilon * np.max(data['observed_losses']) if len(data['observed_losses']) > 0 else 0
+                    )
+        else:
+            # Fallback basic Bayesian results
+            ensemble_results = bayesian_results.get('ensemble_results')
+            if ensemble_results and hasattr(ensemble_results, 'individual_results'):
+                best_model_result = ensemble_results.individual_results[ensemble_results.best_model]
+                if hasattr(best_model_result, 'posterior_samples'):
+                    posterior_samples = best_model_result.posterior_samples
+                    if 'theta' in posterior_samples:
+                        predictions_sources['basic_bayesian_model'] = np.full(
+                            len(data['observed_losses']), 
+                            np.mean(posterior_samples['theta'])
+                        )
     
     # 3. Simple statistical predictions
     if len(data['observed_losses']) > 0:
@@ -617,9 +750,16 @@ def save_comprehensive_results(data, insurance_results, bayesian_results,
         },
         'bayesian_analysis': {
             'completed': bayesian_results is not None,
-            'best_model': bayesian_results.best_model if bayesian_results else None,
-            'execution_time': bayesian_results.execution_time if bayesian_results else None,
-            'n_models_evaluated': len(bayesian_results.individual_results) if bayesian_results else 0
+            'framework_type': bayesian_results.get('model_type', 'unknown') if bayesian_results else None,
+            'epsilon_contamination_used': bayesian_results.get('epsilon_contamination_framework', False) if bayesian_results else False,
+            'best_model': (bayesian_results.get('best_model').epsilon_value if hasattr(bayesian_results.get('best_model', {}), 'epsilon_value') 
+                          else bayesian_results.get('best_model')) if bayesian_results else None,
+            'theoretical_epsilon': bayesian_results.get('theoretical_epsilon') if bayesian_results else None,
+            'epsilon_uncertainty': bayesian_results.get('epsilon_uncertainty') if bayesian_results else None,
+            'execution_time': bayesian_results.get('execution_time') if bayesian_results else None,
+            'successful_models': len(bayesian_results.get('successful_models', [])) if bayesian_results else 0,
+            'n_models_evaluated': (len(bayesian_results.get('successful_models', [])) if bayesian_results.get('epsilon_contamination_framework') 
+                                  else len(bayesian_results.get('ensemble_results', {}).get('individual_results', {})) if bayesian_results else 0)
         },
         'skill_evaluation': skill_results,
         'market_analysis': {
@@ -708,23 +848,39 @@ def main():
     
     # Final summary
     print("\n" + "=" * 80)
-    print("🎉 CPU-Optimized Analysis Complete!")
+    print("🎉 CPU-Optimized ε-Contamination Analysis Complete!")
     print("=" * 80)
     print(f"✅ Results directory: {results_dir}")
     print(f"✅ Insurance products: {final_results['insurance_analysis']['n_products']}")
-    print(f"✅ Bayesian analysis: {'Success' if final_results['bayesian_analysis']['completed'] else 'Skipped'}")
+    
+    # Enhanced Bayesian analysis summary
+    bayesian_info = final_results['bayesian_analysis']
+    if bayesian_info['completed']:
+        print(f"✅ Bayesian analysis: Success ({bayesian_info['framework_type']})")
+        
+        if bayesian_info['epsilon_contamination_used']:
+            print(f"🛡️ ε-Contamination Framework:")
+            print(f"   • Theoretical ε: {bayesian_info['theoretical_epsilon']:.3f} ± {bayesian_info.get('epsilon_uncertainty', 0):.3f}")
+            print(f"   • Best model ε: {bayesian_info['best_model']}")
+            print(f"   • Successful models: {bayesian_info['successful_models']}/{bayesian_info['n_models_evaluated']}")
+            print(f"   • Mathematical framework: π(θ) = (1-ε)π₀(θ) + εq(θ)")
+        else:
+            print(f"🔄 Fallback Bayesian Analysis (basic hierarchical)")
+            
+        print(f"⏱️ Execution time: {bayesian_info['execution_time']:.1f} seconds")
+    else:
+        print(f"⚠️ Bayesian analysis: Skipped")
+    
     print(f"✅ Market analysis: {'Success' if final_results['market_analysis']['completed'] else 'Skipped'}")
     print(f"✅ CPU cores used: {mcmc_config_dict['cores']}")
     
-    if final_results['bayesian_analysis']['completed']:
-        print(f"🏆 Best Bayesian model: {final_results['bayesian_analysis']['best_model']}")
-        print(f"⏱️ Execution time: {final_results['bayesian_analysis']['execution_time']:.1f} seconds")
-    
-    print("\n💡 Key advantages of CPU optimization:")
-    print("   • Stable execution (no kernel crashes)")
-    print("   • Reliable performance scaling")
-    print("   • Comprehensive framework integration")
-    print("   • Production-ready implementation")
+    print("\n💡 Key advantages of ε-contamination framework:")
+    print("   • Complete robust Bayesian theory implementation")
+    print("   • Dual-process modeling: normal weather + typhoon events") 
+    print("   • Theoretical validation + MCMC inference")
+    print("   • 4-level hierarchical model (不簡化)")
+    print("   • Extreme reparameterization for convergence")
+    print("   • CPU-optimized for stability and reliability")
     print("=" * 80)
     
     return final_results
