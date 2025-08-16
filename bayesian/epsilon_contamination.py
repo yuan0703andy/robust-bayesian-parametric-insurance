@@ -773,6 +773,7 @@ class EpsilonContaminationMCMC:
                     max_treedepth=10,
                     random_seed=42,
                     progressbar=True,  # 🔧 啟用進度條顯示 Phase 1 採樣進度
+                    compute_convergence_checks=False,  # 提高顯示流暢度
                     return_inferencedata=True
                 )
                 
@@ -791,6 +792,7 @@ class EpsilonContaminationMCMC:
                     max_treedepth=self.config.max_treedepth,
                     random_seed=43,
                     progressbar=True,
+                    compute_convergence_checks=True,  # Phase 2 需要收斂檢查
                     return_inferencedata=True,
                     initvals=None  
                 )
