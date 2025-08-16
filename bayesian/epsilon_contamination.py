@@ -739,13 +739,15 @@ class EpsilonContaminationMCMC:
             
             # 🔧 Progressive sampling strategy
             try:
-                # Phase 1: Quick exploration
+                # Phase 1: Quick exploration (使用配置的chains，但稍微減少)
+                phase1_chains = max(2, min(4, self.config.n_chains))  # 至少2，最多4 chains for quick exploration
                 print(f"   🚀 Phase 1: Quick exploration...")
+                print(f"      Phase 1 chains: {phase1_chains} (exploration phase)")
                 trace_phase1 = pm.sample(
                     draws=200,
                     tune=500,
-                    chains=2,
-                    cores=2,
+                    chains=phase1_chains,
+                    cores=min(phase1_chains, 4),
                     target_accept=0.95,
                     max_treedepth=10,
                     random_seed=42,
@@ -755,11 +757,15 @@ class EpsilonContaminationMCMC:
                 
                 # Phase 2: Precise convergence
                 print(f"   🎯 Phase 2: Precise convergence...")
+                print(f"      Phase 2 chains: {self.config.n_chains} (full analysis)")
+                print(f"      Target accept: {self.config.target_accept}")
+                print(f"      Samples per chain: {self.config.n_samples}")
+                print(f"      Warmup: {self.config.n_warmup}")
                 trace = pm.sample(
                     draws=self.config.n_samples,
                     tune=self.config.n_warmup,
                     chains=self.config.n_chains,
-                    cores=min(self.config.n_chains, 4),
+                    cores=min(self.config.n_chains, 8),  # 增加cores上限
                     target_accept=self.config.target_accept,
                     max_treedepth=self.config.max_treedepth,
                     random_seed=43,
