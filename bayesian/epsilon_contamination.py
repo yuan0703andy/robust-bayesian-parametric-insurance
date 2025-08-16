@@ -751,7 +751,7 @@ class EpsilonContaminationMCMC:
                     target_accept=0.95,
                     max_treedepth=10,
                     random_seed=42,
-                    progressbar=False,
+                    progressbar=True,  # 🔧 啟用進度條顯示 Phase 1 採樣進度
                     return_inferencedata=True
                 )
                 
