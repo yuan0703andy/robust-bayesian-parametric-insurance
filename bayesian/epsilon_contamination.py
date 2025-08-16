@@ -37,7 +37,20 @@ import os
 os.environ['JAX_PLATFORMS'] = 'cpu'
 os.environ['PYTENSOR_FLAGS'] = 'device=cpu,floatX=float64,mode=FAST_COMPILE,linker=py'
 os.environ['MKL_THREADING_LAYER'] = 'GNU'
-os.environ['OMP_NUM_THREADS'] = '1'
+
+# HPC-aware threading configuration
+if 'SLURM_CPUS_PER_TASK' in os.environ:
+    # Running on SLURM HPC system
+    os.environ['OMP_NUM_THREADS'] = os.environ['SLURM_CPUS_PER_TASK']
+elif 'PBS_NCPUS' in os.environ:
+    # Running on PBS HPC system
+    os.environ['OMP_NUM_THREADS'] = os.environ['PBS_NCPUS']
+else:
+    # Default for standalone systems
+    os.environ['OMP_NUM_THREADS'] = '1'
+
+# Ensure progress bars work in HPC environments
+os.environ['PYMC_PROGRESS'] = 'True'
 
 # PyMC imports (optional for MCMC functionality)
 try:
