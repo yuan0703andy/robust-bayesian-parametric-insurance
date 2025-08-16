@@ -768,7 +768,7 @@ class EpsilonContaminationMCMC:
                     draws=200,
                     tune=500,
                     chains=phase1_chains,
-                    cores=min(phase1_chains, 4),
+                    cores=min(phase1_chains, 32),  # 🔥 HPC UNLEASHED: Use up to 32 cores
                     target_accept=0.95,
                     max_treedepth=10,
                     random_seed=42,
@@ -786,7 +786,7 @@ class EpsilonContaminationMCMC:
                     draws=self.config.n_samples,
                     tune=self.config.n_warmup,
                     chains=self.config.n_chains,
-                    cores=min(self.config.n_chains, 8),  # 增加cores上限
+                    cores=min(self.config.n_chains, 32),  # 🔥 HPC UNLEASHED: Use up to 32 cores
                     target_accept=self.config.target_accept,
                     max_treedepth=self.config.max_treedepth,
                     random_seed=43,
