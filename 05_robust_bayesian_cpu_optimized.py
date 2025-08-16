@@ -30,9 +30,42 @@ import warnings
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 
-# Force CPU-only execution
+# Force CPU-only execution with HPC optimizations
 os.environ['JAX_PLATFORMS'] = 'cpu'
-os.environ['PYTENSOR_FLAGS'] = 'device=cpu,floatX=float32,optimizer=fast_compile,allow_gc=True'
+os.environ['PYTENSOR_FLAGS'] = 'device=cpu,floatX=float64,mode=FAST_COMPILE,linker=py,allow_gc=True'
+
+# HPC-aware threading configuration
+if 'SLURM_CPUS_PER_TASK' in os.environ:
+    # Running on SLURM HPC system
+    os.environ['OMP_NUM_THREADS'] = os.environ['SLURM_CPUS_PER_TASK']
+    os.environ['MKL_NUM_THREADS'] = os.environ['SLURM_CPUS_PER_TASK']
+    os.environ['NUMBA_NUM_THREADS'] = os.environ['SLURM_CPUS_PER_TASK']
+    os.environ['OPENBLAS_NUM_THREADS'] = os.environ['SLURM_CPUS_PER_TASK']
+    print(f"🖥️ SLURM HPC detected: Using {os.environ['SLURM_CPUS_PER_TASK']} cores")
+elif 'PBS_NCPUS' in os.environ:
+    # Running on PBS HPC system
+    os.environ['OMP_NUM_THREADS'] = os.environ['PBS_NCPUS']
+    os.environ['MKL_NUM_THREADS'] = os.environ['PBS_NCPUS']
+    os.environ['NUMBA_NUM_THREADS'] = os.environ['PBS_NCPUS']
+    os.environ['OPENBLAS_NUM_THREADS'] = os.environ['PBS_NCPUS']
+    print(f"🖥️ PBS HPC detected: Using {os.environ['PBS_NCPUS']} cores")
+else:
+    # Default for standalone systems
+    import multiprocessing
+    n_cores = multiprocessing.cpu_count()
+    if n_cores >= 16:  # High-performance system
+        os.environ['OMP_NUM_THREADS'] = str(n_cores)
+        os.environ['MKL_NUM_THREADS'] = str(n_cores) 
+        os.environ['NUMBA_NUM_THREADS'] = str(n_cores)
+        os.environ['OPENBLAS_NUM_THREADS'] = str(n_cores)
+        print(f"🚀 High-performance system detected: Using all {n_cores} cores")
+    else:
+        os.environ['OMP_NUM_THREADS'] = '1'
+
+# Progress bar configuration for HPC
+os.environ['PYMC_PROGRESS'] = 'True'
+os.environ['ARVIZ_RCPARAMS'] = 'display.progress=True'
+os.environ['PYTHONUNBUFFERED'] = '1'  # Real-time output
 
 print("=" * 80)
 print("05. Robust Bayesian Parametric Insurance - CPU Optimized with ε-Contamination")
@@ -117,6 +150,8 @@ def parse_arguments():
                        help='Maximum CPU cores to use (no limit if not specified)')
     parser.add_argument('--max-chains', type=int, default=None,
                        help='Maximum MCMC chains to use (auto-scale if not specified)')
+    parser.add_argument('--unleashed', action='store_true',
+                       help='🔥 UNLEASHED MODE: Remove all chain limits for maximum parallelization')
     parser.add_argument('--high-performance', action='store_true',
                        help='Enable high-performance mode for workstation/server systems')
     parser.add_argument('--robust-sampling', action='store_true',
@@ -144,33 +179,45 @@ def detect_environment():
         memory_gb = None
         has_psutil = False
     
-    # Determine system class
+    # Determine system class and HPC capability
+    is_hpc = ('SLURM_CPUS_PER_TASK' in os.environ or 
+              'PBS_NCPUS' in os.environ or 
+              n_cores >= 24)
+    
     if n_cores >= 32:
-        system_class = "High-end Workstation/Server"
+        system_class = "HPC Workstation/Server"
         recommended_cores = n_cores  # Use all cores
+        recommended_chains = min(32, n_cores)  # Up to 32 chains
     elif n_cores >= 16:
-        system_class = "High-end Desktop"
-        recommended_cores = min(n_cores, 12)  # Leave some cores free
+        system_class = "High-end Desktop/Small HPC"
+        recommended_cores = n_cores  # Use all cores
+        recommended_chains = min(16, n_cores)  # Up to 16 chains
     elif n_cores >= 8:
         system_class = "Mid-range System"
         recommended_cores = min(n_cores, 8)
+        recommended_chains = min(8, n_cores)
     else:
         system_class = "Entry-level System"
         recommended_cores = min(n_cores, 4)
+        recommended_chains = min(4, n_cores)
     
     print(f"\n🔍 System Detection:")
     print(f"   OS: {system}")
     print(f"   CPU cores: {n_cores}")
     print(f"   System class: {system_class}")
+    print(f"   HPC environment: {'✅' if is_hpc else '❌'}")
     print(f"   Python: {platform.python_version()}")
     if has_psutil and memory_gb:
         print(f"   Memory: {memory_gb:.1f} GB")
     
     # Performance recommendations
-    if n_cores >= 16:
-        print(f"\n💡 High-performance system detected!")
-        print(f"   Consider using --high-performance flag")
-        print(f"   Optimal MCMC: {min(n_cores//2, 16)} chains × {n_cores} cores")
+    if is_hpc or n_cores >= 16:
+        print(f"\n🚀 High-performance/HPC system detected!")
+        print(f"   Recommended: --high-performance or --unleashed flag")
+        print(f"   Optimal MCMC: {recommended_chains} chains × {recommended_cores} cores")
+        if n_cores >= 32:
+            print(f"   🔥 Consider --unleashed for maximum parallelization")
+            print(f"   🎯 UNLEASHED mode: Up to {n_cores} chains for massive parallel sampling")
     
     return {
         'n_cores': n_cores,
@@ -178,7 +225,10 @@ def detect_environment():
         'system_class': system_class,
         'memory_gb': memory_gb,
         'recommended_cores': recommended_cores,
-        'high_performance_capable': n_cores >= 16
+        'recommended_chains': recommended_chains,
+        'is_hpc': is_hpc,
+        'high_performance_capable': n_cores >= 16,
+        'unleashed_capable': n_cores >= 24
     }
 
 def load_analysis_data():
@@ -241,12 +291,18 @@ def setup_cpu_environment(args, system_info):
     """Setup CPU-optimized environment"""
     print("\n🔧 Setting up CPU-optimized environment...")
     
-    # Determine cores to use
-    if args.high_performance:
+    # Determine cores and chains to use
+    if args.unleashed:
+        print("🔥 UNLEASHED MODE: Maximum parallelization enabled!")
+        n_cores = args.n_cores if args.n_cores else system_info['n_cores']  # Use ALL cores
+        max_cores = args.max_cores if args.max_cores else system_info['n_cores']  # No limit
+        max_chains = args.max_chains if args.max_chains else system_info['n_cores']  # Up to n_cores chains
+        print(f"   🎯 UNLEASHED: {max_chains} chains × {max_cores} cores")
+    elif args.high_performance:
         print("🚀 High-performance mode enabled")
         n_cores = args.n_cores if args.n_cores else system_info['n_cores']  # Use all cores
-        max_cores = args.max_cores
-        max_chains = args.max_chains
+        max_cores = args.max_cores if args.max_cores else system_info['n_cores']
+        max_chains = args.max_chains if args.max_chains else system_info['recommended_chains']
     else:
         n_cores = args.n_cores if args.n_cores else system_info['recommended_cores']
         max_cores = args.max_cores if args.max_cores else 8  # Conservative default
@@ -262,8 +318,19 @@ def setup_cpu_environment(args, system_info):
         balanced_mode=args.balanced_mode
     )
     
+    # 🔥 UNLEASHED MODE: Override chain limits if needed
+    if args.unleashed and mcmc_config_dict['n_chains'] < max_chains:
+        print(f"🔥 OVERRIDING: Framework limited to {mcmc_config_dict['n_chains']}, forcing to {max_chains}")
+        mcmc_config_dict['n_chains'] = max_chains
+        mcmc_config_dict['cores'] = max_cores
+    
     # Display sampling mode
-    if args.robust_sampling:
+    if args.unleashed:
+        print("🔥 UNLEASHED sampling mode:")
+        print("   • Maximum parallelization across all cores")
+        print("   • Optimal for HPC and high-core systems")
+        print("   • Massive chains for robust convergence")
+    elif args.robust_sampling:
         print("🛡️ Robust sampling mode enabled:")
         print("   • Ultra-conservative settings")
         print("   • Slower but maximum stability")
