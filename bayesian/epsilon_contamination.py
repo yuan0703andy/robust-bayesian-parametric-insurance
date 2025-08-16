@@ -753,7 +753,15 @@ class EpsilonContaminationMCMC:
             # 🔧 Progressive sampling strategy
             try:
                 # Phase 1: Quick exploration (使用配置的chains，但稍微減少)
-                phase1_chains = max(2, min(4, self.config.n_chains))  # 至少2，最多4 chains for quick exploration
+                # 🔥 HPC UNLEASHED: Use more chains for better exploration on high-core systems
+                if self.config.n_chains >= 24:      # 24+ chains: use 12 for phase 1
+                    phase1_chains = max(12, min(16, self.config.n_chains // 2))
+                elif self.config.n_chains >= 16:    # 16+ chains: use 8 for phase 1  
+                    phase1_chains = max(8, min(12, self.config.n_chains // 2))
+                elif self.config.n_chains >= 8:     # 8+ chains: use 6 for phase 1
+                    phase1_chains = max(6, min(8, self.config.n_chains))
+                else:                               # < 8 chains: use most of them
+                    phase1_chains = max(2, min(4, self.config.n_chains))
                 print(f"   🚀 Phase 1: Quick exploration...")
                 print(f"      Phase 1 chains: {phase1_chains} (exploration phase)")
                 trace_phase1 = pm.sample(
