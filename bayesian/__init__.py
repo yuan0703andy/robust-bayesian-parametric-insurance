@@ -206,16 +206,18 @@ def get_cpu_optimized_mcmc_config(n_cores=None, quick_test=False, max_cores=None
             max_chains = min(4, n_cores)
     
     if quick_test:
+        # 🔧 優化quick_test: 對於ε-contamination需要更多chains確保收斂診斷
+        # 至少4 chains才能進行有效的R-hat計算
         return {
-            "n_samples": 200,
-            "n_warmup": 150,  # 增加warmup樣本
-            "n_chains": min(2, max_chains),
-            "cores": min(n_cores, 4),  # Conservative for testing
-            "target_accept": 0.90,  # 提高接受率
+            "n_samples": 300,  # 增加樣本數
+            "n_warmup": 400,   # 更多warmup確保收斂
+            "n_chains": max(4, min(6, max_chains)),  # 🎯 至少4 chains，最多6 chains
+            "cores": min(n_cores, 6),  # 增加cores支持更多chains
+            "target_accept": 0.95,  # 提高接受率確保品質
             "backend": "pytensor",
             "init": "adapt_diag",
-            "max_treedepth": 10,
-            "step_size": 0.2  # 快速測試用較大步長
+            "max_treedepth": 12,  # 增加tree depth
+            "step_size": 0.1   # 更保守的步長
         }
     else:
         # Scale chains intelligently with available cores
@@ -224,34 +226,42 @@ def get_cpu_optimized_mcmc_config(n_cores=None, quick_test=False, max_cores=None
         # Adjust samples based on mode
         if robust_sampling:
             # 極穩健模式：最慢但最穩定
-            n_chains = min(4, max_chains)
+            # 🔧 對於ε-contamination模型，至少需要6 chains確保收斂診斷
+            n_chains = max(6, min(8, max_chains))  # 至少6 chains，最多8 chains
             n_samples = 1500
-            n_warmup = 1000
+            n_warmup = 1500  # 增加warmup確保完全收斂
             target_accept = 0.99
-            step_size = 0.05
-            max_treedepth = 15
+            step_size = 0.03  # 更保守
+            max_treedepth = 20  # 增加tree depth for complex models
         elif balanced_mode:
             # 🎯 平衡模式：好的收斂性 + 合理速度
-            n_chains = min(6, max_chains)  # 減少鏈數避免資源競爭
-            n_samples = 800   # 增加樣本數確保足夠統計量
-            n_warmup = 1000   # 🔧 大幅增加warmup確保完全收斂
-            target_accept = 0.98  # 🔧 進一步提高target_accept
+            # 🔧 優化為ε-contamination: 至少4 chains，推薦6 chains
+            n_chains = max(4, min(8, max_chains))  # 至少4 chains，最多8 chains
+            n_samples = 1000  # 增加樣本數確保足夠統計量
+            n_warmup = 1200   # 🔧 進一步增加warmup
+            target_accept = 0.98  # 🔧 高接受率
             step_size = 0.03  # 🔧 更保守的步長
-            max_treedepth = 15  # 🔧 增加tree depth允許更複雜路徑
+            max_treedepth = 18  # 🔧 增加tree depth for ε-contamination
         else:
-            # 標準高性能模式
-            if n_chains >= 8:
-                n_samples = 800   # More chains, fewer samples per chain
-                n_warmup = 400
-            elif n_chains >= 6:
-                n_samples = 1000  # Balanced
-                n_warmup = 500
-            else:
-                n_samples = 1200  # Fewer chains, more samples per chain
+            # 標準高性能模式 - 🔧 優化chains配置
+            # 確保至少有足夠的chains進行收斂診斷
+            n_chains = max(4, min(max_chains, n_cores))  # 至少4 chains
+            
+            if n_chains >= 12:
+                n_samples = 800   # Many chains, fewer samples per chain
                 n_warmup = 600
-            target_accept = 0.95
-            step_size = 0.1
-            max_treedepth = 12
+            elif n_chains >= 8:
+                n_samples = 1000  # Balanced
+                n_warmup = 700
+            elif n_chains >= 6:
+                n_samples = 1200  # Good balance
+                n_warmup = 800
+            else:
+                n_samples = 1500  # Fewer chains, more samples per chain
+                n_warmup = 1000
+            target_accept = 0.96  # 提高接受率
+            step_size = 0.05  # 更保守
+            max_treedepth = 15
         
         return {
             "n_samples": n_samples,

@@ -91,10 +91,17 @@ class ContaminationEstimateResult:
 
 @dataclass
 class MCMCConfig:
-    """MCMC採樣配置"""
+    """
+    MCMC採樣配置 - 優化為ε-contamination模型
+    
+    對於複雜的ε-contamination hierarchical models，需要：
+    - 至少4 chains進行有效的R-hat計算
+    - 推薦6+ chains確保可靠的收斂診斷
+    - 充足的warmup確保完全收斂
+    """
     n_samples: int = 1000
     n_warmup: int = 2000  
-    n_chains: int = 4
+    n_chains: int = 6  # 🔧 增加到6 chains (原來是4)
     target_accept: float = 0.99  
     max_treedepth: int = 20
     standardize_data: bool = True
@@ -1160,13 +1167,13 @@ def quick_epsilon_contamination_mcmc(observations: np.ndarray,
     # 配置MCMC參數
     if quick_test:
         config = MCMCConfig(
-            n_samples=300,
-            n_warmup=400,
-            n_chains=2,
+            n_samples=400,  # 增加樣本數
+            n_warmup=500,   # 增加warmup
+            n_chains=4,     # 🔧 增加到4 chains (原來是2)
             target_accept=0.98
         )
     else:
-        config = MCMCConfig()  # 使用默認保守參數
+        config = MCMCConfig()  # 使用默認保守參數 (6 chains)
     
     # 執行分析
     mcmc_sampler = EpsilonContaminationMCMC(config)
