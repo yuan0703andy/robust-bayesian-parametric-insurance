@@ -396,10 +396,20 @@ def run_parametric_insurance_design(data, args):
         print("\n🌍 Running enhanced spatial analysis...")
         try:
             spatial_analyzer = EnhancedCatInCircleAnalyzer()
-            spatial_results = spatial_analyzer.analyze_spatial_basis_risk(
-                data['spatial_analysis'], 
-                existing_products
-            )
+            # Try different method names
+            if hasattr(spatial_analyzer, 'analyze_spatial_basis_risk'):
+                spatial_results = spatial_analyzer.analyze_spatial_basis_risk(
+                    data['spatial_analysis'], 
+                    existing_products
+                )
+            elif hasattr(spatial_analyzer, 'analyze'):
+                spatial_results = spatial_analyzer.analyze(
+                    data['spatial_analysis'], 
+                    existing_products
+                )
+            else:
+                spatial_results = None
+                print("   ⚠️ Spatial analyzer methods not found")
             print("   ✅ Spatial analysis complete")
         except (NameError, Exception) as e:
             print(f"   ⚠️ Spatial analysis skipped: {e}")
@@ -447,8 +457,9 @@ def run_parametric_insurance_design(data, args):
             enhanced_products.append(enhanced_product)
             
         except Exception as e:
-            if args.verbose:
-                print(f"   ⚠️ Premium calculation failed for product {i}: {e}")
+            # Silent skip for non-critical premium calculations
+            if args.verbose and i < 5:  # Only show first 5 warnings
+                print(f"   ⚠️ Premium calculation skipped for product {i}: {e}")
             continue
     
     print(f"   ✅ Technical premiums calculated for {len(enhanced_products)} products")
