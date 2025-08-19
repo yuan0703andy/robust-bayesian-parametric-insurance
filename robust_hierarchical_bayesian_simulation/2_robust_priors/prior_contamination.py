@@ -27,11 +27,31 @@ from scipy.optimize import minimize
 import warnings
 
 # 從其他模組導入
-from .contamination_theory import (
-    EpsilonContaminationSpec, ContaminationEstimateResult, 
-    ContaminationDistributionClass, EstimationMethod,
-    ContaminationDistributionGenerator
-)
+try:
+    from .contamination_theory import (
+        EpsilonContaminationSpec, ContaminationEstimateResult, 
+        ContaminationDistributionClass, EstimationMethod,
+        ContaminationDistributionGenerator
+    )
+except ImportError:
+    # 如果相對導入失敗，嘗試絕對導入
+    try:
+        from contamination_theory import (
+            EpsilonContaminationSpec, ContaminationEstimateResult, 
+            ContaminationDistributionClass, EstimationMethod,
+            ContaminationDistributionGenerator
+        )
+    except ImportError:
+        # 如果都失敗，嘗試從當前目錄導入
+        import sys
+        import os
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        sys.path.insert(0, current_dir)
+        from contamination_theory import (
+            EpsilonContaminationSpec, ContaminationEstimateResult, 
+            ContaminationDistributionClass, EstimationMethod,
+            ContaminationDistributionGenerator
+        )
 
 # ========================================
 # 先驗污染分析器
