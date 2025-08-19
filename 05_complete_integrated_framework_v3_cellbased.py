@@ -384,35 +384,45 @@ print("\n2️⃣ 階段2：穩健先驗 (ε-contamination)")
 stage_start = time.time()
 
 try:
-    # 導入穩健先驗模組
-    import importlib.util
+    # 添加模組路徑到 sys.path
+    import sys
+    import os
+    current_dir = os.getcwd()
+    robust_path = os.path.join(current_dir, 'robust_hierarchical_bayesian_simulation')
+    priors_path = os.path.join(robust_path, '2_robust_priors')
+    
+    for path in [robust_path, priors_path]:
+        if path not in sys.path:
+            sys.path.insert(0, path)
     
     # 導入污染理論模組
+    import importlib.util
     spec = importlib.util.spec_from_file_location(
         "contamination_theory", 
-        "robust_hierarchical_bayesian_simulation/2_robust_priors/contamination_theory.py"
+        os.path.join(priors_path, "contamination_theory.py")
     )
-    contamination_module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(contamination_module)
+    contamination_theory = importlib.util.module_from_spec(spec)
+    sys.modules['contamination_theory'] = contamination_theory
+    spec.loader.exec_module(contamination_theory)
     
-    # 導入先驗污染分析器
+    # 導入先驗污染模組
     spec2 = importlib.util.spec_from_file_location(
         "prior_contamination", 
-        "robust_hierarchical_bayesian_simulation/2_robust_priors/prior_contamination.py"
+        os.path.join(priors_path, "prior_contamination.py")
     )
-    prior_module = importlib.util.module_from_spec(spec2)
-    spec2.loader.exec_module(prior_module)
+    prior_contamination = importlib.util.module_from_spec(spec2)
+    spec2.loader.exec_module(prior_contamination)
     
     print("   ✅ 穩健先驗模組載入成功")
     
     # 創建ε-contamination規格
-    epsilon_spec = contamination_module.EpsilonContaminationSpec(
-        contamination_class=contamination_module.ContaminationDistributionClass.TYPHOON_SPECIFIC,
+    epsilon_spec = contamination_theory.EpsilonContaminationSpec(
+        contamination_class=contamination_theory.ContaminationDistributionClass.TYPHOON_SPECIFIC,
         typhoon_frequency_per_year=3.2  # 預設颱風頻率
     )
     
     # 初始化先驗污染分析器
-    prior_analyzer = prior_module.PriorContaminationAnalyzer(epsilon_spec)
+    prior_analyzer = prior_contamination.PriorContaminationAnalyzer(epsilon_spec)
     
     # 從數據估計ε值
     epsilon_result = prior_analyzer.estimate_epsilon_from_data(
