@@ -469,81 +469,108 @@ print("\n3️⃣ 階段3：階層建模")
 stage_start = time.time()
 
 try:
-    # 導入階層建模模組
+    # 添加模組路徑到 sys.path
+    import sys
+    import os
+    current_dir = os.getcwd()
+    robust_path = os.path.join(current_dir, 'robust_hierarchical_bayesian_simulation')
+    hierarchical_path = os.path.join(robust_path, '3_hierarchical_modeling')
+    
+    for path in [robust_path, hierarchical_path]:
+        if path not in sys.path:
+            sys.path.insert(0, path)
+    
+    # 導入模組 - 使用importlib但添加到sys.modules
     import importlib.util
     
-    # 導入核心模型
-    spec = importlib.util.spec_from_file_location(
-        "core_model", 
-        "robust_hierarchical_bayesian_simulation/3_hierarchical_modeling/core_model.py"
-    )
-    core_model_module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(core_model_module)
-    
-    # 導入先驗規格
-    spec2 = importlib.util.spec_from_file_location(
+    # 載入 prior_specifications
+    spec_prior = importlib.util.spec_from_file_location(
         "prior_specifications", 
-        "robust_hierarchical_bayesian_simulation/3_hierarchical_modeling/prior_specifications.py"
+        os.path.join(hierarchical_path, "prior_specifications.py")
     )
-    prior_spec_module = importlib.util.module_from_spec(spec2)
-    spec2.loader.exec_module(prior_spec_module)
+    prior_specifications = importlib.util.module_from_spec(spec_prior)
+    sys.modules['prior_specifications'] = prior_specifications
+    spec_prior.loader.exec_module(prior_specifications)
+    
+    # 載入 likelihood_families
+    spec_likelihood = importlib.util.spec_from_file_location(
+        "likelihood_families", 
+        os.path.join(hierarchical_path, "likelihood_families.py")
+    )
+    likelihood_families = importlib.util.module_from_spec(spec_likelihood)
+    sys.modules['likelihood_families'] = likelihood_families
+    spec_likelihood.loader.exec_module(likelihood_families)
+    
+    # 載入 core_model
+    spec_core = importlib.util.spec_from_file_location(
+        "core_model", 
+        os.path.join(hierarchical_path, "core_model.py")
+    )
+    core_model = importlib.util.module_from_spec(spec_core)
+    spec_core.loader.exec_module(core_model)
     
     print("   ✅ 階層建模模組載入成功")
     
-    # 初始化階層模型管理器
-    hierarchical_model = core_model_module.ParametricHierarchicalModel(
-        vulnerability_data=vulnerability_data,
-        config=config.hierarchical_modeling if hasattr(config, 'hierarchical_modeling') else None
+    # 創建模型規格 - 需要先檢查 core_model 的構造函數
+    # 根據 core_model.py 的 __init__ 方法，需要 model_spec 和 mcmc_config 參數
+    
+    # 先創建一個簡化的 MCMC 配置
+    mcmc_config = likelihood_families.MCMCConfig(
+        n_samples=500,
+        n_warmup=500, 
+        n_chains=2,
+        cores=1
     )
     
     # 定義模型配置
     model_configs = {
         "lognormal_weak": {
-            "likelihood_family": "lognormal",
-            "prior_scenario": "weak_informative",
-            "vulnerability_type": "emanuel"
+            "likelihood_family": prior_specifications.LikelihoodFamily.LOGNORMAL,
+            "prior_scenario": prior_specifications.PriorScenario.WEAK_INFORMATIVE,
+            "vulnerability_type": prior_specifications.VulnerabilityFunctionType.EMANUEL
         },
         "student_t_robust": {
-            "likelihood_family": "student_t",
-            "prior_scenario": "pessimistic",
-            "vulnerability_type": "emanuel"
+            "likelihood_family": prior_specifications.LikelihoodFamily.STUDENT_T,
+            "prior_scenario": prior_specifications.PriorScenario.PESSIMISTIC,
+            "vulnerability_type": prior_specifications.VulnerabilityFunctionType.EMANUEL
         }
     }
     
     hierarchical_results = {}
     
-    for config_name, model_spec in model_configs.items():
+    for config_name, model_config in model_configs.items():
         print(f"   🔍 擬合模型: {config_name}")
         
         try:
-            # 使用實際的階層模型擬合
-            result = hierarchical_model.fit_model(
+            # 創建模型規格物件 - 需要檢查如何正確創建 ModelSpec
+            # 暫時使用簡化的字典配置
+            model_spec = type('ModelSpec', (), {
+                'model_name': config_name,
+                'likelihood_family': model_config['likelihood_family'],
+                'prior_scenario': model_config['prior_scenario'], 
+                'vulnerability_type': model_config['vulnerability_type'],
+                'include_spatial_effects': False
+            })()
+            
+            # 創建階層模型實例
+            hierarchical_model = core_model.ParametricHierarchicalModel(
                 model_spec=model_spec,
-                config_name=config_name
+                mcmc_config=mcmc_config
             )
+            
+            # 擬合模型到數據
+            result = hierarchical_model.fit(vulnerability_data)
             hierarchical_results[config_name] = result
             print(f"     ✅ {config_name} 擬合成功")
             
         except Exception as e:
             print(f"     ⚠️ 模型 {config_name} 失敗: {e}")
             # 使用簡化實現作為後備
-            n_samples = 1000
-            result = {
-                "model_spec": model_spec,
-                "posterior_samples": {
-                    "alpha": np.random.normal(0, 1, n_samples),
-                    "beta": np.random.gamma(2, 1, n_samples),
-                    "sigma": np.random.gamma(1, 1, n_samples)
-                },
-                "diagnostics": {
-                    "rhat": {"alpha": 1.01, "beta": 1.02, "sigma": 1.00},
-                    "n_eff": {"alpha": 800, "beta": 750, "sigma": 900},
-                    "converged": True
-                },
-                "log_likelihood": -500.0,
-                "waic": 1020.0 + np.random.normal(0, 50)
+            hierarchical_results[config_name] = {
+                "model_config": model_config,
+                "error": str(e),
+                "status": "fallback"
             }
-            hierarchical_results[config_name] = result
     
     print(f"   ✅ 階層建模完成: {len(hierarchical_results)} 個模型")
     

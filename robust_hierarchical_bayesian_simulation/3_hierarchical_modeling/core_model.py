@@ -42,8 +42,22 @@ except ImportError as e:
     warnings.warn(f"PyMC not available: {e}")
 
 # 從其他模組導入
-from .prior_specifications import PriorScenario, LikelihoodFamily, ContaminationDistribution, VulnerabilityFunctionType
-from .likelihood_families import MCMCConfig, DiagnosticResult, HierarchicalModelResult
+try:
+    from .prior_specifications import PriorScenario, LikelihoodFamily, ContaminationDistribution, VulnerabilityFunctionType
+    from .likelihood_families import MCMCConfig, DiagnosticResult, HierarchicalModelResult
+except ImportError:
+    # 如果相對導入失敗，嘗試絕對導入
+    try:
+        from prior_specifications import PriorScenario, LikelihoodFamily, ContaminationDistribution, VulnerabilityFunctionType
+        from likelihood_families import MCMCConfig, DiagnosticResult, HierarchicalModelResult
+    except ImportError:
+        # 如果都失敗，嘗試從當前目錄導入
+        import sys
+        import os
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        sys.path.insert(0, current_dir)
+        from prior_specifications import PriorScenario, LikelihoodFamily, ContaminationDistribution, VulnerabilityFunctionType
+        from likelihood_families import MCMCConfig, DiagnosticResult, HierarchicalModelResult
 
 # 簡化版本 - 移除未使用的依賴
 HAS_MPE = False
