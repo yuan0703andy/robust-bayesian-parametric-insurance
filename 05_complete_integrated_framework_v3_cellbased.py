@@ -63,13 +63,19 @@ print(f"   物理核心: {n_physical_cores}")
 print(f"   邏輯核心: {n_logical_cores}")
 print(f"   可用記憶體: {available_memory_gb:.1f} GB")
 
-# HPC資源池配置
+# HPC資源池配置 (更保守的配置避免記憶體問題)
 hpc_config = {
-    'data_processing_pool': min(8, n_physical_cores // 4),
-    'model_selection_pool': min(16, n_physical_cores // 2),
-    'mcmc_validation_pool': min(4, n_physical_cores // 8),
-    'analysis_pool': min(4, n_physical_cores // 8)
+    'data_processing_pool': min(4, max(1, n_physical_cores // 4)),
+    'model_selection_pool': min(8, max(1, n_physical_cores // 2)),
+    'mcmc_validation_pool': min(2, max(1, n_physical_cores // 8)),
+    'analysis_pool': min(2, max(1, n_physical_cores // 8))
 }
+
+# 記憶體限制檢查
+if available_memory_gb < 8:
+    print(f"   ⚠️ 記憶體不足 ({available_memory_gb:.1f} GB < 8 GB), 降低並行度...")
+    for key in hpc_config:
+        hpc_config[key] = max(1, hpc_config[key] // 2)
 
 print(f"\n🔄 HPC並行配置:")
 for pool_name, pool_size in hpc_config.items():
@@ -212,9 +218,39 @@ if n_obs > 1000 and hpc_config['data_processing_pool'] > 1:
         actual_batch_size = end_idx - i
         batch_infos.append((len(batch_infos), i, actual_batch_size))
     
-    # 並行處理
-    with ProcessPoolExecutor(max_workers=hpc_config['data_processing_pool']) as executor:
-        batch_results = list(executor.map(generate_batch_data, batch_infos))
+    # 並行處理 (with robust error handling)
+    max_retries = 2
+    retry_count = 0
+    batch_results = None
+    
+    while retry_count <= max_retries and batch_results is None:
+        try:
+            # Reduce parallelism on retries to avoid memory issues
+            workers = max(1, hpc_config['data_processing_pool'] // (2 ** retry_count))
+            print(f"   🔄 嘗試 {retry_count + 1}/{max_retries + 1}: 使用 {workers} 個核心...")
+            
+            with ProcessPoolExecutor(max_workers=workers) as executor:
+                batch_results = list(executor.map(generate_batch_data, batch_infos))
+                
+        except (BrokenProcessPool, MemoryError, RuntimeError) as e:
+            print(f"   ⚠️ 並行處理失敗 (嘗試 {retry_count + 1}): {type(e).__name__}")
+            retry_count += 1
+            
+            if retry_count > max_retries:
+                print(f"   💡 降級到串行處理...")
+                # Fallback to serial processing
+                batch_results = []
+                for batch_info in batch_infos:
+                    try:
+                        result = generate_batch_data(batch_info)
+                        batch_results.append(result)
+                    except Exception as e:
+                        print(f"   ❌ 批次 {batch_info[0]} 失敗: {e}")
+                        raise
+            else:
+                # Wait before retry
+                import time
+                time.sleep(1)
     
     # 合併結果
     wind_speeds = np.concatenate([r['wind_speeds'] for r in batch_results])
