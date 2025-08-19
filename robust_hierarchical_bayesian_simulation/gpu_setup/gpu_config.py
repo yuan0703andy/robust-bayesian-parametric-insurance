@@ -113,15 +113,16 @@ class GPUEnvironmentManager:
         """檢查可用的GPU框架"""
         frameworks = {}
         
-        # PyMC + PyTensor
+        # JAX (replacing PyMC)
         try:
-            import pymc as pm
-            import pytensor
-            frameworks["pymc"] = True
-            print("   ✅ PyMC GPU支援可用")
+            import jax
+            import jax.numpy as jnp
+            jax.config.update("jax_enable_x64", True)
+            frameworks["jax"] = len(jax.devices('gpu')) > 0 or jax.default_backend() == 'gpu'
+            print(f"   ✅ JAX GPU支援: {jax.default_backend()} ({len(jax.devices())} devices)")
         except ImportError:
-            frameworks["pymc"] = False
-            print("   ❌ PyMC GPU支援不可用")
+            frameworks["jax"] = False
+            print("   ❌ JAX GPU支援不可用")
         
         # PyTorch
         try:
@@ -133,14 +134,14 @@ class GPUEnvironmentManager:
             frameworks["pytorch"] = False
             print("   ❌ PyTorch不可用")
         
-        # JAX
+        # TensorFlow (optional)
         try:
-            import jax
-            frameworks["jax"] = len(jax.devices('gpu')) > 0 or len(jax.devices('tpu')) > 0
-            print(f"   {'✅' if frameworks['jax'] else '❌'} JAX GPU支援")
+            import tensorflow as tf
+            frameworks["tensorflow"] = len(tf.config.list_physical_devices('GPU')) > 0
+            print(f"   {'✅' if frameworks['tensorflow'] else '❌'} TensorFlow GPU支援")
         except ImportError:
-            frameworks["jax"] = False
-            print("   ❌ JAX不可用")
+            frameworks["tensorflow"] = False
+            print("   ❌ TensorFlow不可用")
         
         return frameworks
     
@@ -201,9 +202,9 @@ class GPUEnvironmentManager:
         # 設定環境變量
         self._set_gpu_environment_variables()
         
-        # 創建GPU配置
-        if self.available_frameworks.get("pymc", False):
-            return self._setup_pymc_gpu_config()
+        # 創建GPU配置 (優先JAX)
+        if self.available_frameworks.get("jax", False):
+            return self._setup_jax_gpu_config()
         elif self.available_frameworks.get("pytorch", False):
             return self._setup_pytorch_config()
         else:
@@ -213,11 +214,13 @@ class GPUEnvironmentManager:
     def _set_gpu_environment_variables(self):
         """設定GPU環境變量"""
         
-        # PyTensor GPU配置
+        # JAX GPU配置
         if self.system_specs.platform == "Darwin":  # macOS
-            os.environ['PYTENSOR_FLAGS'] = 'device=cpu,floatX=float64,mode=FAST_COMPILE'
+            os.environ['JAX_PLATFORMS'] = 'cpu'
+            os.environ['JAX_ENABLE_X64'] = 'True'
         else:
-            os.environ['PYTENSOR_FLAGS'] = 'device=cuda,floatX=float32,mode=FAST_RUN'
+            os.environ['JAX_PLATFORMS'] = 'gpu,cpu'
+            os.environ['JAX_ENABLE_X64'] = 'True'
         
         # 多線程配置
         os.environ['OMP_NUM_THREADS'] = str(min(8, self.system_specs.physical_cores // 4))
@@ -226,21 +229,24 @@ class GPUEnvironmentManager:
         # CUDA配置（如果適用）
         if self.system_specs.platform == "Linux":
             os.environ['CUDA_VISIBLE_DEVICES'] = ','.join(map(str, range(self.system_specs.gpu_count)))
+            
+        # JAX memory configuration
+        os.environ['XLA_PYTHON_CLIENT_MEM_FRACTION'] = '0.8'
     
-    def _setup_pymc_gpu_config(self) -> 'GPUConfig':
-        """設定PyMC GPU配置"""
-        print("🚀 設定PyMC GPU配置...")
+    def _setup_jax_gpu_config(self) -> 'GPUConfig':
+        """設定JAX GPU配置"""
+        print("🚀 設定JAX GPU配置...")
         
         device_ids = list(range(min(2, self.system_specs.gpu_count)))
         
         config = GPUConfig(
-            framework=GPUFramework.PYMC,
+            framework=GPUFramework.JAX,
             device_ids=device_ids,
             memory_fraction=0.8,
             enable_mixed_precision=True
         )
         
-        self.configs["pymc"] = config
+        self.configs["jax"] = config
         return config
     
     def _setup_pytorch_config(self) -> 'GPUConfig':
@@ -270,7 +276,7 @@ class GPUEnvironmentManager:
         os.environ['NUMEXPR_NUM_THREADS'] = str(self.system_specs.physical_cores)
         
         config = GPUConfig(
-            framework=GPUFramework.PYMC,  # 預設使用PyMC
+            framework=GPUFramework.JAX,  # 預設使用JAX
             device_ids=[],
             memory_fraction=0.8
         )

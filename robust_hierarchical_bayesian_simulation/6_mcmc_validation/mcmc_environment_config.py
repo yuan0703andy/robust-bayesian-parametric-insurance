@@ -111,24 +111,17 @@ def verify_pymc_setup():
         'setup_correct': False
     }
     
-    # 檢查 PyMC
-    try:
-        import pymc as pm
-        results['pymc_available'] = True
-        results['pymc_version'] = pm.__version__
-        print(f"✅ PyMC 版本: {pm.__version__}")
-    except ImportError as e:
-        print(f"❌ PyMC 導入失敗: {e}")
-        return results
-    
-    # 檢查 JAX
+    # 檢查 JAX (替代PyMC)
     try:
         import jax
+        import jax.numpy as jnp
+        jax.config.update("jax_enable_x64", True)
+        
         results['jax_available'] = True
         results['jax_version'] = jax.__version__
         results['jax_devices'] = [str(device) for device in jax.devices()]
         
-        print(f"✅ JAX 版本: {jax.__version__}")
+        print(f"✅ JAX 版本: {jax.__version__} (replacing PyMC)")
         print(f"✅ JAX 設備: {jax.devices()}")
         
         # 確認 JAX 使用 CPU
@@ -137,9 +130,10 @@ def verify_pymc_setup():
             print("✅ JAX 正確使用 CPU 後端")
         else:
             print("⚠️ 警告：JAX 可能未使用 CPU 後端")
-            
-    except ImportError:
-        print("ℹ️ JAX 未安裝，PyMC 將使用默認後端")
+        
+    except ImportError as e:
+        print(f"❌ JAX 導入失敗: {e}")
+        return results
     
     # 測試簡單的 PyMC 模型
     try:

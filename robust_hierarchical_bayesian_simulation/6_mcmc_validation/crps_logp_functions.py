@@ -30,13 +30,19 @@ try:
 except ImportError:
     TORCH_AVAILABLE = False
 
-# Try importing PyMC for MCMC integration
+# Try importing JAX for MCMC integration (replaces PyMC)
 try:
-    import pymc as pm
-    import pytensor.tensor as pt
-    PYMC_AVAILABLE = True
+    import jax
+    import jax.numpy as jnp
+    import jax.scipy.stats as jsp
+    from jax import random, grad, jit, vmap
+    from jax.scipy.special import logsumexp, erf
+    from functools import partial
+    JAX_AVAILABLE = True
+    print(f"✅ JAX 版本: {jax.__version__} (replacing PyMC)")
+    jax.config.update("jax_enable_x64", True)
 except ImportError:
-    PYMC_AVAILABLE = False
+    JAX_AVAILABLE = False
 
 from scipy import stats
 from scipy.stats import norm
@@ -174,11 +180,11 @@ class CRPSLogProbabilityFunction:
         return prior_logp
 
 
-class PyMCCRPSLogProbability:
+class JAXCRPSLogProbability:
     """
-    PyMC專用的CRPS對數概率函數
+    JAX專用的CRPS對數概率函數
     
-    提供與PyMC MCMC採樣器整合的介面
+    提供與JAX MCMC採樣器整合的介面
     """
     
     def __init__(self, 
@@ -186,62 +192,56 @@ class PyMCCRPSLogProbability:
                  parametric_features: np.ndarray,
                  parametric_payout_function: Callable):
         """
-        初始化PyMC CRPS logp
+        初始化JAX CRPS logp
         
         Args:
             observed_losses: 觀測損失數據
             parametric_features: 參數特徵數據
             parametric_payout_function: 賠付函數
         """
-        if not PYMC_AVAILABLE:
-            raise ImportError("需要PyMC來使用PyMCCRPSLogProbability")
+        if not JAX_AVAILABLE:
+            raise ImportError("需要JAX來使用JAXCRPSLogProbability")
             
-        self.observed_losses = observed_losses
-        self.parametric_features = parametric_features
+        self.observed_losses = jnp.array(observed_losses)
+        self.parametric_features = jnp.array(parametric_features)
         self.parametric_payout_function = parametric_payout_function
         
-    def create_crps_potential(self, 
-                            theta_vars: Dict[str, Any],
-                            name: str = "crps_potential") -> Any:
+    def create_crps_logp_function(self) -> Callable:
         """
-        創建CRPS Potential用於PyMC模型
+        創建CRPS log probability函數用於JAX MCMC
         
-        Args:
-            theta_vars: PyMC變數字典
-            name: Potential名稱
-            
         Returns:
-            PyMC Potential物件
+            JAX可微分的log probability函數
         """
         
-        def crps_logp_func(theta_dict):
-            """內部CRPS logp函數"""
-            # 提取參數
-            theta_array = pt.stack([theta_dict[key] for key in sorted(theta_dict.keys())])
+        @jit
+        def crps_logp_func(theta_array):
+            """內部CRPS logp函數"""            
+            # 計算參數型賠付（簡化版本：線性預測）
+            linear_pred = jnp.dot(self.parametric_features, theta_array[:-1])
+            log_sigma = theta_array[-1]
+            sigma = jnp.exp(log_sigma)  # 確保正數
             
-            # 計算參數型賠付（需要實現tensor版本）
-            # 這裡使用簡化版本
-            linear_pred = pt.dot(self.parametric_features, theta_array[:-1])
-            sigma = pt.exp(theta_array[-1])  # 確保正數
-            
-            # 高斯CRPS計算（tensor版本）
+            # 高斯CRPS計算（JAX版本）
             z = (self.observed_losses - linear_pred) / sigma
             
-            # 使用PyTensor操作
-            phi_z = pt.exp(-0.5 * z**2) / pt.sqrt(2 * np.pi)  # 標準正態PDF
-            Phi_z = 0.5 * (1 + pt.erf(z / pt.sqrt(2)))        # 標準正態CDF
+            # 使用JAX操作
+            phi_z = jnp.exp(-0.5 * z**2) / jnp.sqrt(2 * jnp.pi)  # 標準正態PDF
+            Phi_z = 0.5 * (1 + erf(z / jnp.sqrt(2)))             # 標準正態CDF
             
-            crps = sigma * (z * (2 * Phi_z - 1) + 2 * phi_z - 1 / pt.sqrt(np.pi))
+            crps = sigma * (z * (2 * Phi_z - 1) + 2 * phi_z - 1 / jnp.sqrt(jnp.pi))
             
             # 轉換為負對數概率
-            total_crps = pt.sum(crps)
+            total_crps = jnp.sum(crps)
             logp = -total_crps
             
-            return logp
+            # 添加prior logp (簡單正態先驗)
+            prior_logp = jnp.sum(jsp.norm.logpdf(theta_array[:-1], loc=0.0, scale=1.0))
+            prior_logp += jsp.norm.logpdf(log_sigma, loc=0.0, scale=1.0)
+            
+            return logp + prior_logp
         
-        # 創建Potential
-        logp_value = crps_logp_func(theta_vars)
-        return pm.Potential(name, logp_value)
+        return crps_logp_func
 
 
 class TorchCRPSLogProbability:
@@ -318,17 +318,17 @@ def create_nuts_compatible_logp(observed_losses: np.ndarray,
         NUTS相容的logp函數
     """
     
-    if framework == "pymc":
-        if not PYMC_AVAILABLE:
-            raise ImportError("PyMC not available")
+    if framework == "jax":
+        if not JAX_AVAILABLE:
+            raise ImportError("JAX not available")
         
-        crps_logp = PyMCCRPSLogProbability(
+        crps_logp = JAXCRPSLogProbability(
             observed_losses=observed_losses,
             parametric_features=parametric_features,
             parametric_payout_function=parametric_payout_function
         )
         
-        return crps_logp.create_crps_potential
+        return crps_logp.create_crps_logp_function()
         
     elif framework == "pytorch":
         if not TORCH_AVAILABLE:

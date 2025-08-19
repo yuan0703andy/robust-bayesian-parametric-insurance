@@ -80,17 +80,22 @@ def main():
     for key in wind_indices_dict.keys():
         print(f"   • {key}: {len(wind_indices_dict[key])} events")
     
-    # Extract main wind index for analysis (using 50km max as primary - matches hospital config)
-    wind_indices = wind_indices_dict.get('cat_in_circle_50km_max', np.array([]))
-    if len(wind_indices) == 0:
-        # Fallback to other available indices
-        for fallback_key in ['cat_in_circle_30km_max', 'cat_in_circle_75km_max', 'cat_in_circle_100km_max']:
-            if fallback_key in wind_indices_dict and len(wind_indices_dict[fallback_key]) > 0:
-                wind_indices = wind_indices_dict[fallback_key]
-                print(f"   Using fallback index: {fallback_key} ({len(wind_indices)} events)")
-                break
-    else:
-        print(f"   Using primary index: cat_in_circle_50km_max ({len(wind_indices)} events)")
+    # 注意：產品已經包含不同半徑的配置，需要根據每個產品的半徑選擇對應的風速數據
+    # 這裡我們先載入所有半徑的數據以供後續使用
+    print("\n📐 準備多半徑風速數據...")
+    radius_wind_indices = {}
+    for radius in [15, 30, 50, 75, 100]:
+        key = f'cat_in_circle_{radius}km_max'
+        if key in wind_indices_dict:
+            radius_wind_indices[radius] = wind_indices_dict[key]
+            print(f"   ✅ {radius}km半徑: {len(wind_indices_dict[key])} events")
+        else:
+            print(f"   ⚠️ {radius}km半徑數據不可用")
+    
+    # 使用50km作為預設（用於數據對齊檢查）
+    default_wind_indices = radius_wind_indices.get(50, 
+                          radius_wind_indices.get(30, 
+                          list(radius_wind_indices.values())[0] if radius_wind_indices else np.array([])))
     
     # 載入CLIMADA數據
     print("📂 Loading CLIMADA data...")
@@ -133,12 +138,14 @@ def main():
     # Ensure data arrays have matching lengths
     observed_losses = climada_data.get('impact').at_event if 'impact' in climada_data else np.array([])
     
-    # Truncate to minimum length to ensure compatibility
-    min_length = min(len(wind_indices), len(observed_losses))
+    # 使用預設風速數據檢查長度對齊
+    min_length = min(len(default_wind_indices), len(observed_losses))
     if min_length > 0:
-        wind_indices = wind_indices[:min_length]
+        # 對所有半徑的風速數據進行截斷以確保一致性
+        for radius in radius_wind_indices:
+            radius_wind_indices[radius] = radius_wind_indices[radius][:min_length]
         observed_losses = observed_losses[:min_length]
-        print(f"   Aligned data to {min_length} events")
+        print(f"   Aligned all radius data to {min_length} events")
     else:
         print("❌ No valid data found")
         return
@@ -160,8 +167,8 @@ def main():
         print(f"   - {level*100:3.0f}% 總曝險: ${max_payout_value:,.0f}")
     
     print(f"\n📊 開始分析...")
-    print(f"   分析產品數量: {len(products)}")
-    print(f"   事件數量: {len(wind_indices)}")
+    print(f"   分析產品數量: {len(products)} (70個閾值函數 × 5個半徑)")
+    print(f"   事件數量: {min_length}")
     print(f"   最大賠付水平: {len(payout_levels)} 個")
     print(f"   總分析組合: {len(products) * len(payout_levels)}")
     
@@ -214,17 +221,27 @@ def main():
         print(f"  {product['product_id']}: 閾值={product['trigger_thresholds']}")
         print(f"    賠付比例={product['payout_ratios']}, 最大賠付=${product['max_payout']:,.0f}")
     
-    # 檢查風速數據範圍
-    print(f"\n🌪️  風速數據檢查:")
-    print(f"   風速範圍: {np.min(wind_indices):.2f} - {np.max(wind_indices):.2f}")
-    print(f"   風速平均: {np.mean(wind_indices):.2f}")
-    print(f"   風速標準差: {np.std(wind_indices):.2f}")
+    # 檢查各半徑風速數據範圍
+    print(f"\n🌪️  各半徑風速數據檢查:")
+    for radius, wind_data in radius_wind_indices.items():
+        print(f"   {radius}km半徑:")
+        print(f"      範圍: {np.min(wind_data):.2f} - {np.max(wind_data):.2f} mph")
+        print(f"      平均: {np.mean(wind_data):.2f}, 標準差: {np.std(wind_data):.2f}")
     
     # 為每個產品測試多個最大賠付水平
     total_combinations = len(products) * len(payout_levels)
     combination_count = 0
     
     for i, product in enumerate(products):
+        # 根據產品的半徑選擇對應的風速數據
+        product_radius = product.get('radius_km', 50)  # 預設50km
+        if product_radius not in radius_wind_indices:
+            print(f"   ⚠️ 跳過產品 {product['product_id']}: 半徑 {product_radius}km 數據不可用")
+            continue
+        
+        # 使用該產品對應半徑的風速數據
+        wind_indices = radius_wind_indices[product_radius]
+        
         for payout_level in payout_levels:
             combination_count += 1
             if combination_count % 50 == 0:
@@ -237,7 +254,7 @@ def main():
             from skill_scores.basis_risk_functions import calculate_step_payouts_batch
             
             payouts = calculate_step_payouts_batch(
-                wind_indices,
+                wind_indices,  # 現在使用對應半徑的風速數據
                 product['trigger_thresholds'],
                 product['payout_ratios'],
                 current_max_payout  # 使用當前水平的最大賠付
@@ -536,6 +553,10 @@ def main():
     print("   • 相對加權不對稱基差風險計算 (結合標準化與權重)")
     print("   • Skill Score多重評估架構")
     print("   • 絕對 vs 相對基差風險對比分析")
+    print("\n   📐 多半徑測試配置:")
+    print(f"   • 測試半徑: 15km, 30km, 50km, 75km, 100km")
+    print(f"   • 每個產品使用其對應半徑的Cat-in-Circle風速數據")
+    print(f"   • Steinmann 2023標準: 70個閾值函數 × 5個半徑 = 350個產品")
     print("\n   🏥 基於醫院的賠付配置:")
     print(f"   • 醫院數量: {hospital_config.n_hospitals}")
     print(f"   • 總曝險值: ${total_exposure:,.0f}")

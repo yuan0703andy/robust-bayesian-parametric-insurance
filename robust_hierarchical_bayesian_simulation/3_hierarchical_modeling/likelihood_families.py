@@ -135,54 +135,70 @@ class LikelihoodBuilder:
     
     @staticmethod
     def build_normal_likelihood(mu, sigma, observed_data, name="likelihood"):
-        """建構正態似然"""
+        """建構正態似然 (JAX版本)"""
         try:
-            import pymc as pm
-            return pm.Normal(name, mu=mu, sigma=sigma, observed=observed_data)
+            import jax.numpy as jnp
+            import jax.scipy.stats as jsp
+            # Return JAX log-pdf function instead of PyMC distribution
+            def normal_logpdf():
+                return jsp.norm.logpdf(jnp.array(observed_data), loc=mu, scale=sigma).sum()
+            return normal_logpdf
         except ImportError:
-            raise ImportError("需要PyMC來建構似然函數")
+            raise ImportError("需要JAX來建構似然函數")
     
     @staticmethod
     def build_lognormal_likelihood(mu, sigma, observed_data, name="likelihood"):
-        """建構對數正態似然"""
+        """建構對數正態似然 (JAX版本)"""
         try:
-            import pymc as pm
-            import pytensor.tensor as pt
+            import jax.numpy as jnp
+            import jax.scipy.stats as jsp
             
-            # 確保mu > 0 for lognormal
-            mu_positive = pm.math.maximum(mu, 1e-6)
-            log_mu = pm.math.log(mu_positive)
-            
-            return pm.LogNormal(name, mu=log_mu, sigma=sigma, observed=observed_data)
+            def lognormal_logpdf():
+                # 確保mu > 0 for lognormal
+                mu_positive = jnp.maximum(mu, 1e-6)
+                log_mu = jnp.log(mu_positive)
+                return jsp.lognorm.logpdf(jnp.array(observed_data), s=sigma, scale=jnp.exp(log_mu)).sum()
+            return lognormal_logpdf
         except ImportError:
-            raise ImportError("需要PyMC來建構似然函數")
+            raise ImportError("需要JAX來建構似然函數")
     
     @staticmethod
     def build_student_t_likelihood(nu, mu, sigma, observed_data, name="likelihood"):
-        """建構Student-t似然"""
+        """建構Student-t似然 (JAX版本)"""
         try:
-            import pymc as pm
-            return pm.StudentT(name, nu=nu, mu=mu, sigma=sigma, observed=observed_data)
+            import jax.numpy as jnp
+            import jax.scipy.stats as jsp
+            
+            def student_t_logpdf():
+                return jsp.t.logpdf(jnp.array(observed_data), df=nu, loc=mu, scale=sigma).sum()
+            return student_t_logpdf
         except ImportError:
-            raise ImportError("需要PyMC來建構似然函數")
+            raise ImportError("需要JAX來建構似然函數")
     
     @staticmethod
     def build_gamma_likelihood(alpha, beta, observed_data, name="likelihood"):
-        """建構Gamma似然"""
+        """建構Gamma似然 (JAX版本)"""
         try:
-            import pymc as pm
-            return pm.Gamma(name, alpha=alpha, beta=beta, observed=observed_data)
+            import jax.numpy as jnp
+            import jax.scipy.stats as jsp
+            
+            def gamma_logpdf():
+                return jsp.gamma.logpdf(jnp.array(observed_data), a=alpha, scale=1/beta).sum()
+            return gamma_logpdf
         except ImportError:
-            raise ImportError("需要PyMC來建構似然函數")
+            raise ImportError("需要JAX來建構似然函數")
     
     @staticmethod
     def build_laplace_likelihood(mu, b, observed_data, name="likelihood"):
-        """建構Laplace似然"""
+        """建構Laplace似然 (JAX版本)"""
         try:
-            import pymc as pm
-            return pm.Laplace(name, mu=mu, b=b, observed=observed_data)
+            import jax.numpy as jnp
+            
+            def laplace_logpdf():
+                return jnp.sum(-jnp.log(2 * b) - jnp.abs(jnp.array(observed_data) - mu) / b)
+            return laplace_logpdf
         except ImportError:
-            raise ImportError("需要PyMC來建構似然函數")
+            raise ImportError("需要JAX來建構似然函數")
 
 class ContaminationMixture:
     """ε-contamination混合分布建構器"""
@@ -209,26 +225,29 @@ class ContaminationMixture:
             分布名稱
         """
         try:
-            import pymc as pm
-            import pytensor.tensor as pt
+            import jax.numpy as jnp
+            from jax.scipy.special import logsumexp
             
-            # 計算對數似然
-            base_logp = pm.logp(base_likelihood, observed_data)
-            contamination_logp = pm.logp(contamination_likelihood, observed_data)
+            def epsilon_contamination_logpdf():
+                # 計算對數似然（假設likelihood functions返回log-pdf值）
+                base_logp = base_likelihood() if callable(base_likelihood) else base_likelihood
+                contamination_logp = contamination_likelihood() if callable(contamination_likelihood) else contamination_likelihood
+                
+                # 混合對數似然 using log-sum-exp trick
+                base_log_weight = jnp.log(1 - epsilon) + base_logp
+                contamination_log_weight = jnp.log(epsilon) + contamination_logp
+                
+                mixture_logp = logsumexp(
+                    jnp.stack([base_log_weight, contamination_log_weight]), 
+                    axis=0
+                )
+                
+                return jnp.sum(mixture_logp)
             
-            # 混合對數似然 using log-sum-exp trick
-            base_log_weight = pt.log(1 - epsilon) + base_logp
-            contamination_log_weight = pt.log(epsilon) + contamination_logp
-            
-            mixture_logp = pt.logsumexp(
-                pt.stack([base_log_weight, contamination_log_weight], axis=0), 
-                axis=0
-            )
-            
-            return pm.Potential(name, mixture_logp.sum())
+            return epsilon_contamination_logpdf
             
         except ImportError:
-            raise ImportError("需要PyMC來建構混合似然函數")
+            raise ImportError("需要JAX來建構混合似然函數")
 
 class GPDLikelihood:
     """Generalized Pareto Distribution 似然"""
@@ -254,36 +273,40 @@ class GPDLikelihood:
             分布名稱
         """
         try:
-            import pymc as pm
-            import pytensor.tensor as pt
+            import jax.numpy as jnp
+            import numpy as np
             
-            # 過濾超過閾值的數據
-            exceedances = observed_data[observed_data > threshold] - threshold
+            def gpd_logpdf():
+                # 過濾超過閾值的數據
+                observed_array = jnp.array(observed_data)
+                exceedances = observed_array[observed_array > threshold] - threshold
+                
+                if len(exceedances) == 0:
+                    print(f"⚠️ 沒有數據超過閾值 {threshold}")
+                    return jnp.array(0.0)
+                
+                # GPD log-pdf
+                # log p(y) = -log(sigma) - (1 + 1/xi) * log(1 + xi * y / sigma)
+                # for y > 0, sigma > 0, and 1 + xi * y / sigma > 0
+                
+                y_scaled = exceedances / sigma
+                
+                # 確保 1 + xi * y_scaled > 0
+                condition = 1 + xi * y_scaled
+                
+                # GPD log probability
+                logp = (-jnp.log(sigma) - 
+                       (1 + 1/xi) * jnp.log(condition))
+                
+                # 只有當條件滿足時才計算
+                valid_logp = jnp.where(condition > 0, logp, -jnp.inf)
+                
+                return jnp.sum(valid_logp)
             
-            if len(exceedances) == 0:
-                print(f"⚠️ 沒有數據超過閾值 {threshold}")
-                return pm.Potential(name, 0)
-            
-            # GPD log-pdf
-            # log p(y) = -log(sigma) - (1 + 1/xi) * log(1 + xi * y / sigma)
-            # for y > 0, sigma > 0, and 1 + xi * y / sigma > 0
-            
-            y_scaled = exceedances / sigma
-            
-            # 確保 1 + xi * y_scaled > 0
-            condition = 1 + xi * y_scaled
-            
-            # GPD log probability
-            logp = (-pt.log(sigma) - 
-                   (1 + 1/xi) * pt.log(condition))
-            
-            # 只有當條件滿足時才計算
-            valid_logp = pt.switch(condition > 0, logp, -np.inf)
-            
-            return pm.Potential(name, valid_logp.sum())
+            return gpd_logpdf
             
         except ImportError:
-            raise ImportError("需要PyMC來建構GPD似然函數")
+            raise ImportError("需要JAX來建構GPD似然函數")
 
 # ========================================
 # 脆弱度函數建構器
@@ -307,20 +330,18 @@ class VulnerabilityFunctionBuilder:
             閾值風速
         """
         try:
-            import pymc as pm
+            import jax.numpy as jnp
             
-            # Emanuel函數參數
-            a = pm.Gamma("vulnerability_a", alpha=2, beta=500)  
-            b = pm.Normal("vulnerability_b", mu=2.0, sigma=0.5)
+            def emanuel_vulnerability(a, b):
+                """Emanuel脆弱度函數"""
+                wind_excess = jnp.maximum(jnp.array(hazard_intensities) - threshold, 0)
+                return jnp.minimum(1.0, a * wind_excess**b)
             
-            # 計算脆弱度
-            wind_excess = pm.math.maximum(hazard_intensities - threshold, 0)
-            vulnerability = pm.math.minimum(1.0, a * wind_excess**b)
-            
-            return vulnerability, {"a": a, "b": b}
+            # 返回函數和參數映射
+            return emanuel_vulnerability, {"param_names": ["vulnerability_a", "vulnerability_b"]}
             
         except ImportError:
-            raise ImportError("需要PyMC來建構脆弱度函數")
+            raise ImportError("需要JAX來建構脆弱度函數")
     
     @staticmethod 
     def build_linear_function(hazard_intensities):
@@ -335,19 +356,17 @@ class VulnerabilityFunctionBuilder:
             災害強度
         """
         try:
-            import pymc as pm
+            import jax.numpy as jnp
             
-            # 線性函數參數
-            a = pm.Normal("vulnerability_a", mu=0.01, sigma=0.005)
-            b = pm.Normal("vulnerability_b", mu=0.0, sigma=0.1)
+            def linear_vulnerability(a, b):
+                """線性脆弱度函數"""
+                return jnp.maximum(0, a * jnp.array(hazard_intensities) + b)
             
-            # 計算脆弱度
-            vulnerability = pm.math.maximum(0, a * hazard_intensities + b)
-            
-            return vulnerability, {"a": a, "b": b}
+            # 返回函數和參數映射
+            return linear_vulnerability, {"param_names": ["vulnerability_a", "vulnerability_b"]}
             
         except ImportError:
-            raise ImportError("需要PyMC來建構脆弱度函數")
+            raise ImportError("需要JAX來建構脆弱度函數")
     
     @staticmethod
     def build_polynomial_function(hazard_intensities, degree=2):
@@ -364,25 +383,23 @@ class VulnerabilityFunctionBuilder:
             多項式次數
         """
         try:
-            import pymc as pm
+            import jax.numpy as jnp
             
             if degree == 2:
-                # 二次多項式
-                a = pm.Normal("vulnerability_a", mu=0.0001, sigma=0.00005)
-                b = pm.Normal("vulnerability_b", mu=0.01, sigma=0.005)
-                c = pm.Normal("vulnerability_c", mu=0.0, sigma=0.1)
+                def polynomial_vulnerability(a, b, c):
+                    """二次多項式脆弱度函數"""
+                    hazard_array = jnp.array(hazard_intensities)
+                    return jnp.maximum(0, 
+                        a * hazard_array**2 + 
+                        b * hazard_array + c)
                 
-                vulnerability = pm.math.maximum(0, 
-                    a * hazard_intensities**2 + 
-                    b * hazard_intensities + c)
-                
-                return vulnerability, {"a": a, "b": b, "c": c}
+                return polynomial_vulnerability, {"param_names": ["vulnerability_a", "vulnerability_b", "vulnerability_c"]}
             
             else:
                 raise NotImplementedError(f"多項式次數 {degree} 尚未實現")
                 
         except ImportError:
-            raise ImportError("需要PyMC來建構脆弱度函數")
+            raise ImportError("需要JAX來建構脆弱度函數")
 
 # ========================================
 # 工具函數

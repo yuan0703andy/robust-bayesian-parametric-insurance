@@ -1,38 +1,37 @@
 #!/usr/bin/env python3
 """
-Contamination Theory Module
-污染理論模組
+Contamination Core Module
+污染核心模組
 
-從 epsilon_contamination.py 拆分出的理論基礎部分
-包含基本的數學理論、枚舉定義和核心概念
+核心ε-contamination理論與基本實現
+整合自 contamination_theory.py 和部分 epsilon_contamination.py
 
 數學基礎:
 Γ_ε = {π(θ): π(θ) = (1-ε)π₀(θ) + εq(θ), for all q ∈ Q}
 
 核心功能:
-- 污染分布類別定義
-- ε-contamination 規格配置
-- 基本理論工具
+- 基本類型定義與配置
+- 理論計算函數
+- 污染分布生成器
+- 雙重ε-contamination實現
 
 Author: Research Team  
-Date: 2025-01-17
+Date: 2025-08-19
 """
 
 import numpy as np
-from typing import Dict, List, Any, Optional, Tuple, Union
+from typing import Dict, List, Any, Optional, Tuple, Union, Callable
 from enum import Enum
 from dataclasses import dataclass, field
 from scipy import stats
+import warnings
 
 # ========================================
-# 基本枚舉定義
+# 基本類型定義
 # ========================================
 
 class ContaminationDistributionClass(Enum):
-    """
-    污染分佈類別 Q 的定義
-    Definition of contamination distribution class Q
-    """
+    """污染分佈類別 Q 的定義"""
     ALL_DISTRIBUTIONS = "all"                    # 所有概率分佈
     TYPHOON_SPECIFIC = "typhoon_specific"        # 颱風特定極值分佈
     HEAVY_TAILED = "heavy_tailed"               # 重尾分佈
@@ -60,10 +59,7 @@ class EstimationMethod(Enum):
 
 @dataclass
 class EpsilonContaminationSpec:
-    """
-    ε-污染規格配置
-    ε-Contamination specification configuration
-    """
+    """ε-污染規格配置"""
     epsilon_range: Tuple[float, float] = (0.01, 0.20)  # 污染程度範圍
     contamination_class: ContaminationDistributionClass = ContaminationDistributionClass.TYPHOON_SPECIFIC
     nominal_prior_family: str = "normal"                # 基準先驗分佈族
@@ -88,10 +84,7 @@ class EpsilonContaminationSpec:
 
 @dataclass 
 class ContaminationEstimateResult:
-    """
-    污染程度估計結果
-    Contamination level estimation results
-    """
+    """污染程度估計結果"""
     epsilon_estimates: Dict[str, float]          # 不同方法的ε估計
     epsilon_consensus: float                     # 共識估計
     epsilon_uncertainty: float                  # 估計不確定性
@@ -116,10 +109,7 @@ class ContaminationEstimateResult:
 
 @dataclass
 class RobustPosteriorResult:
-    """
-    穩健後驗結果
-    Robust posterior analysis results
-    """
+    """穩健後驗結果"""
     worst_case_posterior: Dict[str, np.ndarray]   # 最壞情況後驗
     best_case_posterior: Dict[str, np.ndarray]    # 最佳情況後驗
     robust_credible_intervals: Dict[str, Tuple[float, float]]  # 穩健可信區間
@@ -127,7 +117,7 @@ class RobustPosteriorResult:
     robustness_measures: Dict[str, float]         # 穩健性指標
 
 # ========================================
-# 理論基礎函數
+# 理論計算函數
 # ========================================
 
 def contamination_bound(epsilon: float, 
@@ -135,22 +125,7 @@ def contamination_bound(epsilon: float,
                        contamination_measure: float) -> Tuple[float, float]:
     """
     計算污染邊界
-    
     對於 π(θ) = (1-ε)π₀(θ) + εq(θ)，計算測度的邊界
-    
-    Parameters:
-    -----------
-    epsilon : float
-        污染程度
-    base_measure : float
-        基準分布的測度值
-    contamination_measure : float
-        污染分布的測度值
-        
-    Returns:
-    --------
-    Tuple[float, float]
-        (下界, 上界)
     """
     lower_bound = (1 - epsilon) * base_measure
     upper_bound = (1 - epsilon) * base_measure + epsilon * contamination_measure
@@ -160,28 +135,7 @@ def worst_case_risk(epsilon: float,
                    risk_function: callable,
                    base_distribution: Any,
                    contamination_class: ContaminationDistributionClass) -> float:
-    """
-    計算最壞情況風險
-    
-    max_{q∈Q} R[(1-ε)π₀ + εq]
-    
-    Parameters:
-    -----------
-    epsilon : float
-        污染程度
-    risk_function : callable
-        風險函數
-    base_distribution : 
-        基準分布
-    contamination_class : ContaminationDistributionClass
-        污染分布類別
-        
-    Returns:
-    --------
-    float
-        最壞情況風險
-    """
-    # 簡化實現 - 實際應用中需要更複雜的優化
+    """計算最壞情況風險 max_{q∈Q} R[(1-ε)π₀ + εq]"""
     base_risk = risk_function(base_distribution)
     
     # 根據污染類別估計最大可能風險增加
@@ -198,25 +152,7 @@ def worst_case_risk(epsilon: float,
 def compute_robustness_radius(epsilon_max: float,
                             base_posterior: np.ndarray,
                             contamination_distributions: List[np.ndarray]) -> float:
-    """
-    計算穩健性半徑
-    
-    衡量在給定污染程度下後驗的變化範圍
-    
-    Parameters:
-    -----------
-    epsilon_max : float
-        最大污染程度
-    base_posterior : np.ndarray
-        基準後驗樣本
-    contamination_distributions : List[np.ndarray]
-        可能的污染分布樣本
-        
-    Returns:
-    --------
-    float
-        穩健性半徑
-    """
+    """計算穩健性半徑"""
     base_mean = np.mean(base_posterior)
     base_std = np.std(base_posterior)
     
@@ -241,71 +177,11 @@ def compute_robustness_radius(epsilon_max: float,
     
     return max_deviation
 
-def sensitivity_to_epsilon(epsilon_values: np.ndarray,
-                         base_distribution: Any,
-                         contamination_distribution: Any,
-                         metric_function: callable) -> Dict[str, np.ndarray]:
-    """
-    分析對ε的敏感性
-    
-    Parameters:
-    -----------
-    epsilon_values : np.ndarray
-        ε值範圍
-    base_distribution : 
-        基準分布
-    contamination_distribution : 
-        污染分布
-    metric_function : callable
-        度量函數
-        
-    Returns:
-    --------
-    Dict[str, np.ndarray]
-        敏感性分析結果
-    """
-    metrics = []
-    
-    for eps in epsilon_values:
-        # 模擬混合分布
-        mixed_distribution = create_mixed_distribution(
-            base_distribution, contamination_distribution, eps
-        )
-        
-        # 計算度量
-        metric_value = metric_function(mixed_distribution)
-        metrics.append(metric_value)
-    
-    metrics = np.array(metrics)
-    
-    return {
-        "epsilon_values": epsilon_values,
-        "metric_values": metrics,
-        "sensitivity": np.gradient(metrics, epsilon_values),
-        "max_sensitivity": np.max(np.abs(np.gradient(metrics, epsilon_values))),
-        "sensitivity_at_zero": np.gradient(metrics, epsilon_values)[0] if len(metrics) > 1 else 0
-    }
-
 def create_mixed_distribution(base_dist: Any, 
                             contamination_dist: Any, 
                             epsilon: float) -> Any:
-    """
-    創建混合分布 π(θ) = (1-ε)π₀(θ) + εq(θ)
+    """創建混合分布 π(θ) = (1-ε)π₀(θ) + εq(θ)"""
     
-    Parameters:
-    -----------
-    base_dist : 
-        基準分布
-    contamination_dist : 
-        污染分布
-    epsilon : float
-        混合權重
-        
-    Returns:
-    --------
-    混合分布對象
-    """
-    # 這是簡化實現，實際應用中需要更複雜的分布處理
     class MixedDistribution:
         def __init__(self, base, contamination, eps):
             self.base = base
@@ -358,90 +234,215 @@ class ContaminationDistributionGenerator:
     def generate_typhoon_specific(location: float = 0, 
                                 scale: float = 1, 
                                 shape: float = 0.1) -> stats.genextreme:
-        """
-        生成颱風特定的極值分布
-        
-        Parameters:
-        -----------
-        location : float
-            位置參數
-        scale : float
-            尺度參數
-        shape : float
-            形狀參數
-            
-        Returns:
-        --------
-        scipy.stats.genextreme
-            廣義極值分布
-        """
+        """生成颱風特定的極值分布"""
         return stats.genextreme(c=shape, loc=location, scale=scale)
     
     @staticmethod
     def generate_heavy_tailed(df: float = 3, 
                             location: float = 0, 
                             scale: float = 1) -> stats.t:
-        """
-        生成重尾分布 (Student-t)
-        
-        Parameters:
-        -----------
-        df : float
-            自由度
-        location : float
-            位置參數
-        scale : float
-            尺度參數
-            
-        Returns:
-        --------
-        scipy.stats.t
-            Student-t分布
-        """
+        """生成重尾分布 (Student-t)"""
         return stats.t(df=df, loc=location, scale=scale)
     
     @staticmethod
     def generate_moment_bounded(a: float = -2, 
                               b: float = 2) -> stats.uniform:
-        """
-        生成矩有界分布 (均勻分布)
-        
-        Parameters:
-        -----------
-        a : float
-            下界
-        b : float
-            上界
-            
-        Returns:
-        --------
-        scipy.stats.uniform
-            均勻分布
-        """
+        """生成矩有界分布 (均勻分布)"""
         return stats.uniform(loc=a, scale=b-a)
 
-def test_contamination_theory():
-    """測試污染理論功能"""
-    print("🧪 測試污染理論模組...")
-    
-    # 測試基本配置
-    print("✅ 測試ε-contamination規格:")
-    spec = EpsilonContaminationSpec()
-    print(f"   經驗ε值: {spec.empirical_epsilon:.4f}")
-    print(f"   污染類別: {spec.contamination_class.value}")
-    
-    # 測試污染邊界計算
-    print("✅ 測試污染邊界:")
-    lower, upper = contamination_bound(0.1, 5.0, 15.0)
-    print(f"   邊界: [{lower:.2f}, {upper:.2f}]")
-    
-    # 測試分布生成器
-    print("✅ 測試分布生成器:")
-    typhoon_dist = ContaminationDistributionGenerator.generate_typhoon_specific()
-    samples = typhoon_dist.rvs(100)
-    print(f"   颱風分布樣本均值: {np.mean(samples):.3f}")
-    
-    print("✅ 污染理論測試完成")
+# ========================================
+# 雙重污染實現 (Double ε-contamination)
+# ========================================
 
-if __name__ == "__main__":
-    test_contamination_theory()
+class DoubleEpsilonContamination:
+    """
+    Double ε-contamination Implementation
+    實現 Prior + Likelihood 雙重 ε-contamination
+    
+    Mathematical Foundation:
+    Prior: π(θ) = (1-ε₁) × π₀(θ) + ε₁ × πc(θ)
+    Likelihood: p(y|θ) = (1-ε₂) × L₀(y|θ) + ε₂ × Lc(y|θ)
+    """
+    
+    def __init__(self, 
+                 epsilon_prior: float = 0.1, 
+                 epsilon_likelihood: float = 0.1,
+                 prior_contamination_type: str = 'heavy_tailed',
+                 likelihood_contamination_type: str = 'outliers'):
+        self.epsilon_prior = epsilon_prior
+        self.epsilon_likelihood = epsilon_likelihood
+        self.prior_contamination_type = prior_contamination_type
+        self.likelihood_contamination_type = likelihood_contamination_type
+        
+    def create_contaminated_prior(self, base_prior_params: Dict) -> Dict:
+        """Create contaminated prior: π(θ) = (1-ε₁) × π₀(θ) + ε₁ × πc(θ)"""
+        contaminated_params = base_prior_params.copy()
+        
+        if self.prior_contamination_type == 'heavy_tailed':
+            # Add heavy tails to prior
+            contaminated_params['scale'] *= (1 + 2 * self.epsilon_prior)
+            contaminated_params['df'] = max(2, base_prior_params.get('df', 30) * (1 - self.epsilon_prior))
+            
+        elif self.prior_contamination_type == 'extreme_value':
+            # Mix with extreme value distribution
+            contaminated_params['location'] += self.epsilon_prior * base_prior_params.get('scale', 1) * 3
+            contaminated_params['shape'] = 0.1 + self.epsilon_prior * 0.3  # GEV shape parameter
+            
+        elif self.prior_contamination_type == 'misspecified':
+            # Systematic misspecification
+            contaminated_params['location'] *= (1 - self.epsilon_prior * 0.5)
+            contaminated_params['scale'] *= (1 + self.epsilon_prior)
+            
+        contaminated_params['contamination_info'] = {
+            'epsilon': self.epsilon_prior,
+            'type': self.prior_contamination_type,
+            'base_params': base_prior_params
+        }
+        
+        return contaminated_params
+    
+    def create_contaminated_likelihood(self, data: np.ndarray, clean_fraction: float = None) -> np.ndarray:
+        """Create contaminated likelihood: p(y|θ) = (1-ε₂) × L₀(y|θ) + ε₂ × Lc(y|θ)"""
+        n = len(data)
+        
+        if clean_fraction is None:
+            clean_fraction = 1 - self.epsilon_likelihood
+            
+        n_clean = int(n * clean_fraction)
+        n_contaminated = n - n_clean
+        
+        # Separate clean and contaminated data
+        clean_data = data[:n_clean].copy()
+        
+        if self.likelihood_contamination_type == 'outliers':
+            # Add outliers
+            contaminated_data = np.concatenate([
+                data[n_clean:n_clean + n_contaminated//2],
+                np.random.uniform(data.min() * 3, data.max() * 3, n_contaminated - n_contaminated//2)
+            ])
+            
+        elif self.likelihood_contamination_type == 'measurement_error':
+            # Add measurement errors
+            contaminated_data = data[n_clean:] + np.random.normal(0, data.std() * 2, n_contaminated)
+            
+        elif self.likelihood_contamination_type == 'extreme_events':
+            # Add extreme events (e.g., typhoons)
+            contaminated_data = np.random.exponential(data.mean() * 5, n_contaminated)
+            
+        else:
+            contaminated_data = data[n_clean:]
+            
+        # Combine data
+        mixed_data = np.concatenate([clean_data, contaminated_data])
+        np.random.shuffle(mixed_data)
+        
+        return mixed_data
+    
+    def compute_robust_posterior(self, 
+                                data: np.ndarray,
+                                base_prior_params: Dict,
+                                likelihood_params: Dict) -> Dict:
+        """Compute robust posterior under double contamination"""
+        # Create contaminated prior
+        contaminated_prior = self.create_contaminated_prior(base_prior_params)
+        
+        # Process data with contamination
+        contaminated_data = self.create_contaminated_likelihood(data)
+        
+        # Compute posterior (simplified analytical approximation)
+        n = len(contaminated_data)
+        data_mean = np.mean(contaminated_data)
+        data_var = np.var(contaminated_data)
+        
+        # Prior parameters
+        prior_mean = contaminated_prior.get('location', 0)
+        prior_var = contaminated_prior.get('scale', 1) ** 2
+        
+        # Posterior computation (conjugate update for Normal-Normal model)
+        posterior_precision = 1/prior_var + n/data_var
+        posterior_var = 1/posterior_precision
+        posterior_mean = (prior_mean/prior_var + n*data_mean/data_var) / posterior_precision
+        
+        # Robustness adjustment for double contamination
+        robustness_factor = (1 - self.epsilon_prior) * (1 - self.epsilon_likelihood)
+        effective_sample_size = n * robustness_factor
+        
+        # Inflated uncertainty due to contamination
+        posterior_var_robust = posterior_var / robustness_factor
+        
+        return {
+            'posterior_mean': posterior_mean,
+            'posterior_std': np.sqrt(posterior_var_robust),
+            'effective_sample_size': effective_sample_size,
+            'epsilon_prior': self.epsilon_prior,
+            'epsilon_likelihood': self.epsilon_likelihood,
+            'robustness_factor': robustness_factor,
+            'contamination_impact': {
+                'prior_shift': abs(prior_mean - base_prior_params.get('location', 0)),
+                'variance_inflation': posterior_var_robust / posterior_var,
+                'sample_size_reduction': (n - effective_sample_size) / n
+            }
+        }
+
+# ========================================
+# 便利函數
+# ========================================
+
+def create_typhoon_contamination_spec(epsilon_range: Tuple[float, float] = (0.01, 0.15)) -> EpsilonContaminationSpec:
+    """創建標準颱風特定污染規格"""
+    return EpsilonContaminationSpec(
+        epsilon_range=epsilon_range,
+        contamination_class=ContaminationDistributionClass.TYPHOON_SPECIFIC,
+        nominal_prior_family="normal",
+        contamination_prior_family="gev",
+        robustness_criterion=RobustnessCriterion.WORST_CASE
+    )
+
+def demonstrate_dual_process_nature(data: np.ndarray, epsilon: float = 0.05) -> Dict[str, Any]:
+    """演示雙重過程特性：(1-ε) 正常天氣 + ε 颱風事件"""
+    
+    contamination_threshold = np.percentile(data[data > 0], 95)
+    normal_weather_data = data[data <= contamination_threshold]
+    typhoon_data = data[data > contamination_threshold]
+    
+    return {
+        'epsilon_empirical': len(typhoon_data) / len(data),
+        'epsilon_theoretical': epsilon,
+        'normal_weather_proportion': len(normal_weather_data) / len(data),
+        'typhoon_proportion': len(typhoon_data) / len(data),
+        'normal_weather_stats': {
+            'mean': np.mean(normal_weather_data) if len(normal_weather_data) > 0 else 0,
+            'std': np.std(normal_weather_data) if len(normal_weather_data) > 0 else 0
+        },
+        'typhoon_stats': {
+            'mean': np.mean(typhoon_data) if len(typhoon_data) > 0 else 0,
+            'std': np.std(typhoon_data) if len(typhoon_data) > 0 else 0
+        },
+        'dual_process_validated': abs(len(typhoon_data) / len(data) - epsilon) < 0.05
+    }
+
+# ========================================
+# 模組導出
+# ========================================
+
+__all__ = [
+    # 類型定義
+    'ContaminationDistributionClass',
+    'RobustnessCriterion', 
+    'EstimationMethod',
+    # 配置結構
+    'EpsilonContaminationSpec',
+    'ContaminationEstimateResult',
+    'RobustPosteriorResult',
+    # 理論函數
+    'contamination_bound',
+    'worst_case_risk',
+    'compute_robustness_radius',
+    'create_mixed_distribution',
+    # 核心類別
+    'ContaminationDistributionGenerator',
+    'DoubleEpsilonContamination',
+    # 便利函數
+    'create_typhoon_contamination_spec',
+    'demonstrate_dual_process_nature'
+]

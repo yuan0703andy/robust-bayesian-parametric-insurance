@@ -1,107 +1,167 @@
 #!/usr/bin/env python3
 """
-Prior Contamination Module
-先驗污染模組
+Epsilon Estimation Module
+ε值估計模組
 
-從 epsilon_contamination.py 拆分出的先驗污染功能
-專門處理先驗分布的ε-contamination建模
-
-數學基礎:
-π_ε(θ) = (1-ε)π₀(θ) + εq(θ)
+專門處理ε-contamination模型中ε值的估計功能
+整合自 epsilon_contamination.py 和 prior_contamination.py
 
 核心功能:
-- 先驗污染建模
-- ε值估計
-- 先驗穩健性分析
+- 多種ε估計方法實現
+- 數據驅動的污染程度分析
+- 方法比較與驗證
+- 先驗污染分析
 
 Author: Research Team  
-Date: 2025-01-17
+Date: 2025-08-19
 """
 
 import numpy as np
 import pandas as pd
-from typing import Dict, List, Any, Optional, Tuple, Union, Callable
-from dataclasses import dataclass
+from typing import Dict, List, Any, Optional, Tuple, Union
 from scipy import stats
 from scipy.optimize import minimize
 import warnings
 
-# 從其他模組導入
+# 從核心模組導入
 try:
-    from .contamination_theory import (
-        EpsilonContaminationSpec, ContaminationEstimateResult, 
-        ContaminationDistributionClass, EstimationMethod,
-        ContaminationDistributionGenerator
+    from .contamination_core import (
+        EpsilonContaminationSpec, ContaminationEstimateResult, EstimationMethod,
+        ContaminationDistributionClass, ContaminationDistributionGenerator
     )
 except ImportError:
-    # 如果相對導入失敗，嘗試絕對導入
-    try:
-        from contamination_theory import (
-            EpsilonContaminationSpec, ContaminationEstimateResult, 
-            ContaminationDistributionClass, EstimationMethod,
-            ContaminationDistributionGenerator
-        )
-    except ImportError:
-        # 如果都失敗，嘗試從當前目錄導入
-        import sys
-        import os
-        current_dir = os.path.dirname(os.path.abspath(__file__))
-        sys.path.insert(0, current_dir)
-        from contamination_theory import (
-            EpsilonContaminationSpec, ContaminationEstimateResult, 
-            ContaminationDistributionClass, EstimationMethod,
-            ContaminationDistributionGenerator
-        )
+    from contamination_core import (
+        EpsilonContaminationSpec, ContaminationEstimateResult, EstimationMethod,
+        ContaminationDistributionClass, ContaminationDistributionGenerator
+    )
 
 # ========================================
-# 先驗污染分析器
+# ε估計核心類別
 # ========================================
 
-class PriorContaminationAnalyzer:
+class EpsilonEstimator:
     """
-    先驗污染分析器
-    
-    專門處理先驗分布的ε-contamination建模和分析
+    ε值估計器
+    實現多種污染程度估計方法
     """
     
     def __init__(self, spec: EpsilonContaminationSpec):
-        """
-        初始化先驗污染分析器
-        
-        Parameters:
-        -----------
-        spec : EpsilonContaminationSpec
-            ε-contamination規格配置
-        """
         self.spec = spec
         self.contamination_generator = ContaminationDistributionGenerator()
-        
-        # 結果緩存
         self.estimation_cache: Dict[str, ContaminationEstimateResult] = {}
         
-        print(f"🔬 先驗污染分析器初始化完成")
+        print(f"📊 ε估計器初始化")
         print(f"   污染類別: {self.spec.contamination_class.value}")
-        print(f"   基準先驗: {self.spec.nominal_prior_family}")
-        print(f"   污染先驗: {self.spec.contamination_prior_family}")
+        print(f"   ε範圍: {self.spec.epsilon_range[0]:.3f} - {self.spec.epsilon_range[1]:.3f}")
     
-    def estimate_epsilon_from_data(self, 
-                                 data: np.ndarray,
-                                 methods: List[EstimationMethod] = None) -> ContaminationEstimateResult:
+    def estimate_contamination_level(self, data: np.ndarray, 
+                                   wind_data: Optional[np.ndarray] = None) -> ContaminationEstimateResult:
         """
-        從數據估計ε值
+        從颱風數據估計污染程度 ε
+        使用多種方法識別颱風事件 vs 正常天氣
+        """
+        print(f"🔍 估計ε-contamination level從 {len(data)} 事件...")
         
-        Parameters:
-        -----------
-        data : np.ndarray
-            觀測數據
-        methods : List[EstimationMethod], optional
-            使用的估計方法
-            
-        Returns:
-        --------
-        ContaminationEstimateResult
-            ε估計結果
-        """
+        non_zero_data = data[data > 0] if len(data[data > 0]) > 0 else data
+        
+        estimates = {}
+        thresholds = {}
+        
+        # Method 1: 95th percentile threshold (moderate typhoons)
+        if len(non_zero_data) > 20:
+            threshold_95 = np.percentile(non_zero_data, 95)
+            typhoon_events_95 = np.sum(data > threshold_95)
+            estimates['epsilon_95th'] = typhoon_events_95 / len(data)
+            thresholds['95th_percentile'] = threshold_95
+        
+        # Method 2: 99th percentile threshold (strong typhoons)  
+        if len(non_zero_data) > 10:
+            threshold_99 = np.percentile(non_zero_data, 99)
+            typhoon_events_99 = np.sum(data > threshold_99)
+            estimates['epsilon_99th'] = typhoon_events_99 / len(data)
+            thresholds['99th_percentile'] = threshold_99
+        
+        # Method 3: Statistical outlier detection (extreme events)
+        if len(non_zero_data) > 10:
+            Q1 = np.percentile(non_zero_data, 25)
+            Q3 = np.percentile(non_zero_data, 75)
+            IQR = Q3 - Q1
+            outlier_threshold = Q3 + 1.5 * IQR
+            outlier_events = np.sum(data > outlier_threshold)
+            estimates['epsilon_outlier'] = outlier_events / len(data)
+            thresholds['outlier_threshold'] = outlier_threshold
+        
+        # Method 4: Physical wind threshold (if available)
+        if wind_data is not None:
+            # Tropical storm threshold: 39 mph = 62.8 km/h
+            typhoon_wind_threshold = 62.8  # km/h
+            typhoon_events_wind = np.sum(wind_data > typhoon_wind_threshold)
+            estimates['epsilon_wind'] = typhoon_events_wind / len(wind_data)
+            thresholds['wind_threshold'] = typhoon_wind_threshold
+        
+        # Method 5: Extreme value theory approach
+        if len(non_zero_data) > 30:
+            # Fit GEV distribution and identify extreme quantiles
+            try:
+                # Use block maxima approach
+                block_size = max(10, len(non_zero_data) // 10)
+                blocks = [non_zero_data[i:i+block_size] for i in range(0, len(non_zero_data), block_size)]
+                block_maxima = [np.max(block) for block in blocks if len(block) > 5]
+                
+                if len(block_maxima) > 5:
+                    # Fit GEV to block maxima
+                    gev_params = stats.genextreme.fit(block_maxima)
+                    # Extreme threshold at 90th percentile of GEV
+                    extreme_threshold = stats.genextreme.ppf(0.9, *gev_params)
+                    extreme_events = np.sum(data > extreme_threshold)
+                    estimates['epsilon_evt'] = extreme_events / len(data)
+                    thresholds['evt_threshold'] = extreme_threshold
+                    
+            except Exception:
+                # EVT method failed, skip
+                pass
+        
+        # Compute consensus estimate
+        if estimates:
+            epsilon_values = list(estimates.values())
+            epsilon_consensus = np.median(epsilon_values)
+            epsilon_uncertainty = np.std(epsilon_values)
+        else:
+            # Fallback: assume 5% contamination (typical for rare events)
+            epsilon_consensus = 0.05
+            epsilon_uncertainty = 0.02
+            estimates['epsilon_fallback'] = epsilon_consensus
+        
+        # Validate estimates are in reasonable range
+        epsilon_consensus = np.clip(epsilon_consensus, self.spec.epsilon_range[0], self.spec.epsilon_range[1])
+        
+        # Validation metrics
+        validation_metrics = {
+            'n_methods': len(estimates),
+            'consensus_confidence': 1.0 - (epsilon_uncertainty / epsilon_consensus) if epsilon_consensus > 0 else 0.0,
+            'range_validity': self.spec.epsilon_range[0] <= epsilon_consensus <= self.spec.epsilon_range[1],
+            'typhoon_interpretation_valid': 0.01 <= epsilon_consensus <= 0.25  # Reasonable for typhoon frequency
+        }
+        
+        print(f"   📊 污染估計:")
+        for method, value in estimates.items():
+            print(f"      • {method}: ε = {value:.3f} ({value:.1%})")
+        print(f"   🎯 共識: ε = {epsilon_consensus:.3f} ± {epsilon_uncertainty:.3f}")
+        
+        return ContaminationEstimateResult(
+            epsilon_estimates=estimates,
+            epsilon_consensus=epsilon_consensus,
+            epsilon_uncertainty=epsilon_uncertainty,
+            thresholds=thresholds,
+            test_statistics={},  # Will be filled by method-specific estimators
+            p_values={},        # Will be filled by method-specific estimators
+            method_weights={}   # Can be added later
+        )
+    
+    def estimate_from_statistical_tests(self, 
+                                       data: np.ndarray,
+                                       methods: List[EstimationMethod] = None) -> ContaminationEstimateResult:
+        """使用統計檢驗方法估計ε值"""
         if methods is None:
             methods = [
                 EstimationMethod.EMPIRICAL_FREQUENCY,
@@ -109,13 +169,13 @@ class PriorContaminationAnalyzer:
                 EstimationMethod.ANDERSON_DARLING
             ]
         
-        print(f"📊 從數據估計ε值 (n={len(data)})...")
+        print(f"📈 統計檢驗估計ε值 (n={len(data)})...")
         
         epsilon_estimates = {}
         test_statistics = {}
         p_values = {}
         
-        # 生成基準分布
+        # Generate base distribution
         base_dist = self._create_base_distribution(data)
         
         for method in methods:
@@ -139,11 +199,11 @@ class PriorContaminationAnalyzer:
             
             print(f"      ε估計: {epsilon:.4f}")
         
-        # 計算共識估計和不確定性
+        # Compute consensus estimate and uncertainty
         consensus_epsilon = np.mean(list(epsilon_estimates.values()))
         uncertainty = np.std(list(epsilon_estimates.values()))
         
-        # 設定閾值
+        # Set thresholds
         thresholds = {
             "lower_bound": max(0.0, consensus_epsilon - 2 * uncertainty),
             "upper_bound": min(1.0, consensus_epsilon + 2 * uncertainty),
@@ -157,14 +217,14 @@ class PriorContaminationAnalyzer:
             thresholds=thresholds,
             test_statistics=test_statistics,
             p_values=p_values,
-            method_weights={}  # 可以後續添加權重
+            method_weights={}
         )
         
-        # 緩存結果
-        cache_key = f"data_{len(data)}_{hash(data.tobytes())}"
+        # Cache result
+        cache_key = f"statistical_{len(data)}_{hash(data.tobytes())}"
         self.estimation_cache[cache_key] = result
         
-        print(f"✅ ε估計完成: {consensus_epsilon:.4f} ± {uncertainty:.4f}")
+        print(f"✅ ε統計估計完成: {consensus_epsilon:.4f} ± {uncertainty:.4f}")
         return result
     
     def _create_base_distribution(self, data: np.ndarray):
@@ -298,25 +358,26 @@ class PriorContaminationAnalyzer:
         else:
             # 預設使用正態分布但參數不同
             return stats.norm(loc=np.mean(data), scale=np.std(data) * 2)
+
+# ========================================
+# 先驗污染分析器 (從prior_contamination.py整合)
+# ========================================
+
+class PriorContaminationAnalyzer:
+    """先驗污染分析器"""
+    
+    def __init__(self, spec: EpsilonContaminationSpec):
+        self.spec = spec
+        self.contamination_generator = ContaminationDistributionGenerator()
+        
+        print(f"🔬 先驗污染分析器初始化")
+        print(f"   污染類別: {self.spec.contamination_class.value}")
+        print(f"   基準先驗: {self.spec.nominal_prior_family}")
     
     def analyze_prior_robustness(self, 
                                 epsilon_range: np.ndarray = None,
                                 parameter_of_interest: str = "mean") -> Dict[str, Any]:
-        """
-        分析先驗的穩健性
-        
-        Parameters:
-        -----------
-        epsilon_range : np.ndarray, optional
-            ε值範圍
-        parameter_of_interest : str
-            關注的參數
-            
-        Returns:
-        --------
-        Dict[str, Any]
-            穩健性分析結果
-        """
+        """分析先驗的穩健性"""
         if epsilon_range is None:
             epsilon_range = np.linspace(0.0, 0.3, 31)
         
@@ -397,99 +458,64 @@ class PriorContaminationAnalyzer:
         else:
             # 預設使用不同參數的正態分布
             return np.random.normal(0, 3, n_samples)
+
+# ========================================
+# 分析工具函數
+# ========================================
+
+def quick_contamination_analysis(data: np.ndarray, 
+                               wind_data: Optional[np.ndarray] = None) -> ContaminationEstimateResult:
+    """颱風數據的快速污染程度分析"""
     
-    def compare_estimation_methods(self, 
-                                 data: np.ndarray,
-                                 true_epsilon: float = None) -> pd.DataFrame:
-        """
-        比較不同的ε估計方法
+    try:
+        from .contamination_core import create_typhoon_contamination_spec
+    except ImportError:
+        from contamination_core import create_typhoon_contamination_spec
         
-        Parameters:
-        -----------
-        data : np.ndarray
-            觀測數據
-        true_epsilon : float, optional
-            真實的ε值（如果已知）
-            
-        Returns:
-        --------
-        pd.DataFrame
-            方法比較結果
-        """
-        print(f"📈 比較ε估計方法...")
+    spec = create_typhoon_contamination_spec()
+    estimator = EpsilonEstimator(spec)
+    return estimator.estimate_contamination_level(data, wind_data)
+
+def compare_estimation_methods(data: np.ndarray,
+                             true_epsilon: float = None) -> pd.DataFrame:
+    """比較不同的ε估計方法"""
+    try:
+        from .contamination_core import create_typhoon_contamination_spec
+    except ImportError:
+        from contamination_core import create_typhoon_contamination_spec
+    
+    spec = create_typhoon_contamination_spec()
+    estimator = EpsilonEstimator(spec)
+    
+    # 使用所有可用方法估計
+    result = estimator.estimate_contamination_level(data)
+    
+    # 構建比較表
+    comparison_data = []
+    
+    for method_name, epsilon_est in result.epsilon_estimates.items():
+        row = {
+            "方法": method_name,
+            "ε估計": epsilon_est,
+            "檢驗統計量": result.test_statistics.get(method_name, np.nan),
+            "p值": result.p_values.get(method_name, np.nan)
+        }
         
-        # 使用所有可用方法估計
-        all_methods = [
-            EstimationMethod.EMPIRICAL_FREQUENCY,
-            EstimationMethod.KOLMOGOROV_SMIRNOV,
-            EstimationMethod.ANDERSON_DARLING,
-            EstimationMethod.BAYESIAN_MODEL_SELECTION
-        ]
-        
-        result = self.estimate_epsilon_from_data(data, all_methods)
-        
-        # 構建比較表
-        comparison_data = []
-        
-        for method_name, epsilon_est in result.epsilon_estimates.items():
-            row = {
-                "方法": method_name,
-                "ε估計": epsilon_est,
-                "檢驗統計量": result.test_statistics.get(method_name, np.nan),
-                "p值": result.p_values.get(method_name, np.nan)
-            }
-            
-            if true_epsilon is not None:
-                row["絕對誤差"] = abs(epsilon_est - true_epsilon)
-                row["相對誤差"] = abs(epsilon_est - true_epsilon) / true_epsilon
-            
-            comparison_data.append(row)
-        
-        comparison_df = pd.DataFrame(comparison_data)
-        
-        print(f"✅ 方法比較完成")
         if true_epsilon is not None:
-            print(f"   真實ε值: {true_epsilon:.4f}")
-            best_method_idx = comparison_df["絕對誤差"].idxmin()
-            best_method = comparison_df.loc[best_method_idx, "方法"]
-            print(f"   最佳方法: {best_method}")
+            row["絕對誤差"] = abs(epsilon_est - true_epsilon)
+            row["相對誤差"] = abs(epsilon_est - true_epsilon) / true_epsilon
         
-        return comparison_df
+        comparison_data.append(row)
+    
+    return pd.DataFrame(comparison_data)
 
-def test_prior_contamination():
-    """測試先驗污染功能"""
-    print("🧪 測試先驗污染模組...")
-    
-    # 創建測試數據
-    np.random.seed(42)
-    # 模擬混合數據：90%正態 + 10%極值
-    normal_data = np.random.normal(0, 1, 900)
-    extreme_data = np.random.exponential(3, 100)
-    test_data = np.concatenate([normal_data, extreme_data])
-    np.random.shuffle(test_data)
-    
-    # 創建分析器
-    spec = EpsilonContaminationSpec(
-        contamination_class=ContaminationDistributionClass.TYPHOON_SPECIFIC
-    )
-    analyzer = PriorContaminationAnalyzer(spec)
-    
-    # 測試ε估計
-    print("✅ 測試ε估計:")
-    result = analyzer.estimate_epsilon_from_data(test_data)
-    print(f"   共識ε值: {result.epsilon_consensus:.4f}")
-    
-    # 測試穩健性分析
-    print("✅ 測試穩健性分析:")
-    robustness = analyzer.analyze_prior_robustness()
-    print(f"   最大偏差: {robustness['robustness_metrics']['max_deviation']:.4f}")
-    
-    # 測試方法比較
-    print("✅ 測試方法比較:")
-    comparison = analyzer.compare_estimation_methods(test_data, true_epsilon=0.1)
-    print(f"   比較結果: {len(comparison)} 個方法")
-    
-    print("✅ 先驗污染測試完成")
+# ========================================
+# 模組導出
+# ========================================
 
-if __name__ == "__main__":
-    test_prior_contamination()
+__all__ = [
+    'EpsilonEstimator',
+    'PriorContaminationAnalyzer',
+    'quick_contamination_analysis',
+    'compare_estimation_methods'
+]
