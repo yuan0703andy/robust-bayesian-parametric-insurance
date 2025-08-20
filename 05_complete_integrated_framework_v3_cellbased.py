@@ -54,7 +54,7 @@ try:
     # 核心模組導入
     from robust_hierarchical_bayesian_simulation import (
         SpatialDataProcessor,
-        load_spatial_data_from_02_results
+        load_spatial_data_from_results
     )
     
     # CRPS相關導入
@@ -202,279 +202,224 @@ print(f"   結果儲存: {len(stage_results)} 階段")
 
 # %%
 # =============================================================================
-# 📊 Cell 1: 數據處理 (Data Processing)
+# 📊 Cell 1: 載入已處理的結果數據 (Load Processed Results)
 # =============================================================================
 
-print("\n1️⃣ 階段1：數據處理")
+print("\n1️⃣ 階段1：載入已處理的結果數據")
 stage_start = time.time()
 
-# 載入真實 CLIMADA 數據
-print("   📂 載入真實 CLIMADA 數據...")
+# 載入前面腳本已處理完成的結果
+print("   📂 載入01-04腳本的處理結果...")
 
 try:
     import pickle
     
-    # 載入空間分析結果（不需要 CLIMADA）
+    # 載入空間分析結果（02腳本輸出）
     with open('results/spatial_analysis/cat_in_circle_results.pkl', 'rb') as f:
         spatial_data = pickle.load(f)
     print("   ✅ 空間分析數據載入成功")
     
-    # 載入保險產品數據
+    # 載入保險產品數據（03腳本輸出）
     with open('results/insurance_products/products.pkl', 'rb') as f:
         insurance_products = pickle.load(f)
     print("   ✅ 保險產品數據載入成功")
     
-    # 從空間分析數據提取信息
-    metadata = spatial_data['metadata']
-    n_obs = metadata['n_events']  # 328 events
-    n_hospitals = metadata['n_hospitals']  # 20 hospitals
+    # 載入傳統分析結果（04腳本輸出）
+    with open('results/traditional_analysis/traditional_results.pkl', 'rb') as f:
+        traditional_results = pickle.load(f)
+    print("   ✅ 傳統分析結果載入成功")
     
-    print(f"   📊 真實數據規模: {n_obs:,} 事件觀測")
-    print(f"   🏥 醫院數量: {n_hospitals}")
-    print(f"   📏 半徑: {metadata['radii_km']} km")
-    print(f"   📈 統計指標: {metadata['statistics']}")
-    
-    real_data_available = True
-    
-    # 嘗試載入 CLIMADA 數據（可選）
+    # 載入CLIMADA數據（01腳本輸出）
     climada_data = None
     try:
         with open('results/climada_data/climada_complete_data.pkl', 'rb') as f:
             climada_data = pickle.load(f)
-        print("   ✅ CLIMADA 數據也載入成功")
-    except:
-        print("   ⚠️ CLIMADA 數據無法載入（需要 CLIMADA 模組），但可以繼續使用空間分析數據")
+        print("   ✅ CLIMADA數據載入成功")
+    except Exception as e:
+        print(f"   ⚠️ CLIMADA數據載入失敗: {e}")
+    
+    # 提取關鍵數據用於貝葉斯分析
+    metadata = spatial_data['metadata']
+    n_hospitals = metadata['n_hospitals']  # 20 hospitals
+    
+    print(f"\n   📊 數據概況:")
+    print(f"       醫院數量: {n_hospitals}")
+    print(f"       保險產品數量: {len(insurance_products)}")
+    
+    # 從CLIMADA數據提取風速指數（主要來源）
+    wind_speeds = None
+    
+    if climada_data is not None and 'tc_hazard' in climada_data:
+        # 從CLIMADA TC hazard對象提取風速數據
+        tc_hazard = climada_data['tc_hazard']
+        if hasattr(tc_hazard, 'intensity') and hasattr(tc_hazard.intensity, 'data'):
+            # 提取最大風速作為指數
+            intensity_matrix = tc_hazard.intensity.toarray()  # 轉為密集矩陣
+            wind_speeds = np.max(intensity_matrix, axis=1)  # 每個事件的最大風速
+            print(f"   🌪️ 從CLIMADA TC hazard提取風速數據")
+            print(f"       風速矩陣形狀: {intensity_matrix.shape}")
+        elif hasattr(tc_hazard, 'intensity'):
+            # 備用方法：直接使用intensity數據
+            intensity_data = tc_hazard.intensity
+            if hasattr(intensity_data, 'max'):
+                wind_speeds = intensity_data.max(axis=1).A1  # 轉為1D數組
+                print(f"   🌪️ 從CLIMADA intensity matrix提取風速")
+    
+    # 如果CLIMADA數據無法提供風速，終止分析
+    if wind_speeds is None:
+        print("   ❌ 無法從CLIMADA數據提取風速數據")
+        print("       請確保01腳本已正確生成CLIMADA風險數據")
+        raise ValueError("Required CLIMADA wind speed data not available. Please run script 01 to generate TC hazard data.")
+    
+    n_obs = len(wind_speeds)
+    print(f"       事件數量: {n_obs:,}")
+    print(f"       風速範圍: {wind_speeds.min():.1f} - {wind_speeds.max():.1f} mph")
+    
+    # 從CLIMADA數據獲取損失數據
+    if climada_data is not None:
+        # 檢查可用的損失數據類型
+        if 'event_losses' in climada_data:
+            # 使用事件層級的損失數據
+            event_losses = climada_data['event_losses']
+            if len(event_losses) == n_obs:
+                observed_losses = event_losses
+                print("   💰 使用CLIMADA事件損失數據")
+            else:
+                print(f"   ⚠️ 事件損失數據長度不匹配: {len(event_losses)} vs {n_obs}")
+                observed_losses = None
+        elif 'yearly_impacts' in climada_data:
+            # 使用年度影響數據
+            yearly_impacts = climada_data['yearly_impacts']
+            if len(yearly_impacts) >= n_obs:
+                observed_losses = yearly_impacts[:n_obs]
+                print("   💰 使用CLIMADA年度影響數據")
+            else:
+                observed_losses = None
+        else:
+            observed_losses = None
+            
+        # 嘗試獲取暴險值
+        if 'exposure' in climada_data:
+            exposure_obj = climada_data['exposure']
+            if hasattr(exposure_obj, 'gdf') and len(exposure_obj.gdf) > 0:
+                # 使用exposure對象的值
+                exposure_values = exposure_obj.gdf['value'].values
+                if len(exposure_values) >= n_obs:
+                    building_values = exposure_values[:n_obs]
+                    print("   🏢 使用CLIMADA暴險值數據")
+                else:
+                    building_values = None
+            else:
+                building_values = None
+        else:
+            building_values = None
+    else:
+        observed_losses = None
+        building_values = None
+    
+    # 確保使用真實CLIMADA數據，不接受不完整的數據
+    if observed_losses is None or building_values is None:
+        print("   ❌ CLIMADA數據不完整，無法進行貝葉斯分析")
+        print("       需要的數據:")
+        print(f"         - 觀測損失數據: {'✅' if observed_losses is not None else '❌'}")
+        print(f"         - 建築暴險數據: {'✅' if building_values is not None else '❌'}")
+        raise ValueError("Required CLIMADA data (observed_losses, building_values) is incomplete. Please run scripts 01-04 to generate complete data.")
+    
+    # 數據質量檢查和轉換
+    print(f"\n   🔍 數據質量檢查:")
+    
+    # 確保數據為numpy數組且類型正確
+    wind_speeds = np.asarray(wind_speeds, dtype=np.float64)
+    observed_losses = np.asarray(observed_losses, dtype=np.float64)
+    building_values = np.asarray(building_values, dtype=np.float64)
+    
+    # 檢查數據一致性
+    assert len(wind_speeds) == len(observed_losses) == len(building_values), \
+        f"數據長度不匹配: wind_speeds={len(wind_speeds)}, losses={len(observed_losses)}, values={len(building_values)}"
+    
+    # 檢查數據範圍合理性
+    assert np.all(wind_speeds >= 0), "風速不能為負值"
+    assert np.all(observed_losses >= 0), "損失不能為負值"
+    assert np.all(building_values >= 0), "建築價值不能為負值"
+    assert np.all(np.isfinite(wind_speeds)), "風速包含無效值"
+    assert np.all(np.isfinite(observed_losses)), "損失包含無效值"
+    assert np.all(np.isfinite(building_values)), "建築價值包含無效值"
+    
+    correlation = np.corrcoef(wind_speeds, observed_losses)[0,1]
+    
+    print(f"       ✅ 數據類型: wind_speeds={wind_speeds.dtype}, losses={observed_losses.dtype}")
+    print(f"       ✅ 數據長度: {len(wind_speeds)} 個觀測值")
+    print(f"       ✅ 風速範圍: {wind_speeds.min():.1f} - {wind_speeds.max():.1f} mph")
+    print(f"       ✅ 損失範圍: ${observed_losses.min():,.0f} - ${observed_losses.max():,.0f}")
+    print(f"       ✅ 平均損失: ${observed_losses.mean():,.0f}")
+    print(f"       ✅ 風速-損失相關性: {correlation:.3f}")
+    
+    # 提取保險產品數據並轉換為貝葉斯分析需要的格式
+    print(f"\n   📋 保險產品數據轉換:")
+    product_summary = {
+        'n_products': len(insurance_products),
+        'radii': list(set([p['radius_km'] for p in insurance_products])),
+        'index_types': list(set([p['index_type'] for p in insurance_products])),
+    }
+    print(f"       產品數量: {product_summary['n_products']}")
+    print(f"       分析半徑: {product_summary['radii']} km")
+    print(f"       指數類型: {product_summary['index_types']}")
+    
+    print(f"   ✅ 數據提取與驗證完成")
     
 except Exception as e:
-    print(f"   ❌ 無法載入真實數據: {e}")
-    raise FileNotFoundError(f"Required data files not available: {e}. Please ensure spatial_analysis and insurance_products data are available.")
+    print(f"   ❌ 數據載入失敗: {e}")
+    import traceback
+    traceback.print_exc()
+    raise FileNotFoundError(f"Required result files not available: {e}. Please run scripts 01-04 first.")
 
-# 移除了模擬數據生成函數 - 只使用真實數據
-
-# 處理數據：只使用真實數據
-if real_data_available:
-    print("   📊 使用真實空間分析數據...")
-    
-    # 🔄 多半徑測試策略 - 測試所有可用的半徑
-    indices = spatial_data['indices']
-    available_radii = [key for key in indices.keys() if 'cat_in_circle' in key and 'max' in key]
-    
-    print(f"   📏 可用半徑: {available_radii}")
-    
-    # 測試配置：多半徑 + 多污染策略
-    test_configurations = {
-        "radii": [15, 30, 50, 75, 100],  # km
-        "contamination_strategies": {
-            "baseline": {"epsilon_prior": 0.0, "epsilon_likelihood": 0.0},
-            "prior_only": {"epsilon_prior": None, "epsilon_likelihood": 0.0},  # 將從數據估計
-            "double_contamination": {"epsilon_prior": None, "epsilon_likelihood": None}  # 將從數據估計
-        }
-    }
-    
-    # 💡 多半徑實驗設計
-    multi_radius_results = {}
-    
-    for radius in test_configurations["radii"]:
-        radius_key = f'cat_in_circle_{radius}km_max'
-        
-        if radius_key not in indices:
-            print(f"   ⚠️ 跳過半徑 {radius}km - 數據不可用")
-            continue
-            
-        print(f"\n   🌪️ 測試半徑: {radius}km")
-        wind_speeds = indices[radius_key]
-        
-        print(f"       風速範圍: {wind_speeds.min():.1f} - {wind_speeds.max():.1f} mph")
-        print(f"       風速統計: 平均 {wind_speeds.mean():.1f}, 標準差 {wind_speeds.std():.1f}")
-        
-        # 🎯 直接使用已處理的 CLIMADA 數據，而不是重新生成
-        if climada_data is not None and 'exposure_values' in climada_data:
-            print(f"       ✅ 使用真實 CLIMADA 暴險數據")
-            building_values = climada_data['exposure_values']
-            observed_losses = climada_data['yearly_damages']
-        else:
-            print(f"       ⚠️ CLIMADA數據不完整，使用空間分析結果生成代理數據")
-            # 這部分保持原有邏輯作為fallback
-            np.random.seed(42 + radius)  # 每個半徑使用不同seed
-            base_exposure = 1e7
-            exposure_factor = 1 + 0.5 * (wind_speeds / wind_speeds.max())
-            building_values = base_exposure * exposure_factor * np.random.uniform(0.5, 2.0, n_obs)
-            
-            # 使用 Emanuel 脆弱度函數
-            vulnerability = 0.001 * np.maximum(wind_speeds - 25, 0)**2
-            theoretical_losses = building_values * vulnerability
-            
-            np.random.seed(43 + radius)
-            uncertainty_factor = np.random.lognormal(0, 0.5, n_obs)
-            extreme_events = np.random.choice([1, 3, 5], n_obs, p=[0.8, 0.15, 0.05])
-            
-            observed_losses = theoretical_losses * uncertainty_factor * extreme_events
-            observed_losses = np.maximum(observed_losses, 0)
-        
-        # 儲存當前半徑的結果
-        multi_radius_results[radius] = {
-            'wind_speeds': wind_speeds,
-            'building_values': building_values,
-            'observed_losses': observed_losses,
-            'correlation': np.corrcoef(wind_speeds, observed_losses)[0,1]
-        }
-    
-    # 🎯 選擇預設半徑（30km）進行主分析，但保留所有半徑供後續比較
-    default_radius = 30
-    if default_radius in multi_radius_results:
-        wind_speeds = multi_radius_results[default_radius]['wind_speeds']
-        building_values = multi_radius_results[default_radius]['building_values'] 
-        observed_losses = multi_radius_results[default_radius]['observed_losses']
-        
-        print(f"\n   🎯 主分析使用 {default_radius}km 半徑")
-        print(f"       損失範圍: ${observed_losses.min():,.0f} - ${observed_losses.max():,.0f}")
-        print(f"       平均損失: ${observed_losses.mean():,.0f}")
-        print(f"       損失與風速相關性: {multi_radius_results[default_radius]['correlation']:.3f}")
-    else:
-        raise ValueError(f"Default radius {default_radius}km not available in data")
-    
-    # 如果有 CLIMADA 損失數據可用，則進行校準
-    if climada_data is not None and 'yearly_damages' in climada_data:
-        yearly_damages = climada_data['yearly_damages']
-        if len(yearly_damages) > 0:
-            # 調整觀測損失以匹配真實損失的尺度
-            scale_factor = yearly_damages.mean() / observed_losses.mean()
-            observed_losses *= scale_factor
-            print(f"   🎯 使用 CLIMADA 損失數據進行尺度校準 (factor: {scale_factor:.2f})")
-    
-    print(f"   ✅ 真實數據處理完成")
-    print(f"       建築價值範圍: ${building_values.min():,.0f} - ${building_values.max():,.0f}")
-    print(f"       損失範圍: ${observed_losses.min():,.0f} - ${observed_losses.max():,.0f}")
-    print(f"       平均損失: ${observed_losses.mean():,.0f}")
-    print(f"       損失與風速相關性: {np.corrcoef(wind_speeds, observed_losses)[0,1]:.3f}")
-else:
-    # real_data_available 為 False 時，前面已經 raise Exception，不會到達這裡
-    raise RuntimeError("Unexpected code path: real_data_available should be True or exception raised")
-
-# 🏥 提取真實醫院座標數據
-def extract_real_hospital_coordinates():
-    """從真實數據中提取醫院座標"""
-    try:
-        # 方法1: 從OSM提取真實醫院座標
-        from exposure_modeling.hospital_osm_extraction import get_nc_hospitals
-        gdf_hospitals, _ = get_nc_hospitals(
-            use_mock=False,  # ✅ 使用真實OSM數據
-            create_exposures=False,
-            visualize=False
-        )
-        
-        if len(gdf_hospitals) > 0:
-            # 提取經緯度座標
-            hospital_coords = np.column_stack([
-                gdf_hospitals.geometry.x.values,  # 經度
-                gdf_hospitals.geometry.y.values   # 緯度
-            ])
-            print(f"   ✅ 成功提取 {len(hospital_coords)} 個真實OSM醫院座標")
-            return hospital_coords, len(hospital_coords)
-            
-    except Exception as e:
-        print(f"   ⚠️ OSM醫院提取失敗: {e}")
-    
-    # 方法2: 從CLIMADA exposure數據中提取醫院點位
-    try:
-        if climada_data is not None and 'exposures' in climada_data:
-            exposures = climada_data['exposures']
-            if hasattr(exposures, 'gdf') and len(exposures.gdf) > 0:
-                exposure_gdf = exposures.gdf
-                
-                # 篩選醫院類型的exposure點（如果有標記）
-                hospital_points = exposure_gdf
-                if 'category' in exposure_gdf.columns:
-                    hospital_points = exposure_gdf[exposure_gdf['category'].str.contains('hospital|health', case=False, na=False)]
-                
-                if len(hospital_points) > 0:
-                    coords = np.column_stack([
-                        hospital_points.geometry.x.values,
-                        hospital_points.geometry.y.values
-                    ])
-                    print(f"   ✅ 從CLIMADA exposure提取 {len(coords)} 個醫院相關點位")
-                    return coords, len(coords)
-                else:
-                    # 使用所有exposure點作為醫院代理
-                    coords = np.column_stack([
-                        exposure_gdf.geometry.x.values[:n_hospitals],
-                        exposure_gdf.geometry.y.values[:n_hospitals]
-                    ])
-                    print(f"   ✅ 使用CLIMADA exposure前 {len(coords)} 個點作為醫院代理")
-                    return coords, len(coords)
-                    
-    except Exception as e:
-        print(f"   ⚠️ CLIMADA exposure醫院提取失敗: {e}")
-    
-    # 方法3: 從spatial_analysis結果中提取（如果包含座標）
-    try:
-        if 'hospital_metadata' in spatial_analysis_data:
-            metadata = spatial_analysis_data['hospital_metadata']
-            if 'coordinates' in metadata:
-                coords = np.array(metadata['coordinates'])
-                print(f"   ✅ 從spatial analysis提取 {len(coords)} 個醫院座標")
-                return coords, len(coords)
-    except Exception as e:
-        print(f"   ⚠️ Spatial analysis醫院座標提取失敗: {e}")
-    
-    # Fallback: 生成基於北卡羅來納州真實地理範圍的座標
-    print("   ⚠️ 無法獲取真實醫院座標，使用北卡州地理範圍內的隨機分佈")
-    # 北卡羅來納州實際地理範圍
-    nc_lat_range = (33.7514, 36.5881)  # 緯度範圍
-    nc_lon_range = (-84.3218, -75.3619) # 經度範圍
-    
-    np.random.seed(42)  # 確保可重現
-    lats = np.random.uniform(nc_lat_range[0], nc_lat_range[1], n_hospitals)
-    lons = np.random.uniform(nc_lon_range[0], nc_lon_range[1], n_hospitals)
-    
-    return np.column_stack([lons, lats]), n_hospitals
-
-# 提取真實醫院座標
-hospital_coords, actual_n_hospitals = extract_real_hospital_coordinates()
-
-# 更新醫院數量（如果與預設不同）
-if actual_n_hospitals != n_hospitals:
-    print(f"   📊 調整醫院數量從 {n_hospitals} 到 {actual_n_hospitals}")
-    n_hospitals = actual_n_hospitals
-
-# 為每個觀測分配最近的醫院ID
-def assign_nearest_hospitals(n_obs, hospital_coords):
-    """為觀測事件分配最近的醫院"""
-    if len(hospital_coords) == 0:
-        return np.random.randint(0, max(1, n_hospitals), n_obs)
-    
-    # 生成觀測點的隨機座標（在北卡州範圍內）
-    np.random.seed(43)
-    obs_lats = np.random.uniform(33.7514, 36.5881, n_obs)
-    obs_lons = np.random.uniform(-84.3218, -75.3619, n_obs)
-    
-    location_ids = []
-    for obs_lat, obs_lon in zip(obs_lats, obs_lons):
-        # 計算到各醫院的距離
-        distances = np.sqrt((hospital_coords[:, 0] - obs_lon)**2 + 
-                           (hospital_coords[:, 1] - obs_lat)**2)
-        nearest_hospital = np.argmin(distances)
-        location_ids.append(nearest_hospital)
-    
-    return np.array(location_ids)
-
-location_ids = assign_nearest_hospitals(n_obs, hospital_coords)
-
-# 創建脆弱度數據對象
+# 創建貝葉斯分析專用的數據對象
 class VulnerabilityData:
+    """貝葉斯分析用的脆弱度數據對象"""
     def __init__(self, **kwargs):
         for k, v in kwargs.items():
             setattr(self, k, v)
         self.n_observations = len(self.observed_losses)
+        
+    def validate(self):
+        """驗證數據完整性"""
+        required_attrs = ['hazard_intensities', 'exposure_values', 'observed_losses', 'location_ids']
+        for attr in required_attrs:
+            if not hasattr(self, attr):
+                raise ValueError(f"Missing required attribute: {attr}")
+        
+        # 檢查數據長度一致性
+        lengths = [len(getattr(self, attr)) for attr in required_attrs]
+        if not all(l == lengths[0] for l in lengths):
+            raise ValueError(f"Inconsistent data lengths: {lengths}")
+        
+        return True
+
+# 從空間分析結果提取或生成location_ids
+if 'region_assignments' in spatial_data and len(spatial_data['region_assignments']) >= n_obs:
+    location_ids = spatial_data['region_assignments'][:n_obs]
+    print(f"   🏥 使用空間分析的區域分配: {len(set(location_ids))} 個區域")
+else:
+    # 隨機分配到醫院
+    np.random.seed(42)
+    location_ids = np.random.randint(0, n_hospitals, n_obs)
+    print(f"   🏥 隨機分配到 {n_hospitals} 個醫院")
+
+location_ids = np.asarray(location_ids, dtype=np.int32)
 
 vulnerability_data = VulnerabilityData(
     hazard_intensities=wind_speeds,
     exposure_values=building_values,
     observed_losses=observed_losses,
     location_ids=location_ids,
-    hospital_coordinates=hospital_coords,
-    hospital_names=[f"Hospital_{i}" for i in range(n_hospitals)]
+    n_hospitals=n_hospitals,
+    product_summary=product_summary,
+    correlation=correlation
 )
+
+# 驗證數據對象
+vulnerability_data.validate()
+print(f"   ✅ VulnerabilityData對象創建並驗證成功")
 
 # 儲存階段1結果
 stage_results['data_processing'] = {
@@ -482,15 +427,21 @@ stage_results['data_processing'] = {
     "data_summary": {
         "n_observations": vulnerability_data.n_observations,
         "n_hospitals": n_hospitals,
-        "hazard_range": [np.min(wind_speeds), np.max(wind_speeds)],
-        "loss_range": [np.min(observed_losses), np.max(observed_losses)]
+        "hazard_range": [float(np.min(wind_speeds)), float(np.max(wind_speeds))],
+        "loss_range": [float(np.min(observed_losses)), float(np.max(observed_losses))]
+    },
+    "data_sources": {
+        "spatial_analysis": "results/spatial_analysis/cat_in_circle_results.pkl",
+        "insurance_products": "results/insurance_products/products.pkl", 
+        "traditional_analysis": "results/traditional_analysis/traditional_results.pkl",
+        "climada_data": "results/climada_data/climada_complete_data.pkl" if climada_data else None
     }
 }
 
 timing_info['stage_1'] = time.time() - stage_start
 
-print(f"   ✅ 數據處理完成: {vulnerability_data.n_observations} 觀測")
-print(f"   📊 風速範圍: {np.min(wind_speeds):.1f} - {np.max(wind_speeds):.1f} km/h")
+print(f"   ✅ 數據準備完成: {vulnerability_data.n_observations} 觀測")
+print(f"   📊 風速範圍: {np.min(wind_speeds):.1f} - {np.max(wind_speeds):.1f} mph")
 print(f"   💰 損失範圍: ${np.min(observed_losses):,.0f} - ${np.max(observed_losses):,.0f}")
 print(f"   ⏱️ 執行時間: {timing_info['stage_1']:.3f} 秒")
 
@@ -1115,7 +1066,8 @@ stage_start = time.time()
 
 try:
     # 🔄 使用正確的模型選擇模組導入
-    from robust_hierarchical_bayesian_simulation.4_model_selection import (
+    from robust_hierarchical_bayesian_simulation import model_selection
+    from robust_hierarchical_bayesian_simulation.model_selection import (
         # VI components
         DifferentiableCRPS,
         ParametricPayoutFunction, 
@@ -1189,29 +1141,30 @@ print(f"   ⏱️ 執行時間: {timing_info['stage_4']:.3f} 秒")
 # ⚙️ Cell 5: 超參數優化 (Hyperparameter Optimization)
 # =============================================================================
 
-print("\n5️⃣ 階段5：超參數精煉優化")
+print("\n5️⃣ 階段5：貝葉斯超參數調優 (ε-contamination & 先驗參數)")
 stage_start = time.time()
 
 top_models = stage_results['model_selection']['top_models']
 
 if len(top_models) == 0:
-    print("   ⚠️ 無頂尖模型，跳過精煉優化")
-    stage_results['hyperparameter_optimization'] = {"skipped": True}
+    print("   ⚠️ 無VI篩選出的頂尖模型，跳過貝葉斯超參數調優")
+    stage_results['hyperparameter_optimization'] = {"skipped": True, "reason": "no_models_from_vi_screening"}
 else:
     try:
         # 🔄 使用正確的超參數優化模組導入
-        from robust_hierarchical_bayesian_simulation.5_hyperparameter_optimization import (
+        from robust_hierarchical_bayesian_simulation import hyperparameter_optimization
+        from robust_hierarchical_bayesian_simulation.hyperparameter_optimization import (
             HyperparameterSearchSpace,
             AdaptiveHyperparameterOptimizer,
             CrossValidatedHyperparameterSearch
         )
         
-        print("   ✅ 超參數優化器載入成功 (正確模組結構)")
+        print("   ✅ 貝葉斯超參數優化器載入成功 (非CRPS重複優化)")
         
         refined_models = []
         
         for model_id in top_models:
-            print(f"     🔧 精煉模型: {model_id}")
+            print(f"     🔧 調優模型: {model_id} (已經過VI-CRPS篩選)")
             
             # 🎯 修正：超參數優化目標函數 (不重複CRPS優化)
             def hyperparameter_objective_function(params):
@@ -1315,15 +1268,23 @@ else:
         stage_results['hyperparameter_optimization'] = {
             "refined_models": [r['model_id'] for r in refined_models],
             "refinement_results": refined_models,
-            "optimization_strategy": "adaptive",
-            "best_refined_model": max(refined_models, key=lambda x: x['refined_score'])
+            "optimization_strategy": "bayesian_hyperparameter_tuning",
+            "optimization_target": "composite_score_mcmc_convergence",
+            "best_refined_model": max(refined_models, key=lambda x: x['refined_score']),
+            "optimization_focus": "epsilon_contamination_and_prior_parameters"
         }
         
-        print(f"   ✅ 超參數精煉完成: {len(refined_models)} 個模型已優化")
+        # 顯示最佳模型的詳細資訊
+        best_model = max(refined_models, key=lambda x: x['refined_score'])
+        print(f"   ✅ 貝葉斯超參數優化完成: {len(refined_models)} 個模型已調優")
+        print(f"   🏆 最佳模型: {best_model['model_id']}")
+        print(f"   📊 最佳複合評分: {best_model['refined_score']:.4f}")
+        print(f"   🎯 優化焦點: ε-contamination 參數調優 (非CRPS重複優化)")
         
     except Exception as e:
-        print(f"   ❌ 超參數優化失敗: {e}")
-        raise RuntimeError(f"Hyperparameter optimization failed: {e}")
+        print(f"   ❌ 貝葉斯超參數調優失敗: {e}")
+        print(f"   📝 注意: Cell 4已完成CRPS-basis優化，Cell 5只做貝葉斯超參數調優")
+        raise RuntimeError(f"Bayesian hyperparameter tuning failed: {e}")
 
 timing_info['stage_5'] = time.time() - stage_start
 print(f"   ⏱️ 執行時間: {timing_info['stage_5']:.3f} 秒")
@@ -1527,7 +1488,7 @@ stage_start = time.time()
 
 try:
     # 🔄 使用正確的後驗分析模組導入
-    from robust_hierarchical_bayesian_simulation.7_posterior_analysis.posterior_approximation import (
+    from robust_hierarchical_bayesian_simulation.posterior_analysis.posterior_approximation import (
         MPEResult,
         MPEConfig,
         MixedPredictiveEstimation,
@@ -1535,7 +1496,7 @@ try:
         sample_from_gaussian_mixture
     )
     
-    from robust_hierarchical_bayesian_simulation.7_posterior_analysis.credible_intervals import (
+    from robust_hierarchical_bayesian_simulation.posterior_analysis.credible_intervals import (
         IntervalResult,
         IntervalComparison,
         IntervalOptimizationMethod,
