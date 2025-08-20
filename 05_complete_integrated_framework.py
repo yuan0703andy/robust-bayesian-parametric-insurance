@@ -43,6 +43,31 @@ print("Workflow: CRPS VI + CRPS MCMC + hierarchical + ε-contamination")
 print("Architecture: 8-Stage Modular Framework")
 print("=" * 60)
 
+def filter_products_by_radius(products, radius_km=30):
+    """
+    過濾產品，只保留指定半徑的產品
+    Filter products to keep only those with specified radius
+    
+    Parameters:
+    -----------
+    products : list
+        產品列表
+    radius_km : int, default=30
+        保留的半徑 (km)
+        
+    Returns:
+    --------
+    list : 過濾後的產品列表
+    """
+    if not products:
+        return products
+        
+    filtered = [p for p in products if p.get('radius_km', 30) == radius_km]
+    
+    print(f"📐 產品過濾: 從 {len(products)} 個產品中篩選出 {len(filtered)} 個 {radius_km}km 產品")
+    
+    return filtered
+
 # ========================================
 # Import New Modular Components
 # ========================================

@@ -130,12 +130,14 @@ def visualize_spatial_bayesian_model():
             n_regions = 3
             alpha_region = pm.Normal("alpha_region", mu=alpha_global, sigma=0.5, shape=n_regions)
             
-            # 簡化區域分配
+            # TODO: 區域分配應該基於真實地理或風險區域
+            # 當前為示例，實際使用時應傳入真實的region_assignments
             region_mapping = np.array([0, 0, 1, 1, 2])  # 5個醫院分配到3個區域
             hospital_region_effects = alpha_region[region_mapping]
             
             # Level 2: 空間隨機效應 δ_i（核心！）
-            # 簡化的空間協方差矩陣
+            # TODO: distance_matrix應該來自真實醫院座標計算
+            # 當前為示例，實際使用時應傳入真實的distance_matrix
             cov_matrix = sigma2_spatial * pm.math.exp(-distance_matrix / rho_spatial)
             cov_matrix_stable = cov_matrix + nugget * np.eye(n_hospitals)
             

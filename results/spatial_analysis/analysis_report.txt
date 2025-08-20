@@ -6,7 +6,7 @@ Based on Steinmann et al. (2023) Standard Method
 📊 Analysis Overview
 ----------------------------------------
 Number of Hospitals: 20
-Number of TC Events: 328
+Number of TC Events: 1312
 Hazard Grid Points: 2263
 Analysis Radii: [15, 30, 50, 75, 100] km
 Statistical Methods: ['max', 'mean', '95th']
@@ -15,44 +15,44 @@ Statistical Methods: ['max', 'mean', '95th']
 ----------------------------------------
 
 Radius 15 km:
-  • Affected Events: 154 / 328
-  • Coverage Rate: 47.0%
-  • Mean Wind Speed: 26.3 m/s
-  • Max Wind Speed: 55.8 m/s
-  • Median Wind Speed: 24.6 m/s
-  • 95th Percentile: 41.0 m/s
+  • Affected Events: 646 / 1312
+  • Coverage Rate: 49.2%
+  • Mean Wind Speed: 26.0 m/s
+  • Max Wind Speed: 52.0 m/s
+  • Median Wind Speed: 25.0 m/s
+  • 95th Percentile: 39.2 m/s
 
 Radius 30 km:
-  • Affected Events: 172 / 328
-  • Coverage Rate: 52.4%
-  • Mean Wind Speed: 26.5 m/s
-  • Max Wind Speed: 55.8 m/s
-  • Median Wind Speed: 25.2 m/s
-  • 95th Percentile: 42.8 m/s
+  • Affected Events: 707 / 1312
+  • Coverage Rate: 53.9%
+  • Mean Wind Speed: 26.4 m/s
+  • Max Wind Speed: 55.5 m/s
+  • Median Wind Speed: 25.7 m/s
+  • 95th Percentile: 40.3 m/s
 
 Radius 50 km:
-  • Affected Events: 180 / 328
-  • Coverage Rate: 54.9%
-  • Mean Wind Speed: 27.1 m/s
-  • Max Wind Speed: 55.8 m/s
-  • Median Wind Speed: 26.0 m/s
-  • 95th Percentile: 44.0 m/s
+  • Affected Events: 757 / 1312
+  • Coverage Rate: 57.7%
+  • Mean Wind Speed: 26.7 m/s
+  • Max Wind Speed: 58.0 m/s
+  • Median Wind Speed: 26.1 m/s
+  • 95th Percentile: 40.8 m/s
 
 Radius 75 km:
-  • Affected Events: 192 / 328
-  • Coverage Rate: 58.5%
-  • Mean Wind Speed: 27.4 m/s
-  • Max Wind Speed: 55.8 m/s
-  • Median Wind Speed: 26.7 m/s
-  • 95th Percentile: 43.8 m/s
+  • Affected Events: 793 / 1312
+  • Coverage Rate: 60.4%
+  • Mean Wind Speed: 27.1 m/s
+  • Max Wind Speed: 58.5 m/s
+  • Median Wind Speed: 26.6 m/s
+  • 95th Percentile: 41.0 m/s
 
 Radius 100 km:
-  • Affected Events: 196 / 328
-  • Coverage Rate: 59.8%
-  • Mean Wind Speed: 27.6 m/s
-  • Max Wind Speed: 55.8 m/s
-  • Median Wind Speed: 27.0 m/s
-  • 95th Percentile: 43.6 m/s
+  • Affected Events: 810 / 1312
+  • Coverage Rate: 61.7%
+  • Mean Wind Speed: 27.3 m/s
+  • Max Wind Speed: 58.5 m/s
+  • Median Wind Speed: 26.8 m/s
+  • 95th Percentile: 41.2 m/s
 
 ========================================
 🔍 Key Findings

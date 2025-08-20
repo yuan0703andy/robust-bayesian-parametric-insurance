@@ -1,17 +1,14 @@
-# 重構後的保險分析系統 - Insurance Analysis Refactored
+# Basic Parametric Insurance Analysis Framework
 
-## 🎯 重構目標
+## 🎯 Framework Overview
 
-這個重構版本解決了原始 `insurance_analysis/` 資料夾中的以下問題：
+Focused on **Basic Cat-in-Circle Analysis** for hierarchical Bayesian parametric insurance modeling.
 
-### 問題分析
-1. **功能重複**: 多個文件實現相同的技能評分計算
-2. **代碼冗餘**: 參數指標提取邏輯散佈在不同文件中
-3. **介面不統一**: 缺乏統一的高級API
-4. **維護困難**: 修改一個功能需要同時更新多個文件
-
-### 解決方案
-重構為**四個核心模組**的統一架構：
+### Core Objective
+Provide modular components for:
+1. **Basic Cat-in-Circle Analysis**: Simple spatial wind speed extraction
+2. **Steinmann 2023 Compliance**: Academic standard product generation
+3. **Hierarchical Model Integration**: Clean data flow to Bayesian models
 
 ```
 insurance_analysis_refactored/

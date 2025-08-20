@@ -180,8 +180,7 @@ def get_framework_usage_guide():
     ✅ SPECIALIZED MODULES (for complex functionality):
     
     ```python
-    # Spatial analysis
-    from insurance_analysis_refactored.core.enhanced_spatial_analysis import EnhancedCatInCircleAnalyzer
+    # Basic spatial analysis (Advanced version removed per user request)
     
     # Product generation
     from insurance_analysis_refactored.core.saffir_simpson_products import generate_steinmann_2023_products
