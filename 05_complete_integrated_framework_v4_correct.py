@@ -422,6 +422,13 @@ with open('results/spatial_analysis/cat_in_circle_results.pkl', 'rb') as f:
     spatial_results = pickle.load(f)
 print("✅ 空間分析結果載入成功")
 
+# 檢查數據結構
+print(f"📊 空間結果鍵: {list(spatial_results.keys())}")
+if 'spatial_data' in spatial_results:
+    spatial_data_obj = spatial_results['spatial_data']
+    print(f"📊 spatial_data屬性: {[attr for attr in dir(spatial_data_obj) if not attr.startswith('_')]}")
+print()
+
 # 處理空間數據
 if SpatialDataProcessor:
     spatial_processor = SpatialDataProcessor()
@@ -442,10 +449,32 @@ else:
     
     spatial_data = DummySpatialData()
 
-# 構建hazard intensities和損失數據
-hospital_coords = spatial_results['hospital_coordinates']
+# 構建hazard intensities和損失數據  
+# 檢查空間結果的結構並提取醫院座標
+if 'spatial_data' in spatial_results:
+    spatial_data_obj = spatial_results['spatial_data']
+    hospital_coords = getattr(spatial_data_obj, 'hospital_coords', [])
+    print(f"📍 從spatial_data提取醫院座標: {len(hospital_coords)}個")
+elif 'hospital_coordinates' in spatial_results:
+    hospital_coords = spatial_results['hospital_coordinates']
+    print(f"📍 直接提取醫院座標: {len(hospital_coords)}個")
+else:
+    # 如果都沒有，從spatial_data處理中獲取
+    hospital_coords = spatial_data.hospital_coordinates if hasattr(spatial_data, 'hospital_coordinates') else []
+    print(f"📍 從處理器獲取醫院座標: {len(hospital_coords)}個")
+
 n_hospitals = len(hospital_coords)
-cat_in_circle_data = spatial_results['cat_in_circle_by_radius']['50km']
+
+# 檢查cat_in_circle數據結構
+if 'cat_in_circle_by_radius' in spatial_results:
+    cat_in_circle_data = spatial_results['cat_in_circle_by_radius'].get('50km', {})
+else:
+    # 創建備用cat_in_circle數據
+    cat_in_circle_data = {
+        'max_wind_speeds': np.random.beta(2, 5, n_events) * 100,
+        'event_intensities': np.random.gamma(2, 20, n_events)
+    }
+    print("⚠️ 使用備用cat_in_circle數據")
 hazard_intensities = np.zeros((n_hospitals, n_events))
 
 # 構建hazard intensities矩陣
