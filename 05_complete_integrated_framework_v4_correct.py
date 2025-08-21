@@ -369,20 +369,29 @@ else:
 print("\n階段2: 穩健先驗與ε-Contamination分析")
 
 # 創建ε-contamination規格
-if EpsilonEstimator and DoubleEpsilonContamination:
-    # 創建默認的contamination_spec（之前可能依賴某個不可用的函數）
+if EpsilonEstimator and DoubleEpsilonContamination and EpsilonContaminationSpec:
+    # 創建默認的contamination_spec使用正確的參數名稱
     contamination_spec = EpsilonContaminationSpec(
         epsilon_range=(0.01, 0.20),
-        contamination_type="huber"
+        contamination_class="typhoon_specific",  # 使用字符串，會在__post_init__中轉換為枚舉
+        nominal_prior_family="normal",
+        contamination_prior_family="gev"
     )
     
-    # 使用EpsilonEstimator進行多方法ε估計
+    # 使用EpsilonEstimator進行ε估計
     epsilon_estimator = EpsilonEstimator(contamination_spec)
     event_losses_positive = event_losses[event_losses > 0]
-    epsilon_estimates = epsilon_estimator.estimate_epsilon_multiple_methods(event_losses_positive)
     
-    # 選擇最終ε值
-    final_epsilon = epsilon_estimator.select_final_epsilon(epsilon_estimates)
+    # 使用可用的方法進行ε估計
+    statistical_result = epsilon_estimator.estimate_from_statistical_tests(event_losses_positive)
+    contamination_result = epsilon_estimator.estimate_contamination_level(event_losses_positive)
+    
+    # 從結果對象提取ε值
+    statistical_epsilon = statistical_result.epsilon_consensus
+    contamination_epsilon = contamination_result.epsilon_consensus
+    
+    # 選擇最終ε值（取平均或使用更保守的值）
+    final_epsilon = max(statistical_epsilon, contamination_epsilon)
     print(f"ε估計完成: {final_epsilon:.3f}")
 else:
     print("⚠️ 穩健先驗組件不可用，跳過ε估計")
