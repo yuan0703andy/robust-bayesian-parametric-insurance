@@ -30,10 +30,13 @@ import warnings
 warnings.filterwarnings('ignore')
 
 # Environment setup for JAX optimized computation
-os.environ['JAX_PLATFORMS'] = 'gpu,cpu'  # Prefer GPU if available
+# 設置JAX使用CUDA（NVIDIA GPU）
+os.environ['JAX_PLATFORMS'] = 'cuda,cpu'  # Prefer CUDA (NVIDIA) if available, fallback to CPU
 os.environ['JAX_ENABLE_X64'] = 'True'
 os.environ['XLA_PYTHON_CLIENT_MEM_FRACTION'] = '0.8'
 os.environ['MKL_THREADING_LAYER'] = 'GNU'
+# 如果有多個GPU，可以指定使用哪個
+# os.environ['CUDA_VISIBLE_DEVICES'] = '0'  # 使用第一個GPU
 
 # 並行化相關設置
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
@@ -133,20 +136,32 @@ try:
     import jax.numpy as jnp
     jax.config.update("jax_enable_x64", True)
     
-    gpu_devices = jax.devices('gpu')
-    if len(gpu_devices) > 0:
-        gpu_config['available'] = True
-        gpu_config['devices'] = list(range(len(gpu_devices)))
-        gpu_config['framework'] = 'JAX_GPU'
-        print(f"\n🎮 GPU配置:")
-        print(f"   框架: JAX GPU")
-        print(f"   設備數量: {len(gpu_devices)}")
-        print(f"   JAX版本: {jax.__version__}")
-        print(f"   後端: {jax.default_backend()}")
-        for i, device in enumerate(gpu_devices):
-            print(f"   GPU {i}: {device}")
-    else:
-        print(f"\n💻 GPU配置: JAX將使用CPU")
+    # 更穩健的GPU檢測，適用於NVIDIA GPU
+    try:
+        # 首先嘗試獲取所有設備
+        all_devices = jax.devices()
+        gpu_devices = [d for d in all_devices if d.platform in ['gpu', 'cuda']]
+        
+        if len(gpu_devices) > 0:
+            gpu_config['available'] = True
+            gpu_config['devices'] = list(range(len(gpu_devices)))
+            gpu_config['framework'] = 'JAX_GPU'
+            print(f"\n🎮 GPU配置:")
+            print(f"   框架: JAX GPU (CUDA)")
+            print(f"   設備數量: {len(gpu_devices)}")
+            print(f"   設備類型: {gpu_devices[0].platform}")
+            print(f"   JAX版本: {jax.__version__}")
+            # 顯示GPU詳細信息
+            for i, device in enumerate(gpu_devices):
+                print(f"   GPU {i}: {device}")
+        else:
+            print(f"\n💻 未檢測到GPU，使用JAX CPU模式")
+            gpu_config['framework'] = 'JAX_CPU'
+            print(f"   後端: {jax.default_backend()}")
+    except Exception as gpu_err:
+        # 如果GPU檢測失敗，回退到CPU
+        print(f"\n⚠️ JAX GPU檢測錯誤: {str(gpu_err)[:100]}")
+        print(f"   切換到CPU模式...")
         gpu_config['framework'] = 'JAX_CPU'
         
     # Fallback to PyTorch if JAX GPU not available
