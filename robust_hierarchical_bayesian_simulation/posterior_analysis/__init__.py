@@ -5,6 +5,17 @@ Stage 7: Posterior Analysis
 Posterior approximation, credible intervals, and predictive checks.
 """
 
-from .credible_intervals import *
-from .posterior_approximation import *
-from .predictive_checks import *
+try:
+    from .credible_intervals import RobustCredibleIntervalCalculator as CredibleIntervalCalculator
+except ImportError:
+    CredibleIntervalCalculator = None
+
+try:
+    from .posterior_approximation import MixedPredictiveEstimation as PosteriorApproximation
+except ImportError:
+    PosteriorApproximation = None
+
+try:
+    from .predictive_checks import PPCValidator as PosteriorPredictiveChecker
+except ImportError:
+    PosteriorPredictiveChecker = None

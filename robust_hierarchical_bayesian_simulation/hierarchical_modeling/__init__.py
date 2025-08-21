@@ -39,12 +39,23 @@ from .likelihood_families import (
     recommend_mcmc_adjustments
 )
 
-from .core_model import ParametricHierarchicalModel
-from .hierarchical_model_builder import (
-    build_hierarchical_model,
-    get_portfolio_loss_predictions, 
-    validate_model_inputs
-)
+try:
+    from .core_model import ParametricHierarchicalModel
+    CORE_MODEL_AVAILABLE = True
+except ImportError:
+    ParametricHierarchicalModel = None
+    CORE_MODEL_AVAILABLE = False
+
+try:
+    from .hierarchical_model_builder import (
+        build_hierarchical_model,
+        get_portfolio_loss_predictions, 
+        validate_model_inputs
+    )
+    HIERARCHICAL_BUILDER_AVAILABLE = True
+except ImportError:
+    build_hierarchical_model = get_portfolio_loss_predictions = validate_model_inputs = None
+    HIERARCHICAL_BUILDER_AVAILABLE = False
 
 __all__ = [
     # 主要類別

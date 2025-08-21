@@ -25,8 +25,14 @@ try:
     import torch.optim as optim
     from torch.distributions import Normal
     TORCH_AVAILABLE = True
+    # Type hints for when torch is available
+    TorchTensor = torch.Tensor
+    TorchOptimizer = torch.optim.Optimizer
 except ImportError:
     TORCH_AVAILABLE = False
+    # Dummy type hints when torch is not available
+    TorchTensor = "torch.Tensor"
+    TorchOptimizer = "torch.optim.Optimizer"
 
 
 class DifferentiableCRPS:
@@ -291,13 +297,13 @@ if TORCH_AVAILABLE:
                 nn.Linear(32, n_params)
             )
         
-        def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        def forward(self, x):
             """前向傳播"""
             mu = self.mu_net(x)
             logvar = self.logvar_net(x)
             return mu, logvar
         
-        def sample(self, x: torch.Tensor, n_samples: int = 10) -> Tuple:
+        def sample(self, x, n_samples: int = 10):
             """使用 reparameterization trick 採樣"""
             mu, logvar = self.forward(x)
             std = torch.exp(0.5 * logvar)

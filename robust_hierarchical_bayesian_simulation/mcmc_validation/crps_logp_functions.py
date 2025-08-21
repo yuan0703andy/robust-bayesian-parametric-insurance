@@ -27,8 +27,10 @@ try:
     import torch.nn as nn
     from torch.distributions import Normal
     TORCH_AVAILABLE = True
+    TorchTensor = torch.Tensor
 except ImportError:
     TORCH_AVAILABLE = False
+    TorchTensor = "torch.Tensor"
 
 # Try importing JAX for MCMC integration (replaces PyMC)
 try:
@@ -252,8 +254,8 @@ class TorchCRPSLogProbability:
     """
     
     def __init__(self, 
-                 observed_losses: torch.Tensor,
-                 parametric_features: torch.Tensor):
+                 observed_losses,
+                 parametric_features):
         """
         初始化PyTorch CRPS logp
         """
@@ -264,8 +266,8 @@ class TorchCRPSLogProbability:
         self.parametric_features = parametric_features
         
     def crps_logp_pytorch(self, 
-                         theta: torch.Tensor,
-                         require_grad: bool = True) -> torch.Tensor:
+                         theta,
+                         require_grad: bool = True):
         """
         PyTorch版本的CRPS對數概率
         

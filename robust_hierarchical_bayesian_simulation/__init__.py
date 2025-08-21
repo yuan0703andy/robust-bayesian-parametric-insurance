@@ -63,7 +63,7 @@ except ImportError:
 
 # MCMC驗證
 try:
-    from .mcmc_validation.crps_mcmc_validator import CRPSMCMCValidator
+    from .mcmc_validation import CRPSMCMCValidator
     MCMC_VALIDATOR_AVAILABLE = True
 except ImportError:
     MCMC_VALIDATOR_AVAILABLE = False
