@@ -206,6 +206,14 @@ except ImportError as e:
     print(f"❌ 空間數據處理器導入失敗: {e}")
     SpatialDataProcessor = None
 
+# 數據分割模組
+try:
+    from data_processing.data_splits import RobustDataSplitter, create_robust_splits
+    print("✅ 數據分割模組導入成功")
+except ImportError as e:
+    print(f"❌ 數據分割模組導入失敗: {e}")
+    RobustDataSplitter = create_robust_splits = None
+
 # 檢查模組狀態
 try:
     from robust_hierarchical_bayesian_simulation import get_module_status
@@ -540,13 +548,75 @@ print(f"   風險強度: {hazard_intensities.shape} (max: {np.max(hazard_intensi
 print(f"   暴險價值: {len(exposure_values)} (總計: ${np.sum(exposure_values)/1e9:.1f}B)")
 print(f"   觀測損失: {observed_losses.shape} (非零: {np.count_nonzero(observed_losses)})")
 
-# 添加Cat-in-Circle數據到空間數據
+# %%
+# =============================================================================
+# 新增: 數據分割 - 創建訓練/驗證/測試集
+# =============================================================================
+
+print("\n🔀 創建數據分割 (訓練/驗證/測試)")
+
+if RobustDataSplitter and hazard_intensities is not None and observed_losses is not None:
+    # 創建數據分割器
+    data_splitter = RobustDataSplitter(random_state=42)
+    
+    # 創建分割 (使用100個合成事件樣本進行高效訓練)
+    data_splits = data_splitter.create_data_splits(
+        hazard_intensities=hazard_intensities,
+        observed_losses=observed_losses,
+        n_synthetic_samples=100,  # 保持效率，使用100個合成樣本
+        train_val_frac=0.8,       # 80% 用於訓練+驗證
+        val_frac=0.2,              # 20% 的訓練+驗證用於驗證
+        n_strata=4                 # 4層分層採樣
+    )
+    
+    # 獲取分割後的數據
+    split_data = data_splitter.get_split_data(
+        hazard_intensities=hazard_intensities,
+        observed_losses=observed_losses,
+        exposure_values=exposure_values,
+        split_indices=data_splits
+    )
+    
+    # 計算並顯示統計
+    split_stats = data_splitter.compute_split_statistics(
+        hazard_intensities=hazard_intensities,
+        observed_losses=observed_losses,
+        split_indices=data_splits
+    )
+    
+    print("\n📊 數據分割統計:")
+    print(split_stats.to_string())
+    
+    # 保存訓練/驗證/測試數據
+    train_data = split_data['train']
+    val_data = split_data['validation']
+    test_data = split_data['test']
+    
+    print(f"\n✅ 數據分割完成:")
+    print(f"   訓練集: {train_data['hazard_intensities'].shape[1]} 事件")
+    print(f"   驗證集: {val_data['hazard_intensities'].shape[1]} 事件")
+    print(f"   測試集: {test_data['hazard_intensities'].shape[1]} 事件")
+    
+else:
+    print("⚠️ 數據分割模組不可用或數據缺失，使用原始數據")
+    # 備用方案：使用所有數據作為訓練集
+    train_data = {
+        'hazard_intensities': hazard_intensities,
+        'observed_losses': observed_losses,
+        'exposure_values': exposure_values,
+        'event_indices': np.arange(hazard_intensities.shape[1])
+    }
+    val_data = train_data  # 沒有驗證集
+    test_data = None       # 沒有測試集
+
+# 添加Cat-in-Circle數據到空間數據 (使用訓練數據)
 # 檢查 add_cat_in_circle_data 方法是否存在及其簽名
 if hasattr(spatial_processor, 'add_cat_in_circle_data'):
     try:
-        # 嘗試原始調用
+        # 使用訓練數據進行模型構建
         spatial_data = spatial_processor.add_cat_in_circle_data(
-            spatial_data, hazard_intensities, exposure_values, observed_losses
+            spatial_data, train_data['hazard_intensities'], 
+            train_data['exposure_values'], train_data['observed_losses']
         )
     except TypeError as e:
         print(f"⚠️ 方法調用參數錯誤: {e}")
@@ -554,16 +624,16 @@ if hasattr(spatial_processor, 'add_cat_in_circle_data'):
         try:
             # 可能只需要3個參數
             spatial_data = spatial_processor.add_cat_in_circle_data(
-                spatial_data, hazard_intensities, exposure_values
+                spatial_data, train_data['hazard_intensities'], train_data['exposure_values']
             )
             print("✅ 使用3參數調用成功")
         except:
             try:
                 # 可能是字典形式
                 cat_data = {
-                    'hazard_intensities': hazard_intensities,
-                    'exposure_values': exposure_values,
-                    'observed_losses': observed_losses
+                    'hazard_intensities': train_data['hazard_intensities'],
+                    'exposure_values': train_data['exposure_values'],
+                    'observed_losses': train_data['observed_losses']
                 }
                 spatial_data = spatial_processor.add_cat_in_circle_data(spatial_data, cat_data)
                 print("✅ 使用字典參數調用成功")
@@ -571,16 +641,16 @@ if hasattr(spatial_processor, 'add_cat_in_circle_data'):
                 print("⚠️ 無法調用add_cat_in_circle_data，手動添加數據")
                 # 手動添加數據到spatial_data對象
                 if hasattr(spatial_data, '__dict__'):
-                    spatial_data.hazard_intensities = hazard_intensities
-                    spatial_data.exposure_values = exposure_values  
-                    spatial_data.observed_losses = observed_losses
+                    spatial_data.hazard_intensities = train_data['hazard_intensities']
+                    spatial_data.exposure_values = train_data['exposure_values']
+                    spatial_data.observed_losses = train_data['observed_losses']
 else:
     print("⚠️ add_cat_in_circle_data方法不存在，手動添加數據")
     # 手動添加數據
     if hasattr(spatial_data, '__dict__'):
-        spatial_data.hazard_intensities = hazard_intensities
-        spatial_data.exposure_values = exposure_values
-        spatial_data.observed_losses = observed_losses
+        spatial_data.hazard_intensities = train_data['hazard_intensities']
+        spatial_data.exposure_values = train_data['exposure_values']
+        spatial_data.observed_losses = train_data['observed_losses']
 
 # 驗證模型輸入
 if validate_model_inputs:
@@ -641,18 +711,18 @@ parametric_indices = []
 parametric_payouts = []
 observed_losses_vi = []
 
-# 直接使用真實數據而不是依賴cat_in_circle_by_radius結構
-# 我們已經有了真實的hazard_intensities和observed_losses數據
+# 使用訓練數據進行VI分析
+print(f"📊 準備VI數據，使用訓練集數據...")
+print(f"   醫院數: {train_data['hazard_intensities'].shape[0]}")
+print(f"   訓練事件數: {train_data['hazard_intensities'].shape[1]}")
+print(f"   驗證事件數: {val_data['hazard_intensities'].shape[1]}")
 
-print(f"📊 準備VI數據，使用真實的災害強度數據...")
-print(f"   醫院數: {hazard_intensities.shape[0]}")
-print(f"   事件數: {hazard_intensities.shape[1]}")
+# 使用所有訓練數據進行VI (已經是優化後的樣本)
+train_hazard = train_data['hazard_intensities']
+train_losses = train_data['observed_losses']
+selected_events = np.arange(train_hazard.shape[1])  # 使用所有訓練事件
 
-# 限制分析的事件數量以提高效率
-max_events_for_vi = min(100, hazard_intensities.shape[1])
-selected_events = np.random.choice(hazard_intensities.shape[1], max_events_for_vi, replace=False)
-
-print(f"   選擇 {max_events_for_vi} 個事件進行VI分析")
+print(f"   使用 {len(selected_events)} 個訓練事件進行VI分析")
 
 # 從前幾個產品中提取數據作為範例
 max_products_for_vi = min(20, len(products_df))
@@ -667,8 +737,8 @@ for idx, product in selected_products.iterrows():
     max_payout = product['max_payout']
     
     for event_idx in selected_events:
-        # 使用所有醫院在該事件的最大風速作為Cat-in-Circle指數
-        max_wind_in_radius = np.max(hazard_intensities[:, event_idx])
+        # 使用訓練數據中所有醫院在該事件的最大風速作為Cat-in-Circle指數
+        max_wind_in_radius = np.max(train_hazard[:, event_idx])
         parametric_indices.append(max_wind_in_radius)
         
         # 計算階段式賠付 (Steinmann 2023 標準)
@@ -681,7 +751,7 @@ for idx, product in selected_products.iterrows():
         
         parametric_payouts.append(total_payout)
         # 使用該事件在所有醫院的總觀測損失
-        total_observed_loss = np.sum(observed_losses[:, event_idx])
+        total_observed_loss = np.sum(train_losses[:, event_idx])
         observed_losses_vi.append(total_observed_loss)
 
 parametric_indices = np.array(parametric_indices)
@@ -708,10 +778,48 @@ print(f"   損失範圍: ${np.min(y_vi)/1e6:.1f}M - ${np.max(y_vi)/1e6:.1f}M")
 # 執行真正的變分推斷（學習最佳參數分佈）
 vi_results = vi_screener.run_comprehensive_screening(X_vi, y_vi)
 
-print(f"✅ VI優化完成: 最佳基差風險={vi_results['best_model']['final_basis_risk']:.2f}")
+print(f"✅ VI優化完成 (訓練集): 最佳基差風險={vi_results['best_model']['final_basis_risk']:.2f}")
 print(f"   最佳模型: ε={vi_results['best_model']['epsilon']:.3f}, 類型={vi_results['best_model']['basis_risk_type']}")
 
-print(f"基差風險VI完成: 最佳模型基差風險={vi_results['best_model']['final_basis_risk']:.4f}")
+# 在驗證集上評估
+print("\n📊 驗證集評估...")
+val_indices = []
+val_payouts = []
+val_losses = []
+
+# 使用最佳產品在驗證集上計算
+best_product_idx = 0  # 使用第一個產品作為示例
+product = selected_products.iloc[best_product_idx]
+thresholds = product['trigger_thresholds']
+payout_ratios = product['payout_ratios']
+max_payout = product['max_payout']
+
+for event_idx in range(val_data['hazard_intensities'].shape[1]):
+    max_wind = np.max(val_data['hazard_intensities'][:, event_idx])
+    val_indices.append(max_wind)
+    
+    # 計算賠付
+    total_payout = 0
+    for i in range(len(thresholds)-1, -1, -1):
+        if max_wind >= thresholds[i]:
+            total_payout = max_payout * payout_ratios[i]
+            break
+    val_payouts.append(total_payout)
+    
+    # 總損失
+    total_loss = np.sum(val_data['observed_losses'][:, event_idx])
+    val_losses.append(total_loss)
+
+val_indices = np.array(val_indices)
+val_payouts = np.array(val_payouts)
+val_losses = np.array(val_losses)
+
+# 計算驗證集基差風險
+val_basis_risk = np.mean(np.abs(val_payouts - val_losses))
+print(f"✅ 驗證集基差風險: {val_basis_risk:.2f}")
+print(f"   訓練/驗證比率: {vi_results['best_model']['final_basis_risk'] / val_basis_risk:.3f}")
+
+print(f"\n基差風險VI完成: 訓練={vi_results['best_model']['final_basis_risk']:.4f}, 驗證={val_basis_risk:.4f}")
 
 # %%
 # =============================================================================
