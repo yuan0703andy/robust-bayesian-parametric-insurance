@@ -1,12 +1,12 @@
 """
 Data Processing Module
-x�U!D
+數據處理模組
 
-+�t�x�U��
-1. ��x�U (track_processing.py) - IBTrACS ��U
-2. z�x�U (spatial_data_processor.py) - �bz�x�U
+包含完整的數據預處理功能：
+1. 軌跡數據處理 (track_processing.py) - IBTrACS 軌跡處理
+2. 空間數據處理 (spatial_data_processor.py) - 醫院空間數據處理
 
-!D�x�U�����I��!�ݪ�Л��x�
+這個模組專注於數據預處理，為後續的貝葉斯建模和保險分析提供清理後的數據。
 """
 
 from .track_processing import *
