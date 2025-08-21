@@ -240,11 +240,14 @@ else:
 
 # 設置GPU環境 
 if setup_gpu_environment:
-    gpu_config = setup_gpu_environment(enable_gpu=False)  # 使用CPU模式
-    print(f"計算環境: {gpu_config.device_type}, 工作進程: {gpu_config.max_workers}")
+    gpu_config, execution_plan = setup_gpu_environment(enable_gpu=False)  # 使用CPU模式
+    framework = getattr(gpu_config, 'framework', 'CPU')
+    # 從 execution_plan 獲取工作進程數
+    total_cores = sum(plan.get('cores', 0) for plan in execution_plan.values()) if execution_plan else 1
+    print(f"計算環境: {framework}, 並行核心: {total_cores}")
 else:
     print("⚠️ GPU環境配置不可用，使用默認設置")
-    gpu_config = None
+    gpu_config = execution_plan = None
 
 # =============================================================================
 # 階段1: 數據處理
