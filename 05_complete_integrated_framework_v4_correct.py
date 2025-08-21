@@ -28,11 +28,53 @@ import pandas as pd
 from pathlib import Path
 import sys
 
-# 設置路徑
-PATH_ROOT = Path(__file__).parent
-sys.path.insert(0, str(PATH_ROOT))
-sys.path.insert(0, str(PATH_ROOT / 'robust_hierarchical_bayesian_simulation'))
+# 設置路徑 (適用於 Jupyter 和腳本執行)
+try:
+    # 嘗試使用 __file__ (腳本執行時)
+    PATH_ROOT = Path(__file__).parent
+except NameError:
+    # Jupyter notebook 環境
+    import os
+    PATH_ROOT = Path(os.getcwd())
+    
+# 確保能找到模組
+possible_roots = [
+    PATH_ROOT,
+    PATH_ROOT / 'robust-bayesian-parametric-insurance',
+    Path.cwd(),
+    Path.cwd().parent
+]
 
+for root in possible_roots:
+    robust_path = root / 'robust_hierarchical_bayesian_simulation'
+    data_path = root / 'data_processing'
+    insurance_path = root / 'insurance_analysis_refactored'
+    
+    if robust_path.exists():
+        sys.path.insert(0, str(root))
+        print(f"✅ 找到專案根目錄: {root}")
+        break
+else:
+    print("⚠️ 警告: 無法自動找到專案根目錄，請手動設置路徑")
+
+# 路徑診斷
+print(f"\n🔍 路徑診斷:")
+print(f"   當前工作目錄: {Path.cwd()}")
+print(f"   Python 路徑: {sys.path[:3]}...")
+
+# 檢查關鍵模組是否可以找到
+key_modules = [
+    'robust_hierarchical_bayesian_simulation',
+    'data_processing', 
+    'insurance_analysis_refactored'
+]
+
+for module in key_modules:
+    try:
+        __import__(module)
+        print(f"   ✅ {module}: 可導入")
+    except ImportError as e:
+        print(f"   ❌ {module}: 無法導入 ({e})")
 
 # =============================================================================
 # 導入8階段模組化框架的所有必需組件
