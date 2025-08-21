@@ -74,7 +74,10 @@ class RobustDataSplitter:
                            n_samples: int,
                            n_strata: int = 4) -> List[int]:
         """
-        Perform stratified sampling based on event intensities.
+        Robust two-stage stratified sampling based on event intensities.
+        
+        Stage 1: Attempt balanced sampling from each stratum
+        Stage 2: Fill remaining quota from all available events
         
         Args:
             event_indices: Array of event indices to sample from
@@ -86,24 +89,61 @@ class RobustDataSplitter:
             List of sampled event indices
         """
         if len(event_indices) <= n_samples:
+            print(f"  📌 Available events ({len(event_indices)}) ≤ target ({n_samples}), returning all")
             return event_indices.tolist()
         
         # Create strata boundaries
         strata_bins = np.percentile(intensities, np.linspace(0, 100, n_strata + 1))
         strata_bins[-1] += 1  # Ensure maximum value is included
         
+        # Stage 1: Balanced sampling from each stratum
         sampled_indices = []
-        samples_per_stratum = int(np.ceil(n_samples / n_strata))
+        remaining_events = set(event_indices)
+        samples_per_stratum = n_samples // n_strata
+        
+        print(f"  🎯 Stage 1: Targeting {samples_per_stratum} samples per stratum")
         
         for i in range(n_strata):
             # Find events in this stratum
             stratum_mask = (intensities >= strata_bins[i]) & (intensities < strata_bins[i+1])
             stratum_indices = event_indices[stratum_mask]
             
-            if len(stratum_indices) > 0:
-                n_to_sample = min(samples_per_stratum, len(stratum_indices))
-                chosen = self.rng.choice(stratum_indices, n_to_sample, replace=False)
+            # Filter to only remaining events
+            available_in_stratum = [idx for idx in stratum_indices if idx in remaining_events]
+            
+            if len(available_in_stratum) > 0:
+                n_to_sample = min(samples_per_stratum, len(available_in_stratum))
+                chosen = self.rng.choice(available_in_stratum, n_to_sample, replace=False)
                 sampled_indices.extend(chosen.tolist())
+                
+                # Remove from remaining pool
+                for idx in chosen:
+                    remaining_events.discard(idx)
+                
+                print(f"    Stratum {i+1}: {n_to_sample}/{len(available_in_stratum)} events sampled")
+            else:
+                print(f"    Stratum {i+1}: 0 events available")
+        
+        # Stage 2: Fill remaining quota if needed
+        current_samples = len(sampled_indices)
+        if current_samples < n_samples and len(remaining_events) > 0:
+            additional_needed = n_samples - current_samples
+            available_remaining = list(remaining_events)
+            
+            print(f"  🎯 Stage 2: Need {additional_needed} more samples from {len(available_remaining)} remaining")
+            
+            if len(available_remaining) >= additional_needed:
+                additional_chosen = self.rng.choice(available_remaining, additional_needed, replace=False)
+                sampled_indices.extend(additional_chosen.tolist())
+                print(f"    ✅ Successfully added {len(additional_chosen)} additional samples")
+            else:
+                # Take all remaining events
+                sampled_indices.extend(available_remaining)
+                print(f"    ⚠️ Only {len(available_remaining)} additional events available (needed {additional_needed})")
+        
+        final_count = len(sampled_indices)
+        efficiency = (final_count / n_samples) * 100 if n_samples > 0 else 100
+        print(f"  📊 Final sampling: {final_count}/{n_samples} ({efficiency:.1f}% of target)")
         
         return sampled_indices
     
@@ -356,18 +396,63 @@ if __name__ == '__main__':
     print("📊 Data Splitting Module - Example Usage")
     print("=" * 60)
     
-    # Create simulated data
+    # Create simulated data with realistic NC hurricane characteristics
     N_LOCATIONS = 20
     N_EVENTS = 1312
+    N_REAL_EVENTS = 82
     
-    hazard_sim = np.random.rand(N_LOCATIONS, N_EVENTS) * 100
-    losses_sim = np.random.gamma(2, 5e6, (N_LOCATIONS, N_EVENTS))
+    # Simulate realistic hurricane intensities and losses
+    np.random.seed(42)
+    hazard_sim = np.random.gamma(2, 15, (N_LOCATIONS, N_EVENTS))  # More realistic wind speeds
+    
+    # Create mostly zero losses with some significant events (like real hurricanes)
+    losses_sim = np.zeros((N_LOCATIONS, N_EVENTS))
+    
+    # Add significant losses for ~5% of events (like major hurricanes)
+    significant_events = np.random.choice(N_EVENTS, size=int(N_EVENTS * 0.05), replace=False)
+    for event in significant_events:
+        losses_sim[:, event] = np.random.gamma(2, 5e6, N_LOCATIONS)
+    
+    # Add minor losses for another ~10% of events  
+    minor_events = np.random.choice(
+        [i for i in range(N_EVENTS) if i not in significant_events], 
+        size=int(N_EVENTS * 0.10), replace=False
+    )
+    for event in minor_events:
+        losses_sim[:, event] = np.random.gamma(1, 1e5, N_LOCATIONS)
+    
     exposure_sim = np.random.uniform(1e7, 1e9, N_LOCATIONS)
     
-    # Create splitter
+    # Create splitter and test robust sampling
     splitter = RobustDataSplitter(random_state=42)
     
-    # Create splits
+    print("\n🧪 Testing Robust Two-Stage Sampling:")
+    print("-" * 40)
+    
+    # Test different sampling targets
+    for n_samples in [50, 100, 150, 200]:
+        print(f"\n📋 Testing with target = {n_samples} synthetic samples:")
+        
+        splits = splitter.create_data_splits(
+            hazard_intensities=hazard_sim,
+            observed_losses=losses_sim,
+            n_synthetic_samples=n_samples,
+            n_strata=4
+        )
+        
+        # Quick analysis of results
+        total_sampled = len(splits['train']) + len(splits['validation'])
+        real_in_train_val = splits['metadata']['n_real_train'] + splits['metadata']['n_real_val']
+        synthetic_in_train_val = splits['metadata']['n_synthetic_train'] + splits['metadata']['n_synthetic_val']
+        
+        efficiency = (synthetic_in_train_val / n_samples) * 100 if n_samples > 0 else 100
+        print(f"  📊 Results: {synthetic_in_train_val}/{n_samples} synthetic ({efficiency:.1f}%), "
+              f"{real_in_train_val} real")
+    
+    print("\n" + "=" * 60)
+    
+    # Standard analysis with optimal settings
+    print("\n📊 Standard Analysis (n_synthetic_samples=100):")
     splits = splitter.create_data_splits(
         hazard_intensities=hazard_sim,
         observed_losses=losses_sim,
@@ -386,3 +471,19 @@ if __name__ == '__main__':
     for split_name, data in split_data.items():
         print(f"  {split_name}: hazard={data['hazard_intensities'].shape}, "
               f"losses={data['observed_losses'].shape}")
+    
+    # Validate quality of splits
+    print("\n✅ Validation Checks:")
+    train_events = set(splits['train'])
+    val_events = set(splits['validation'])
+    test_events = set(splits['test'])
+    
+    print(f"  🔍 No overlap: {len(train_events & val_events) == 0}")
+    print(f"  🔍 No train-test leak: {len(train_events & test_events) == 0}")
+    print(f"  🔍 No val-test leak: {len(val_events & test_events) == 0}")
+    
+    # Check temporal ordering (test set should have higher event indices on average)
+    avg_train_idx = np.mean(list(train_events))
+    avg_test_idx = np.mean(list(test_events))
+    print(f"  📅 Temporal order preserved: {avg_test_idx > avg_train_idx} "
+          f"(train avg: {avg_train_idx:.1f}, test avg: {avg_test_idx:.1f})")

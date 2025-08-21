@@ -615,18 +615,19 @@ if hasattr(spatial_processor, 'add_cat_in_circle_data'):
     try:
         # 使用訓練數據進行模型構建
         spatial_data = spatial_processor.add_cat_in_circle_data(
-            spatial_data, train_data['hazard_intensities'], 
-            train_data['exposure_values'], train_data['observed_losses']
+            train_data['hazard_intensities'], 
+            train_data['exposure_values'], 
+            train_data['observed_losses']
         )
     except TypeError as e:
         print(f"⚠️ 方法調用參數錯誤: {e}")
         # 嘗試不同的參數組合
         try:
-            # 可能只需要3個參數
+            # 可能只需要2個參數
             spatial_data = spatial_processor.add_cat_in_circle_data(
-                spatial_data, train_data['hazard_intensities'], train_data['exposure_values']
+                train_data['hazard_intensities'], train_data['exposure_values']
             )
-            print("✅ 使用3參數調用成功")
+            print("✅ 使用2參數調用成功")
         except:
             try:
                 # 可能是字典形式
