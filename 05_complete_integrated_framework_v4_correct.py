@@ -418,23 +418,9 @@ else:
 print("\n階段3: 4層階層貝葉斯建模")
 
 # 載入空間分析結果
-try:
-    with open('results/spatial_analysis/cat_in_circle_results.pkl', 'rb') as f:
-        spatial_results = pickle.load(f)
-    print("✅ 空間分析結果載入成功")
-except Exception as e:
-    print(f"⚠️ 空間分析結果載入失敗: {e}")
-    # 創建備用空間結果
-    spatial_results = {
-        'hospital_coordinates': np.random.rand(50, 2) * [1, 1] + [35.0, -79.0],  # NC 座標範圍
-        'cat_in_circle_by_radius': {
-            '50km': {
-                'max_wind_speeds': np.random.beta(2, 5, n_events) * 100,
-                'event_intensities': np.random.gamma(2, 20, n_events)
-            }
-        }
-    }
-    print("📊 使用備用空間分析數據")
+with open('results/spatial_analysis/cat_in_circle_results.pkl', 'rb') as f:
+    spatial_results = pickle.load(f)
+print("✅ 空間分析結果載入成功")
 
 # 處理空間數據
 if SpatialDataProcessor:
@@ -442,7 +428,7 @@ if SpatialDataProcessor:
     hospital_coords = spatial_results['hospital_coordinates']
     spatial_data = spatial_processor.process_hospital_spatial_data(
         hospital_coords,
-        n_regions=config and config.hierarchical_modeling.include_region_effects and 3 or 1
+        n_regions=config and config.use_spatial_effects and 3 or 1
     )
     print(f"空間數據處理完成: {len(hospital_coords)} 醫院座標")
 else:
