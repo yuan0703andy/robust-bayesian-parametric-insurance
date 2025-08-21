@@ -63,7 +63,7 @@ from robust_hierarchical_bayesian_simulation.hierarchical_modeling.prior_specifi
 
 # 階段4: 模型選擇
 from robust_hierarchical_bayesian_simulation.model_selection.basis_risk_vi import BasisRiskAwareVI
-from robust_hierarchical_bayesian_simulation.model_selection.model_selector import ModelSelector
+from robust_hierarchical_bayesian_simulation.model_selection import ModelSelector
 
 # 階段5: 超參數優化
 from robust_hierarchical_bayesian_simulation.hyperparameter_optimization.hyperparameter_optimizer import AdaptiveHyperparameterOptimizer

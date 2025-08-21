@@ -18,6 +18,9 @@ from .model_selector import (
     ModelSelectorWithHyperparamOptimization
 )
 
+# 提供便捷別名
+ModelSelector = ModelSelectorWithHyperparamOptimization
+
 __all__ = [
     # VI components
     'DifferentiableCRPS',
@@ -28,5 +31,6 @@ __all__ = [
     'ModelCandidate',
     'HyperparameterConfig',
     'ModelSelectionResult',
-    'ModelSelectorWithHyperparamOptimization'
+    'ModelSelectorWithHyperparamOptimization',
+    'ModelSelector'  # 便捷別名
 ]
