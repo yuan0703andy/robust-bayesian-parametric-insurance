@@ -688,17 +688,28 @@ parametric_indices = np.array(parametric_indices)
 parametric_payouts = np.array(parametric_payouts)
 observed_losses_vi = np.array(observed_losses_vi)
 
-# 執行基差風險導向VI
+# 🎯 執行真正的基差風險導向變分推斷
+print("🧠 開始真正的變分推斷優化...")
+print("   使用梯度下降學習最佳保險產品參數分佈")
+
 vi_screener = BasisRiskAwareVI(
-    n_features=1,
-    epsilon_values=[0.0, 0.05, 0.10, 0.15, 0.20],
-    basis_risk_types=['absolute', 'asymmetric', 'weighted']
+    n_features=1,  # 風速作為單一特徵
+    epsilon_values=[0.0, 0.05, 0.10, 0.15, 0.20],  # ε-contamination levels
+    basis_risk_types=['absolute', 'asymmetric', 'weighted']  # 不同基差風險類型
 )
 
-vi_results = vi_screener.run_comprehensive_screening(
-    X=parametric_indices.reshape(-1, 1),
-    y=observed_losses_vi
-)
+# 準備VI輸入數據：風速特徵 + 真實損失
+X_vi = parametric_indices.reshape(-1, 1)  # [N, 1] 風速特徵
+y_vi = observed_losses_vi  # [N] 真實損失
+
+print(f"   VI訓練數據: {X_vi.shape[0]} 樣本, {X_vi.shape[1]} 特徵")
+print(f"   損失範圍: ${np.min(y_vi)/1e6:.1f}M - ${np.max(y_vi)/1e6:.1f}M")
+
+# 執行真正的變分推斷（學習最佳參數分佈）
+vi_results = vi_screener.run_comprehensive_screening(X_vi, y_vi)
+
+print(f"✅ VI優化完成: 最佳基差風險={vi_results['best_model']['final_basis_risk']:.2f}")
+print(f"   最佳模型: ε={vi_results['best_model']['epsilon']:.3f}, 類型={vi_results['best_model']['basis_risk_type']}")
 
 print(f"基差風險VI完成: 最佳模型基差風險={vi_results['best_model']['final_basis_risk']:.4f}")
 
