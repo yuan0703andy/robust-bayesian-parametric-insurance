@@ -24,7 +24,7 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 
 # 導入新的模組化組件
-from robust_hierarchical_bayesian_simulation import SpatialDataProcessor, load_spatial_data_from_02_results
+from data_processing import SpatialDataProcessor, load_spatial_data_from_02_results
 
 # Advanced Cat-in-Circle analysis removed per user request
 # Using Basic Cat-in-Circle implementation only

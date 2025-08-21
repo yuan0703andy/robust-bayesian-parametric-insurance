@@ -40,6 +40,11 @@ from .likelihood_families import (
 )
 
 from .core_model import ParametricHierarchicalModel
+from .hierarchical_model_builder import (
+    build_hierarchical_model,
+    get_portfolio_loss_predictions, 
+    validate_model_inputs
+)
 
 __all__ = [
     # 主要類別
@@ -67,5 +72,10 @@ __all__ = [
     "get_prior_parameters",
     "validate_model_spec",
     "check_convergence",
-    "recommend_mcmc_adjustments"
+    "recommend_mcmc_adjustments",
+    
+    # 新增的模型建構函數
+    "build_hierarchical_model",
+    "get_portfolio_loss_predictions", 
+    "validate_model_inputs"
 ]

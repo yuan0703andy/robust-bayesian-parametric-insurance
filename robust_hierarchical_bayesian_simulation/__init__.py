@@ -49,8 +49,9 @@ except ImportError:
     HIERARCHY_AVAILABLE = False
 
 # 新的模組化組件 (修正現有硬編碼問題)
-from .spatial_data_processor import SpatialDataProcessor, SpatialData, load_spatial_data_from_02_results
-from .hierarchical_model_builder import (
+# 注意: spatial_data_processor 已移至 data_processing 模組
+# 注意: hierarchical_model_builder 已移至 hierarchical_modeling 子模組
+from .hierarchical_modeling import (
     build_hierarchical_model, 
     get_portfolio_loss_predictions, 
     validate_model_inputs
@@ -62,9 +63,7 @@ __version__ = "1.0.0"
 
 __all__ = [
     # 新的模組化組件 (主要接口)
-    'SpatialDataProcessor',
-    'SpatialData', 
-    'load_spatial_data_from_02_results',
+    # 注意: SpatialDataProcessor 等已移至 data_processing 模組
     'build_hierarchical_model',
     'get_portfolio_loss_predictions', 
     'validate_model_inputs',

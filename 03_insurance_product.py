@@ -20,7 +20,7 @@ import pickle
 from pathlib import Path
 
 # 導入新的模組化組件
-from robust_hierarchical_bayesian_simulation import load_spatial_data_from_02_results
+from data_processing import load_spatial_data_from_02_results
 
 # Import from existing framework (保留作為備用)
 try:

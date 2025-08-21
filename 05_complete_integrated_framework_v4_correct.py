@@ -49,7 +49,11 @@ from robust_hierarchical_bayesian_simulation.data_processing.climada_data_loader
 
 # 階段2: 穩健先驗
 from robust_hierarchical_bayesian_simulation.robust_priors.epsilon_estimation import EpsilonEstimator
-from robust_hierarchical_bayesian_simulation.robust_priors.contamination_core import ContaminationModel
+from robust_hierarchical_bayesian_simulation.robust_priors.contamination_core import (
+    DoubleEpsilonContamination,
+    EpsilonContaminationSpec,
+    create_typhoon_contamination_spec
+)
 
 # 階段3: 階層建模
 from robust_hierarchical_bayesian_simulation.hierarchical_modeling.core_model import ParametricHierarchicalModel
@@ -62,7 +66,7 @@ from robust_hierarchical_bayesian_simulation.model_selection.basis_risk_vi impor
 from robust_hierarchical_bayesian_simulation.model_selection.model_selector import ModelSelector
 
 # 階段5: 超參數優化
-from robust_hierarchical_bayesian_simulation.hyperparameter_optimization.hyperparameter_optimizer import HyperparameterOptimizer
+from robust_hierarchical_bayesian_simulation.hyperparameter_optimization.hyperparameter_optimizer import AdaptiveHyperparameterOptimizer
 from robust_hierarchical_bayesian_simulation.hyperparameter_optimization.weight_sensitivity import WeightSensitivityAnalyzer
 
 # 階段6: MCMC驗證
@@ -74,12 +78,12 @@ from robust_hierarchical_bayesian_simulation.posterior_analysis.credible_interva
 from robust_hierarchical_bayesian_simulation.posterior_analysis.posterior_approximation import PosteriorApproximation
 from robust_hierarchical_bayesian_simulation.posterior_analysis.predictive_checks import PosteriorPredictiveChecker
 
-# 階段8: 參數保險
-from robust_hierarchical_bayesian_simulation.parametric_insurance import ParametricInsuranceOptimizer
+# 階段8: 參數保險 (使用現有的保險分析框架)
+from insurance_analysis_refactored.core import MultiObjectiveOptimizer as ParametricInsuranceOptimizer
 
 # 空間數據處理和模型建構器
-from robust_hierarchical_bayesian_simulation.spatial_data_processor import SpatialDataProcessor
-from robust_hierarchical_bayesian_simulation.hierarchical_model_builder import (
+from data_processing import SpatialDataProcessor
+from robust_hierarchical_bayesian_simulation.hierarchical_modeling import (
     build_hierarchical_model,
     validate_model_inputs,
     get_portfolio_loss_predictions
@@ -144,18 +148,23 @@ print(f"CLIMADA數據載入完成: {n_events}事件, ${total_exposure/1e9:.1f}B�
 
 print("\n階段2: 穩健先驗與ε-Contamination分析")
 
+# 創建ε-contamination規格
+contamination_spec = create_typhoon_contamination_spec(epsilon_range=(0.01, 0.20))
+
 # 使用EpsilonEstimator進行多方法ε估計
-epsilon_estimator = EpsilonEstimator(config.robust_priors)
+epsilon_estimator = EpsilonEstimator(contamination_spec)
 event_losses_positive = event_losses[event_losses > 0]
 epsilon_estimates = epsilon_estimator.estimate_epsilon_multiple_methods(event_losses_positive)
 
 # 選擇最終ε值
 final_epsilon = epsilon_estimator.select_final_epsilon(epsilon_estimates)
 
-# 創建contamination模型
-contamination_model = ContaminationModel(
-    epsilon=final_epsilon,
-    contamination_type=config.robust_priors.contamination_class
+# 創建雙重ε-contamination模型
+contamination_model = DoubleEpsilonContamination(
+    epsilon_prior=final_epsilon,
+    epsilon_likelihood=min(0.1, final_epsilon * 1.5),
+    prior_contamination_type='typhoon_specific',
+    likelihood_contamination_type='extreme_events'
 )
 
 print(f"ε-contamination分析完成: 最終ε={final_epsilon:.4f}")
@@ -290,8 +299,8 @@ print(f"基差風險VI完成: 最佳模型基差風險={vi_results['best_model']
 
 print("\n階段5: CRPS框架與超參數優化")
 
-# 使用HyperparameterOptimizer進行超參數優化
-hyperparameter_optimizer = HyperparameterOptimizer(config.crps_framework)
+# 使用AdaptiveHyperparameterOptimizer進行超參數優化
+hyperparameter_optimizer = AdaptiveHyperparameterOptimizer()
 
 # 執行權重敏感性分析
 weight_combinations = [

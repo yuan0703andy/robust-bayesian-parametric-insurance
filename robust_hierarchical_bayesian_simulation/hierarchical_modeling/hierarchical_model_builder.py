@@ -12,7 +12,7 @@ Hierarchical Model Builder
 
 用法：
 from robust_hierarchical_bayesian_simulation.hierarchical_model_builder import build_hierarchical_model
-from robust_hierarchical_bayesian_simulation.spatial_data_processor import SpatialDataProcessor
+from data_processing.spatial_data_processor import SpatialDataProcessor
 
 spatial_data = processor.process_hospital_spatial_data(coords)
 model = build_hierarchical_model(spatial_data, contamination_epsilon=0.05)
@@ -21,7 +21,7 @@ model = build_hierarchical_model(spatial_data, contamination_epsilon=0.05)
 import numpy as np
 import pymc as pm
 from typing import Dict, Optional, Tuple
-from .spatial_data_processor import SpatialData
+from data_processing.spatial_data_processor import SpatialData
 
 
 def build_hierarchical_model(spatial_data: SpatialData,
@@ -273,7 +273,7 @@ def validate_model_inputs(spatial_data: SpatialData) -> bool:
 
 # 使用範例
 if __name__ == "__main__":
-    from .spatial_data_processor import SpatialDataProcessor
+    from data_processing.spatial_data_processor import SpatialDataProcessor
     
     # 創建測試數據
     np.random.seed(42)
