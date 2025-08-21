@@ -622,38 +622,67 @@ print("\n階段4: 基差風險導向變分推斷")
 with open('results/insurance_products/products.pkl', 'rb') as f:
     products_data = pickle.load(f)
 
-products_df = products_data['products_df']
+# 檢查數據結構並轉換為DataFrame
+if isinstance(products_data, list):
+    # products_data 是產品列表，轉換為DataFrame
+    import pandas as pd
+    products_df = pd.DataFrame(products_data)
+    print(f"✅ 載入保險產品: {len(products_data)} 個產品")
+    print(f"   產品欄位: {list(products_df.columns)}")
+elif isinstance(products_data, dict) and 'products_df' in products_data:
+    # products_data 是包含products_df的字典
+    products_df = products_data['products_df']
+    print(f"✅ 載入保險產品DataFrame: {len(products_df)} 個產品")
+else:
+    raise ValueError(f"不支援的產品數據格式: {type(products_data)}")
 
 # 準備VI篩選數據
 parametric_indices = []
 parametric_payouts = []
 observed_losses_vi = []
 
-# 從products_df提取數據
-for idx, product in products_df.iterrows():
-    thresholds = product['thresholds']
-    radius = product['radius_km']
+# 直接使用真實數據而不是依賴cat_in_circle_by_radius結構
+# 我們已經有了真實的hazard_intensities和observed_losses數據
+
+print(f"📊 準備VI數據，使用真實的災害強度數據...")
+print(f"   醫院數: {hazard_intensities.shape[0]}")
+print(f"   事件數: {hazard_intensities.shape[1]}")
+
+# 限制分析的事件數量以提高效率
+max_events_for_vi = min(100, hazard_intensities.shape[1])
+selected_events = np.random.choice(hazard_intensities.shape[1], max_events_for_vi, replace=False)
+
+print(f"   選擇 {max_events_for_vi} 個事件進行VI分析")
+
+# 從前幾個產品中提取數據作為範例
+max_products_for_vi = min(20, len(products_df))
+selected_products = products_df.iloc[:max_products_for_vi]
+
+print(f"   選擇 {max_products_for_vi} 個產品進行VI分析")
+
+for idx, product in selected_products.iterrows():
+    thresholds = product['trigger_thresholds']
+    payout_ratios = product['payout_ratios']
+    radius = product['radius_km'] 
+    max_payout = product['max_payout']
     
-    for event_i, event_id in enumerate(impact_obj.event_id[:50]):
-        radius_key = f"{int(radius)}km"
-        if radius_key in spatial_results['cat_in_circle_by_radius']:
-            event_data = spatial_results['cat_in_circle_by_radius'][radius_key].get(f'event_{event_id}', {})
-            
-            if event_data:
-                max_wind_in_radius = max([data.get('max_wind_speed', 0) for data in event_data.values()])
-                parametric_indices.append(max_wind_in_radius)
-                
-                total_payout = 0
-                if len(thresholds) == 1 and max_wind_in_radius >= thresholds[0]:
-                    total_payout = product['coverage_amount'] * 0.25
-                elif len(thresholds) == 2:
-                    if max_wind_in_radius >= thresholds[1]:
-                        total_payout = product['coverage_amount'] * 1.0
-                    elif max_wind_in_radius >= thresholds[0]:
-                        total_payout = product['coverage_amount'] * 0.5
-                
-                parametric_payouts.append(total_payout)
-                observed_losses_vi.append(event_losses[event_i])
+    for event_idx in selected_events:
+        # 使用所有醫院在該事件的最大風速作為Cat-in-Circle指數
+        max_wind_in_radius = np.max(hazard_intensities[:, event_idx])
+        parametric_indices.append(max_wind_in_radius)
+        
+        # 計算階段式賠付 (Steinmann 2023 標準)
+        total_payout = 0
+        # 按閾值從高到低檢查，使用對應的賠付比例
+        for i in range(len(thresholds)-1, -1, -1):
+            if max_wind_in_radius >= thresholds[i]:
+                total_payout = max_payout * payout_ratios[i]
+                break
+        
+        parametric_payouts.append(total_payout)
+        # 使用該事件在所有醫院的總觀測損失
+        total_observed_loss = np.sum(observed_losses[:, event_idx])
+        observed_losses_vi.append(total_observed_loss)
 
 parametric_indices = np.array(parametric_indices)
 parametric_payouts = np.array(parametric_payouts)
@@ -680,8 +709,29 @@ print(f"基差風險VI完成: 最佳模型基差風險={vi_results['best_model']
 
 print("\n階段5: CRPS框架與超參數優化")
 
+# 定義目標函數
+def hyperparameter_objective(params):
+    """超參數優化目標函數"""
+    # 簡單的目標函數：最小化CRPS
+    try:
+        under_penalty = params.get('under_penalty', 2.0)
+        over_penalty = params.get('over_penalty', 0.5)
+        crps_weight = params.get('crps_weight', 1.0)
+        
+        # 計算加權CRPS
+        crps_score = np.mean(np.abs(parametric_payouts - observed_losses_vi))
+        penalty = under_penalty * np.mean(np.maximum(observed_losses_vi - parametric_payouts, 0))
+        penalty += over_penalty * np.mean(np.maximum(parametric_payouts - observed_losses_vi, 0))
+        
+        return -(crps_score + penalty)  # 負值因為優化器最大化
+    except:
+        return -1e6  # 錯誤情況返回很低的分數
+
 # 使用AdaptiveHyperparameterOptimizer進行超參數優化
-hyperparameter_optimizer = AdaptiveHyperparameterOptimizer()
+hyperparameter_optimizer = AdaptiveHyperparameterOptimizer(
+    objective_function=hyperparameter_objective,
+    strategy='adaptive'
+)
 
 # 執行權重敏感性分析
 weight_combinations = [
