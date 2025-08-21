@@ -39,55 +39,73 @@ sys.path.insert(0, str(PATH_ROOT / 'robust_hierarchical_bayesian_simulation'))
 # =============================================================================
 
 # 配置管理
-from robust_hierarchical_bayesian_simulation.config.model_configs import (
+from robust_hierarchical_bayesian_simulation import (
     create_standard_analysis_config,
     ModelComplexity
 )
 
-# 階段1: 數據處理
-from robust_hierarchical_bayesian_simulation.data_processing.climada_data_loader import CLIMADADataLoader
+# 階段1: 數據處理 (注意: CLIMADADataLoader 在 data_processing 子模組中)
+try:
+    from robust_hierarchical_bayesian_simulation.data_processing.climada_data_loader import CLIMADADataLoader
+except ImportError:
+    print("⚠️ CLIMADADataLoader not available, using fallback data loading")
+    CLIMADADataLoader = None
 
 # 階段2: 穩健先驗
-from robust_hierarchical_bayesian_simulation.robust_priors.epsilon_estimation import EpsilonEstimator
-from robust_hierarchical_bayesian_simulation.robust_priors.contamination_core import (
+from robust_hierarchical_bayesian_simulation import (
+    EpsilonEstimator,
     DoubleEpsilonContamination,
-    EpsilonContaminationSpec,
-    create_typhoon_contamination_spec
+    EpsilonContaminationSpec
 )
 
 # 階段3: 階層建模
-from robust_hierarchical_bayesian_simulation.hierarchical_modeling.core_model import ParametricHierarchicalModel
+from robust_hierarchical_bayesian_simulation import (
+    ParametricHierarchicalModel,
+    build_hierarchical_model,
+    validate_model_inputs,
+    get_portfolio_loss_predictions
+)
 from robust_hierarchical_bayesian_simulation.hierarchical_modeling.prior_specifications import (
     ModelSpec, VulnerabilityData, PriorScenario, LikelihoodFamily, VulnerabilityFunctionType
 )
 
 # 階段4: 模型選擇
-from robust_hierarchical_bayesian_simulation.model_selection.basis_risk_vi import BasisRiskAwareVI
-from robust_hierarchical_bayesian_simulation.model_selection import ModelSelector
+from robust_hierarchical_bayesian_simulation import (
+    BasisRiskAwareVI,
+    ModelSelector,
+    DifferentiableCRPS,
+    ParametricPayoutFunction
+)
 
 # 階段5: 超參數優化
-from robust_hierarchical_bayesian_simulation.hyperparameter_optimization.hyperparameter_optimizer import AdaptiveHyperparameterOptimizer
-from robust_hierarchical_bayesian_simulation.hyperparameter_optimization.weight_sensitivity import WeightSensitivityAnalyzer
+from robust_hierarchical_bayesian_simulation import (
+    AdaptiveHyperparameterOptimizer,
+    WeightSensitivityAnalyzer
+)
 
 # 階段6: MCMC驗證
-from robust_hierarchical_bayesian_simulation.mcmc_validation.crps_mcmc_validator import CRPSMCMCValidator
-from robust_hierarchical_bayesian_simulation.mcmc_validation.mcmc_environment_config import setup_gpu_environment
+from robust_hierarchical_bayesian_simulation import (
+    CRPSMCMCValidator,
+    setup_gpu_environment
+)
 
 # 階段7: 後驗分析
-from robust_hierarchical_bayesian_simulation.posterior_analysis.credible_intervals import CredibleIntervalCalculator
-from robust_hierarchical_bayesian_simulation.posterior_analysis.posterior_approximation import PosteriorApproximation
-from robust_hierarchical_bayesian_simulation.posterior_analysis.predictive_checks import PosteriorPredictiveChecker
+from robust_hierarchical_bayesian_simulation import (
+    CredibleIntervalCalculator,
+    PosteriorApproximation,
+    PosteriorPredictiveChecker
+)
 
 # 階段8: 參數保險 (使用現有的保險分析框架)
 from insurance_analysis_refactored.core import MultiObjectiveOptimizer as ParametricInsuranceOptimizer
 
-# 空間數據處理和模型建構器
+# 空間數據處理
 from data_processing import SpatialDataProcessor
-from robust_hierarchical_bayesian_simulation.hierarchical_modeling import (
-    build_hierarchical_model,
-    validate_model_inputs,
-    get_portfolio_loss_predictions
-)
+
+# 檢查模組狀態
+from robust_hierarchical_bayesian_simulation import get_module_status
+print("🔧 模組可用性檢查:")
+print(get_module_status())
 
 print("8階段完整貝葉斯參數保險分析框架")
 print("=" * 60)
