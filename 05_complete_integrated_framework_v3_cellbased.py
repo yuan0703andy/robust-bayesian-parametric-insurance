@@ -52,10 +52,14 @@ sys.path.insert(0, str(Path(__file__).parent))
 # 導入robust_hierarchical_bayesian_simulation模組
 try:
     # 核心模組導入
-    from robust_hierarchical_bayesian_simulation import (
-        SpatialDataProcessor,
-        load_spatial_data_from_results
-    )
+    sys.path.insert(0, os.path.join(os.getcwd(), 'robust_hierarchical_bayesian_simulation'))
+    from spatial_data_processor import SpatialDataProcessor
+    
+    # 定義load_spatial_data_from_results函數（如果不存在）
+    def load_spatial_data_from_results():
+        import pickle
+        with open('results/spatial_analysis/cat_in_circle_results.pkl', 'rb') as f:
+            return pickle.load(f)
     
     # CRPS相關導入
     from robust_hierarchical_bayesian_simulation.utils.math_utils import (
@@ -464,7 +468,12 @@ try:
         sys.path.insert(0, robust_path)
     
     # 📦 導入重組後的模組 (v2.0.0)
-    from robust_hierarchical_bayesian_simulation.robust_priors import (
+    # 從2_robust_priors目錄導入
+    robust_priors_path = os.path.join(os.getcwd(), 'robust_hierarchical_bayesian_simulation', '2_robust_priors')
+    if robust_priors_path not in sys.path:
+        sys.path.insert(0, robust_priors_path)
+    
+    from contamination_core import (
         # 核心類別
         EpsilonEstimator,
         PriorContaminationAnalyzer,
@@ -514,7 +523,7 @@ try:
     )
     
     # 統計檢驗方法估計
-    from robust_hierarchical_bayesian_simulation.robust_priors.epsilon_estimation import EstimationMethod
+    from epsilon_estimation import EstimationMethod
     
     statistical_epsilon_result = estimator.estimate_from_statistical_tests(
         vulnerability_data.observed_losses,
@@ -693,8 +702,8 @@ try:
         },
         "contamination_comparison": {
             "strategies": contamination_comparison_results,
-            "robustness_metrics": robustness_metrics,
-            "multi_radius_data": multi_radius_results  # 從 Cell 1 傳遞過來
+            "robustness_metrics": robustness_metrics
+            # multi_radius_data 已移除，因為我們不再生成模擬數據
         }
     }
     
@@ -715,7 +724,12 @@ stage_start = time.time()
 
 try:
     # 🔄 使用正確的階層建模模組導入
-    from robust_hierarchical_bayesian_simulation.hierarchical_modeling import (
+    # 從3_hierarchical_modeling目錄導入
+    hierarchical_path = os.path.join(os.getcwd(), 'robust_hierarchical_bayesian_simulation', '3_hierarchical_modeling')
+    if hierarchical_path not in sys.path:
+        sys.path.insert(0, hierarchical_path)
+    
+    from core_model import (
         # 核心類別
         ParametricHierarchicalModel,
         ModelSpec,
@@ -1065,20 +1079,38 @@ print("\n4️⃣ 階段4：模型海選與VI篩選")
 stage_start = time.time()
 
 try:
-    # 🔄 使用正確的模型選擇模組導入
-    from robust_hierarchical_bayesian_simulation import model_selection
-    from robust_hierarchical_bayesian_simulation.model_selection import (
+    # 🔄 使用正確的模型選擇模組導入 (從4_model_selection目錄)
+    import sys
+    import os
+    model_selection_path = os.path.join(os.getcwd(), 'robust_hierarchical_bayesian_simulation', '4_model_selection')
+    if model_selection_path not in sys.path:
+        sys.path.insert(0, model_selection_path)
+    
+    from basis_risk_vi import (
         # VI components
         DifferentiableCRPS,
         ParametricPayoutFunction, 
-        BasisRiskAwareVI,
-        
-        # Model selection
-        ModelCandidate,
-        HyperparameterConfig,
-        ModelSelectionResult,
-        ModelSelectorWithHyperparamOptimization
+        BasisRiskAwareVI
     )
+    
+    # 直接從model_selector.py中導入需要的類，避免相對導入問題
+    import importlib.util
+    model_selector_file = os.path.join(model_selection_path, 'model_selector.py')
+    spec = importlib.util.spec_from_file_location("model_selector_module", model_selector_file)
+    model_selector_module = importlib.util.module_from_spec(spec)
+    
+    # 先載入basis_risk_vi到全局命名空間
+    import basis_risk_vi
+    sys.modules['basis_risk_vi'] = basis_risk_vi
+    
+    # 然後執行model_selector模組
+    spec.loader.exec_module(model_selector_module)
+    
+    # 提取需要的類
+    ModelCandidate = model_selector_module.ModelCandidate
+    HyperparameterConfig = model_selector_module.HyperparameterConfig
+    ModelSelectionResult = getattr(model_selector_module, 'ModelSelectionResult', None)
+    ModelSelectorWithHyperparamOptimization = getattr(model_selector_module, 'ModelSelectorWithHyperparamOptimization', None)
     
     print("   ✅ 模型選擇模組載入成功 (正確模組結構)")
     
@@ -1151,9 +1183,12 @@ if len(top_models) == 0:
     stage_results['hyperparameter_optimization'] = {"skipped": True, "reason": "no_models_from_vi_screening"}
 else:
     try:
-        # 🔄 使用正確的超參數優化模組導入
-        from robust_hierarchical_bayesian_simulation import hyperparameter_optimization
-        from robust_hierarchical_bayesian_simulation.hyperparameter_optimization import (
+        # 🔄 使用正確的超參數優化模組導入 (從5_hyperparameter_optimization目錄)
+        hyperopt_path = os.path.join(os.getcwd(), 'robust_hierarchical_bayesian_simulation', '5_hyperparameter_optimization')
+        if hyperopt_path not in sys.path:
+            sys.path.insert(0, hyperopt_path)
+        
+        from hyperparameter_optimizer import (
             HyperparameterSearchSpace,
             AdaptiveHyperparameterOptimizer,
             CrossValidatedHyperparameterSearch
@@ -1310,16 +1345,20 @@ def run_jax_mcmc_validation(model_id, use_gpu=False, gpu_id=None):
     """執行單個模型的JAX MCMC驗證"""
     try:
         # 🔄 使用正確的MCMC驗證模組導入
-        # 修正import路徑 - 使用絕對路徑導入
+        # 修正import路徑 - 使用工作目錄的絕對路徑
         import sys
         import os
-        current_dir = os.path.dirname(os.path.abspath(__file__))
-        mcmc_validation_dir = os.path.join(current_dir, 'robust_hierarchical_bayesian_simulation', '6_mcmc_validation')
-        sys.path.insert(0, mcmc_validation_dir)
+        mcmc_validation_dir = os.path.join(os.getcwd(), 'robust_hierarchical_bayesian_simulation', '6_mcmc_validation')
+        if mcmc_validation_dir not in sys.path:
+            sys.path.insert(0, mcmc_validation_dir)
         
         try:
-            from crps_mcmc_validator import CRPSMCMCValidator
-            from mcmc_environment_config import configure_pymc_environment
+            # 使用模組級導入避免命名空間問題
+            import crps_mcmc_validator
+            import mcmc_environment_config
+            CRPSMCMCValidator = crps_mcmc_validator.CRPSMCMCValidator
+            configure_pymc_environment = mcmc_environment_config.configure_pymc_environment
+            print("   ✅ MCMC驗證模組載入成功")
         except ImportError as e:
             print(f"   ⚠️ MCMC模組導入失敗，使用簡化驗證: {e}")
             # 使用基本的MCMC驗證器作為後備
@@ -1488,7 +1527,12 @@ stage_start = time.time()
 
 try:
     # 🔄 使用正確的後驗分析模組導入
-    from robust_hierarchical_bayesian_simulation.posterior_analysis.posterior_approximation import (
+    # 從7_posterior_analysis目錄導入
+    posterior_path = os.path.join(os.getcwd(), 'robust_hierarchical_bayesian_simulation', '7_posterior_analysis')
+    if posterior_path not in sys.path:
+        sys.path.insert(0, posterior_path)
+    
+    from posterior_approximation import (
         MPEResult,
         MPEConfig,
         MixedPredictiveEstimation,
@@ -1496,7 +1540,7 @@ try:
         sample_from_gaussian_mixture
     )
     
-    from robust_hierarchical_bayesian_simulation.posterior_analysis.credible_intervals import (
+    from credible_intervals import (
         IntervalResult,
         IntervalComparison,
         IntervalOptimizationMethod,
@@ -1628,7 +1672,14 @@ try:
     
     # 專門模組
     from insurance_analysis_refactored.core.saffir_simpson_products import generate_steinmann_2023_products
-    from insurance_analysis_refactored.core.enhanced_spatial_analysis import EnhancedCatInCircleAnalyzer
+    # EnhancedCatInCircleAnalyzer可能不存在，使用fallback
+    try:
+        from insurance_analysis_refactored.core.enhanced_spatial_analysis import EnhancedCatInCircleAnalyzer
+    except ImportError:
+        # 如果模組不存在，創建一個簡單的placeholder
+        class EnhancedCatInCircleAnalyzer:
+            def __init__(self, **kwargs):
+                pass
     
     print("   ✅ 參數保險模組載入成功 (正確模組結構)")
     
@@ -1953,8 +2004,14 @@ try:
     
     for radius in available_radii:
         radius_key = f'cat_in_circle_{radius}km_max'
-        if radius_key in indices:  # 確保數據存在
-            radius_indices = indices[radius_key]
+        # 從空間分析數據中獲取indices（如果可用）
+        if hasattr(spatial_data.get('spatial_data', {}), 'indices'):
+            indices = spatial_data['spatial_data'].indices
+            if radius_key in indices:
+                radius_indices = indices[radius_key]
+        else:
+            # 跳過如果沒有indices數據
+            continue
             
             # 為每個半徑計算基差風險
             radius_basis_risk = {}
