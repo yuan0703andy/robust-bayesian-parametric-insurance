@@ -22,6 +22,7 @@ Version: Academic Full Implementation
 """
 
 # %%
+import os
 import pickle
 import numpy as np
 import pandas as pd
@@ -240,11 +241,16 @@ else:
 
 # 設置GPU環境 
 if setup_gpu_environment:
-    gpu_config, execution_plan = setup_gpu_environment(enable_gpu=False)  # 使用CPU模式
-    framework = getattr(gpu_config, 'framework', 'CPU')
-    # 從 execution_plan 獲取工作進程數
-    total_cores = sum(plan.get('cores', 0) for plan in execution_plan.values()) if execution_plan else 1
-    print(f"計算環境: {framework}, 並行核心: {total_cores}")
+    try:
+        gpu_config, execution_plan = setup_gpu_environment(enable_gpu=False)  # 使用CPU模式
+        framework = getattr(gpu_config, 'framework', 'CPU')
+        # 從 execution_plan 獲取工作進程數
+        total_cores = sum(plan.get('cores', 0) for plan in execution_plan.values()) if execution_plan else 1
+        print(f"計算環境: {framework}, 並行核心: {total_cores}")
+    except Exception as e:
+        print(f"⚠️ GPU環境設置失敗，使用CPU模式: {e}")
+        framework = 'CPU'
+        total_cores = 1
 else:
     print("⚠️ GPU環境配置不可用，使用默認設置")
     gpu_config = execution_plan = None
@@ -465,45 +471,74 @@ else:
 
 n_hospitals = len(hospital_coords)
 
-# 檢查cat_in_circle數據結構
-if 'cat_in_circle_by_radius' in spatial_results:
-    cat_in_circle_data = spatial_results['cat_in_circle_by_radius'].get('50km', {})
+# ❌ 檢查真實數據可用性
+real_data_available = False
+missing_data_sources = []
+
+# 檢查CLIMADA數據是否存在
+climada_data_path = 'results/climada_data/climada_complete_data.pkl'
+if not os.path.exists(climada_data_path):
+    missing_data_sources.append("CLIMADA數據 (01_run_climada.py)")
+
+# 檢查spatial_data中的真實數據
+if 'spatial_data' in spatial_results:
+    spatial_data_obj = spatial_results['spatial_data']
+    
+    # 檢查關鍵數據是否為None
+    hazard_intensities = getattr(spatial_data_obj, 'hazard_intensities', None)
+    exposure_values = getattr(spatial_data_obj, 'exposure_values', None)  
+    observed_losses = getattr(spatial_data_obj, 'observed_losses', None)
+    
+    if hazard_intensities is None:
+        missing_data_sources.append("風險強度數據 (hazard_intensities)")
+    else:
+        print(f"✅ 發現真實風險強度數據: {hazard_intensities.shape}")
+        real_data_available = True
+        
+    if exposure_values is None:
+        missing_data_sources.append("暴險價值數據 (exposure_values)")
+    else:
+        print(f"✅ 發現真實暴險數據: {len(exposure_values)}個醫院")
+        real_data_available = True
+        
+    if observed_losses is None:
+        missing_data_sources.append("觀測損失數據 (observed_losses)")
+    else:
+        print(f"✅ 發現真實觀測損失數據: {observed_losses.shape}")
+        real_data_available = True
+
+# 如果沒有真實數據，停止執行並提供指導
+if not real_data_available or missing_data_sources:
+    print("\n❌ 缺少真實數據，無法進行貝葉斯分析!")
+    print("\n📋 缺少的數據源:")
+    for source in missing_data_sources:
+        print(f"  • {source}")
+    
+    print("\n🔧 解決方案:")
+    print("請按順序執行以下腳本來生成真實數據:")
+    print("  1. python 01_run_climada.py      # 生成CLIMADA風險與暴險數據")
+    print("  2. python 02_spatial_analysis.py # 生成空間分析數據")
+    print("  3. python 03_insurance_product.py # 生成保險產品")
+    print("  4. python 04_traditional_parm_insurance.py # 生成傳統分析")
+    print("  5. 然後重新執行此腳本")
+    
+    print("\n⚠️ 此腳本拒絕使用合成/假數據進行分析")
+    print("   請確保使用真實的CLIMADA模擬數據")
+    
+    # 停止執行
+    import sys
+    sys.exit(1)
 else:
-    # 創建備用cat_in_circle數據
-    cat_in_circle_data = {
-        'max_wind_speeds': np.random.beta(2, 5, n_events) * 100,
-        'event_intensities': np.random.gamma(2, 20, n_events)
-    }
-    print("⚠️ 使用備用cat_in_circle數據")
-hazard_intensities = np.zeros((n_hospitals, n_events))
+    # 使用真實數據進行分析
+    print(f"\n✅ 真實數據驗證通過，開始貝葉斯分析")
+    print(f"  • 風險強度數據: {hazard_intensities.shape if hazard_intensities is not None else '未載入'}")
+    print(f"  • 暴險價值數據: {len(exposure_values) if exposure_values is not None else '未載入'}個醫院")
+    print(f"  • 觀測損失數據: {observed_losses.shape if observed_losses is not None else '未載入'}")
 
-# 構建hazard intensities矩陣
-if impact_obj and hasattr(impact_obj, 'event_id'):
-    event_ids = impact_obj.event_id
-else:
-    event_ids = range(n_events)
-
-for i, event_id in enumerate(event_ids):
-    event_data = cat_in_circle_data.get(f'event_{event_id}', {})
-    for j, coord in enumerate(hospital_coords):
-        coord_key = f"({coord[0]:.6f}, {coord[1]:.6f})"
-        if coord_key in event_data:
-            hazard_intensities[j, i] = event_data[coord_key].get('max_wind_speed', wind_speeds[i])
-        else:
-            # 使用備用風速數據
-            hazard_intensities[j, i] = wind_speeds[i] * np.random.uniform(0.8, 1.2)
-
-# 設置exposure和觀測損失
-exposure_values = np.random.uniform(1e7, 5e7, n_hospitals)
-observed_losses = np.zeros((n_hospitals, n_events))
-
-for i in range(n_hospitals):
-    for j in range(n_events):
-        wind_speed = hazard_intensities[i, j]
-        if wind_speed > 25.7:
-            damage_ratio = 0.01 * ((wind_speed - 25.7) / 100) ** 3
-            base_loss = exposure_values[i] * damage_ratio
-            observed_losses[i, j] = np.random.lognormal(np.log(max(base_loss, 1)), 0.5)
+print(f"\n📊 真實數據概覽：")
+print(f"   風險強度: {hazard_intensities.shape} (max: {np.max(hazard_intensities):.1f})")
+print(f"   暴險價值: {len(exposure_values)} (總計: ${np.sum(exposure_values)/1e9:.1f}B)")
+print(f"   觀測損失: {observed_losses.shape} (非零: {np.count_nonzero(observed_losses)})")
 
 # 添加Cat-in-Circle數據到空間數據
 # 檢查 add_cat_in_circle_data 方法是否存在及其簽名
