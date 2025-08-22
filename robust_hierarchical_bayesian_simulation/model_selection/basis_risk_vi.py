@@ -400,9 +400,9 @@ class BasisRiskAwareVI:
                          y: np.ndarray,
                          epsilon: float,
                          basis_risk_type: str = 'weighted',
-                         n_iterations: int = 100) -> Dict:
+                         n_iterations: int = 1000) -> Dict:
         """
-        訓練單個 ε-contamination 模型
+        訓練單個 ε-contamination 模型 - 真正的VI實現
         
         Args:
             X: 輸入特徵 [N, d]
@@ -414,41 +414,122 @@ class BasisRiskAwareVI:
         Returns:
             訓練結果字典
         """
-        # 簡化版本的訓練（不需要 PyTorch）
+        import time
+        start_time = time.time()
+        
+        # 真正的VI：估計參數分布的變分參數
         model = EpsilonContaminationModel(epsilon)
         
-        # 初始化參數
-        np.random.seed(42)
-        theta = np.random.randn(self.n_params) * 0.1
+        # 變分參數：均值和對數方差
+        np.random.seed(42 + int(epsilon*1000))  # 不同epsilon用不同種子
+        mu_theta = np.random.randn(self.n_params) * 0.1
+        log_sigma_theta = np.full(self.n_params, -2.0)  # 初始方差較小
         
+        best_elbo = -np.inf
         best_basis_risk = np.inf
-        best_theta = theta.copy()
+        best_mu = mu_theta.copy()
+        best_log_sigma = log_sigma_theta.copy()
         
-        # 簡單的優化循環
+        learning_rate = 0.01
+        n_samples_per_iteration = 10
+        
+        print(f"      開始訓練 ε={epsilon:.3f}, 基差={basis_risk_type} (迭代={n_iterations})")
+        
+        # 真正的VI優化循環
         for iteration in range(n_iterations):
-            # 預測損失分布
-            loss_samples = model.predict_distribution(theta, X, 100)
+            # 1. 從變分分布中採樣參數
+            sigma_theta = np.exp(log_sigma_theta)
+            theta_samples = []
             
-            # 計算賠付分布
-            payout_samples = self.payout_function.calculate_payout_distribution(loss_samples)
+            for _ in range(n_samples_per_iteration):
+                theta_sample = mu_theta + sigma_theta * np.random.randn(self.n_params)
+                theta_samples.append(theta_sample)
             
-            # 計算基差風險
-            basis_risk = self.compute_basis_risk(y, payout_samples, basis_risk_type)
+            # 2. 計算ELBO及其梯度
+            elbo_total = 0
+            mu_grad = np.zeros_like(mu_theta)
+            log_sigma_grad = np.zeros_like(log_sigma_theta)
+            total_basis_risk = 0
             
-            # 更新最佳參數
-            if basis_risk < best_basis_risk:
-                best_basis_risk = basis_risk
-                best_theta = theta.copy()
+            for theta in theta_samples:
+                # 預測分布
+                loss_samples = model.predict_distribution(theta, X, 50)
+                payout_samples = self.payout_function.calculate_payout_distribution(loss_samples)
+                
+                # 計算似然 (負基差風險作為似然)
+                basis_risk = self.compute_basis_risk(y, payout_samples, basis_risk_type)
+                log_likelihood = -basis_risk / 1e9  # 標準化
+                
+                # 先驗 (標準高斯)
+                log_prior = -0.5 * np.sum(theta**2)
+                
+                # 變分分布熵
+                log_q = -0.5 * np.sum((theta - mu_theta)**2 / sigma_theta**2) - \
+                        0.5 * np.sum(np.log(2 * np.pi * sigma_theta**2))
+                
+                # ELBO = E[log p(y|θ)] + E[log p(θ)] - E[log q(θ)]
+                elbo = log_likelihood + log_prior - log_q
+                elbo_total += elbo
+                total_basis_risk += basis_risk
+                
+                # 梯度估計 (REINFORCE-style)
+                if elbo > -1e6:  # 避免數值不穩定
+                    reward = elbo + 1e6  # 偏移確保正數
+                    score_mu = (theta - mu_theta) / sigma_theta**2
+                    score_log_sigma = 0.5 * (((theta - mu_theta)/sigma_theta)**2 - 1)
+                    
+                    mu_grad += reward * score_mu
+                    log_sigma_grad += reward * score_log_sigma
             
-            # 簡單的參數更新（隨機擾動）
-            theta = theta + np.random.randn(*theta.shape) * 0.01 * (1 - iteration/n_iterations)
+            # 平均梯度
+            mu_grad /= n_samples_per_iteration
+            log_sigma_grad /= n_samples_per_iteration
+            elbo_total /= n_samples_per_iteration
+            avg_basis_risk = total_basis_risk / n_samples_per_iteration
+            
+            # 3. 參數更新 (Adam-like)
+            momentum = 0.9 if iteration > 0 else 0
+            if iteration == 0:
+                mu_velocity = np.zeros_like(mu_theta)
+                log_sigma_velocity = np.zeros_like(log_sigma_theta)
+            
+            mu_velocity = momentum * mu_velocity + (1-momentum) * mu_grad
+            log_sigma_velocity = momentum * log_sigma_velocity + (1-momentum) * log_sigma_grad
+            
+            # 自適應學習率
+            current_lr = learning_rate / (1 + iteration / 500)
+            
+            mu_theta += current_lr * mu_velocity
+            log_sigma_theta += current_lr * 0.5 * log_sigma_velocity  # 方差更新較慢
+            
+            # 防止方差過小或過大
+            log_sigma_theta = np.clip(log_sigma_theta, -5, 1)
+            
+            # 更新最佳結果
+            if elbo_total > best_elbo:
+                best_elbo = elbo_total
+                best_basis_risk = avg_basis_risk
+                best_mu = mu_theta.copy()
+                best_log_sigma = log_sigma_theta.copy()
+            
+            # 進度報告
+            if (iteration + 1) % 200 == 0:
+                print(f"        迭代 {iteration+1}: ELBO={elbo_total:.3f}, 基差風險={avg_basis_risk/1e6:.1f}M")
+        
+        training_time = time.time() - start_time
+        final_sigma = np.exp(best_log_sigma)
+        
+        print(f"      ✅ 訓練完成: {training_time:.1f}s, ELBO={best_elbo:.3f}, 基差風險={best_basis_risk/1e6:.1f}M")
         
         return {
             'epsilon': epsilon,
             'basis_risk_type': basis_risk_type,
             'final_basis_risk': best_basis_risk,
-            'best_theta': best_theta,
-            'converged': True
+            'best_theta': best_mu,
+            'theta_uncertainty': final_sigma,
+            'elbo': best_elbo,
+            'converged': True,
+            'training_time': training_time
         }
     
     def run_comprehensive_screening(self, X: np.ndarray, y: np.ndarray) -> Dict:
@@ -561,7 +642,7 @@ class BasisRiskAwareVI:
         for epsilon in self.epsilon_values:
             for basis_risk_type in self.basis_risk_types:
                 result = self.train_single_model(
-                    X, y, epsilon, basis_risk_type, n_iterations=50
+                    X, y, epsilon, basis_risk_type, n_iterations=1000
                 )
                 all_results.append(result)
         
