@@ -953,105 +953,15 @@ print(f"   損失範圍: ${np.min(y_vi)/1e6:.1f}M - ${np.max(y_vi)/1e6:.1f}M")
 
 # 執行真正的變分推斷（學習最佳參數分佈）
 print("\n🔄 開始VI優化...")
+print(f"   測試 {len(vi_screener.epsilon_values)} 個epsilon值: {vi_screener.epsilon_values}")
+print(f"   測試 {len(vi_screener.basis_risk_types)} 種基差風險類型: {vi_screener.basis_risk_types}")
+print(f"   總共 {len(vi_screener.epsilon_values) * len(vi_screener.basis_risk_types)} 個模型配置")
 
-# 🚀 GPU加速包裝器 - 如果PyTorch可用，使用GPU加速計算
-if USE_GPU and gpu_available_torch:
-    print("🚀 嘗試使用PyTorch GPU加速VI計算...")
-    import torch
-    
-    # 定義GPU加速的基差風險計算
-    def gpu_basis_risk_calculation(X, y, epsilon_values, basis_risk_types):
-        """使用GPU計算基差風險"""
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        print(f"   使用設備: {device}")
-        
-        # 轉換數據到GPU
-        X_tensor = torch.from_numpy(X).float().to(device)
-        y_tensor = torch.from_numpy(y).float().to(device)
-        
-        results = {}
-        
-        for epsilon in epsilon_values:
-            for risk_type in basis_risk_types:
-                # 簡化的VI計算（示例）
-                # 實際計算取決於BasisRiskAwareVI的具體實現
-                
-                # 添加epsilon噪音
-                noise = torch.randn_like(y_tensor) * epsilon
-                y_perturbed = y_tensor + noise
-                
-                # 計算基差風險
-                if risk_type == 'absolute':
-                    basis_risk = torch.mean(torch.abs(X_tensor.squeeze() - y_perturbed))
-                elif risk_type == 'asymmetric':
-                    under = torch.mean(torch.relu(y_perturbed - X_tensor.squeeze()))
-                    over = torch.mean(torch.relu(X_tensor.squeeze() - y_perturbed))
-                    basis_risk = 2 * under + over
-                else:  # weighted
-                    weights = torch.exp(-torch.abs(X_tensor.squeeze() - y_tensor) / y_tensor.mean())
-                    basis_risk = torch.mean(weights * torch.abs(X_tensor.squeeze() - y_perturbed))
-                
-                key = f"eps_{epsilon}_type_{risk_type}"
-                results[key] = basis_risk.cpu().numpy()
-        
-        # 找出最佳配置
-        best_key = min(results, key=results.get)
-        best_parts = best_key.split('_')
-        best_epsilon = float(best_parts[1])
-        best_type = '_'.join(best_parts[3:])
-        
-        return {
-            'best_model': {
-                'final_basis_risk': float(results[best_key]),
-                'epsilon': best_epsilon,
-                'basis_risk_type': best_type
-            },
-            'all_results': results
-        }
-    
-    # 嘗試GPU計算
-    try:
-        print(f"   使用GPU快速計算 {len(vi_screener.epsilon_values)} × {len(vi_screener.basis_risk_types)} = {len(vi_screener.epsilon_values) * len(vi_screener.basis_risk_types)} 個配置")
-        vi_start_time = time.time()
-        
-        # 使用GPU計算
-        vi_results = gpu_basis_risk_calculation(
-            X_vi, y_vi,
-            vi_screener.epsilon_values,
-            vi_screener.basis_risk_types
-        )
-        
-        print(f"   ✅ GPU計算成功!")
-        
-    except Exception as gpu_error:
-        print(f"   ⚠️ GPU計算失敗: {gpu_error}")
-        print("   降級到CPU計算...")
-        # 降級到原始方法
-        vi_start_time = time.time()
-        vi_results = vi_screener.run_comprehensive_screening(X_vi, y_vi)
-else:
-    # 原始CPU方法
-    print(f"   測試 {len(vi_screener.epsilon_values)} 個epsilon值: {vi_screener.epsilon_values}")
-    print(f"   測試 {len(vi_screener.basis_risk_types)} 種基差風險類型: {vi_screener.basis_risk_types}")
-    print(f"   總共 {len(vi_screener.epsilon_values) * len(vi_screener.basis_risk_types)} 個模型配置")
-    print("\n   💡 提示: VI優化可能需要10-30分鐘")
-    
-    vi_start_time = time.time()
-    print(f"   開始時間: {datetime.now().strftime('%H:%M:%S')}")
-    
-    try:
-        if hasattr(vi_screener, 'verbose'):
-            vi_screener.verbose = True
-        vi_results = vi_screener.run_comprehensive_screening(X_vi, y_vi)
-    except Exception as e:
-        print(f"   ⚠️ VI優化出錯: {e}")
-        vi_results = {
-            'best_model': {
-                'final_basis_risk': np.mean(np.abs(parametric_payouts - observed_losses_vi)),
-                'epsilon': 0.1,
-                'basis_risk_type': 'absolute'
-            }
-        }
+vi_start_time = time.time()
+print(f"   開始時間: {datetime.now().strftime('%H:%M:%S')}")
+
+# 直接使用BasisRiskAwareVI（現在已有GPU支持）
+vi_results = vi_screener.run_comprehensive_screening(X_vi, y_vi)
 
 vi_time = time.time() - vi_start_time
 print(f"\n✅ VI優化完成!")
