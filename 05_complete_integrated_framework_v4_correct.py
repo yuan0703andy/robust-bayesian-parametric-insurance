@@ -248,9 +248,43 @@ else:
     config = None
 
 # 設置GPU環境 
-# 使用環境變數或參數控制GPU使用
+# 自動檢測GPU或使用環境變數
 import os
-USE_GPU = os.environ.get('USE_GPU', 'false').lower() == 'true'
+
+# 檢查是否有CUDA可用
+try:
+    import torch
+    gpu_available_torch = torch.cuda.is_available()
+    gpu_count = torch.cuda.device_count() if gpu_available_torch else 0
+    print(f"🔍 PyTorch GPU檢測: {gpu_count} 個GPU可用" if gpu_count > 0 else "⚠️ PyTorch未檢測到GPU")
+except ImportError:
+    gpu_available_torch = False
+    gpu_count = 0
+    print("⚠️ PyTorch未安裝")
+
+# 檢查JAX GPU
+try:
+    import jax
+    gpu_available_jax = len(jax.devices('gpu')) > 0
+    if gpu_available_jax:
+        print(f"🔍 JAX GPU檢測: {len(jax.devices('gpu'))} 個GPU可用")
+except:
+    gpu_available_jax = False
+
+# 決定是否使用GPU：優先順序 - 環境變數 > 自動檢測
+USE_GPU = os.environ.get('USE_GPU', 'auto').lower()
+if USE_GPU == 'auto':
+    USE_GPU = gpu_available_torch or gpu_available_jax
+    if USE_GPU:
+        print("✅ 自動啟用GPU加速")
+    else:
+        print("💻 未檢測到可用GPU，使用CPU")
+elif USE_GPU == 'true':
+    USE_GPU = True
+    print("🚀 強制啟用GPU (通過環境變數)")
+else:
+    USE_GPU = False
+    print("💻 強制使用CPU (通過環境變數)")
 
 if setup_gpu_environment:
     try:
@@ -1195,7 +1229,8 @@ integrated_results = {
         }
     },
     'epsilon_contamination_analysis': {
-        'estimation_methods': epsilon_estimates,
+        'statistical_epsilon': statistical_epsilon if 'statistical_epsilon' in locals() else None,
+        'contamination_epsilon': contamination_epsilon if 'contamination_epsilon' in locals() else None,
         'final_epsilon': final_epsilon
     },
     'vi_screening_results': vi_results,
