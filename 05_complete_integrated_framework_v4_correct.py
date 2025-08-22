@@ -820,23 +820,31 @@ elif isinstance(products_data, dict) and 'products_df' in products_data:
 else:
     raise ValueError(f"不支援的產品數據格式: {type(products_data)}")
 
-# 準備VI篩選數據
-parametric_indices = []
-parametric_payouts = []
-observed_losses_vi = []
+# 準備VI篩選數據（訓練+驗證）
+parametric_indices_train = []
+parametric_payouts_train = []
+observed_losses_vi_train = []
 
-# 使用訓練數據進行VI分析
-print(f"📊 準備VI數據，使用訓練集數據...")
+parametric_indices_val = []
+parametric_payouts_val = []
+observed_losses_vi_val = []
+
+# 使用訓練+驗證數據進行VI分析
+print(f"📊 準備VI數據，同時生成訓練和驗證集...")
 print(f"   醫院數: {train_data['hazard_intensities'].shape[0]}")
 print(f"   訓練事件數: {train_data['hazard_intensities'].shape[1]}")
 print(f"   驗證事件數: {val_data['hazard_intensities'].shape[1]}")
 
-# 使用所有訓練數據進行VI (已經是優化後的樣本)
+# 提取訓練和驗證數據
 train_hazard = train_data['hazard_intensities']
 train_losses = train_data['observed_losses']
-selected_events = np.arange(train_hazard.shape[1])  # 使用所有訓練事件
+val_hazard = val_data['hazard_intensities']
+val_losses = val_data['observed_losses']
 
-print(f"   使用 {len(selected_events)} 個訓練事件進行VI分析")
+selected_events_train = np.arange(train_hazard.shape[1])  # 所有訓練事件
+selected_events_val = np.arange(val_hazard.shape[1])      # 所有驗證事件
+
+print(f"   訓練事件: {len(selected_events_train)}, 驗證事件: {len(selected_events_val)}")
 
 # 隨機抽取產品進行VI分析 (減少計算時間)
 max_products_for_vi = 50  # 恢復到50個產品
@@ -850,12 +858,18 @@ else:
 # 添加進度追踪
 import time
 from datetime import datetime, timedelta
-print(f"\n📊 開始處理 {len(selected_products)} × {len(selected_events)} = {len(selected_products) * len(selected_events):,} 個樣本")
+total_train_samples = len(selected_products) * len(selected_events_train)
+total_val_samples = len(selected_products) * len(selected_events_val)
+total_samples = total_train_samples + total_val_samples
+
+print(f"\n📊 開始處理 {len(selected_products)} 產品:")
+print(f"   訓練樣本: {len(selected_products)} × {len(selected_events_train)} = {total_train_samples:,}")
+print(f"   驗證樣本: {len(selected_products)} × {len(selected_events_val)} = {total_val_samples:,}")
+print(f"   總樣本數: {total_samples:,}")
 print(f"   開始時間: {datetime.now().strftime('%H:%M:%S')}")
 
 # 進度條設置
 total_products = len(selected_products)
-total_samples = total_products * len(selected_events)
 processed_samples = 0
 start_time = time.time()
 
@@ -878,10 +892,11 @@ for product_idx, (idx, product) in enumerate(product_iterator, 1):
     radius = product['radius_km'] 
     max_payout = product['max_payout']
     
-    for event_idx in selected_events:
+    # 處理訓練數據
+    for event_idx in selected_events_train:
         # 使用訓練數據中所有醫院在該事件的最大風速作為Cat-in-Circle指數
         max_wind_in_radius = np.max(train_hazard[:, event_idx])
-        parametric_indices.append(max_wind_in_radius)
+        parametric_indices_train.append(max_wind_in_radius)
         
         # 計算階段式賠付 (Steinmann 2023 標準)
         total_payout = 0
@@ -891,10 +906,31 @@ for product_idx, (idx, product) in enumerate(product_iterator, 1):
                 total_payout = max_payout * payout_ratios[i]
                 break
         
-        parametric_payouts.append(total_payout)
+        parametric_payouts_train.append(total_payout)
         # 使用該事件在所有醫院的總觀測損失
         total_observed_loss = np.sum(train_losses[:, event_idx])
-        observed_losses_vi.append(total_observed_loss)
+        observed_losses_vi_train.append(total_observed_loss)
+        
+        processed_samples += 1
+    
+    # 處理驗證數據
+    for event_idx in selected_events_val:
+        # 使用驗證數據中所有醫院在該事件的最大風速作為Cat-in-Circle指數
+        max_wind_in_radius = np.max(val_hazard[:, event_idx])
+        parametric_indices_val.append(max_wind_in_radius)
+        
+        # 計算階段式賠付 (同樣的產品配置)
+        total_payout = 0
+        # 按閾值從高到低檢查，使用對應的賠付比例
+        for i in range(len(thresholds)-1, -1, -1):
+            if max_wind_in_radius >= thresholds[i]:
+                total_payout = max_payout * payout_ratios[i]
+                break
+        
+        parametric_payouts_val.append(total_payout)
+        # 使用該事件在所有醫院的總觀測損失
+        total_observed_loss = np.sum(val_losses[:, event_idx])
+        observed_losses_vi_val.append(total_observed_loss)
         
         processed_samples += 1
     
@@ -916,16 +952,23 @@ for product_idx, (idx, product) in enumerate(product_iterator, 1):
               f"速度: {samples_per_sec:.0f} 樣本/秒 | "
               f"預計剩餘: {eta_str}")
 
-parametric_indices = np.array(parametric_indices)
-parametric_payouts = np.array(parametric_payouts)
-observed_losses_vi = np.array(observed_losses_vi)
+# 轉換為NumPy數組
+parametric_indices_train = np.array(parametric_indices_train)
+parametric_payouts_train = np.array(parametric_payouts_train)
+observed_losses_vi_train = np.array(observed_losses_vi_train)
+
+parametric_indices_val = np.array(parametric_indices_val)
+parametric_payouts_val = np.array(parametric_payouts_val)
+observed_losses_vi_val = np.array(observed_losses_vi_val)
 
 # 顯示處理完成統計
 total_time = time.time() - start_time
 print(f"\n✅ 樣本處理完成!")
 print(f"   總處理時間: {str(timedelta(seconds=int(total_time)))}")
 print(f"   處理速度: {total_samples/total_time:.0f} 樣本/秒")
-print(f"   總樣本數: {len(parametric_indices):,}")
+print(f"   訓練樣本數: {len(parametric_indices_train):,}")
+print(f"   驗證樣本數: {len(parametric_indices_val):,}")
+print(f"   總樣本數: {len(parametric_indices_train) + len(parametric_indices_val):,}")
 
 # 🎯 執行真正的基差風險導向變分推斷
 print("🧠 開始真正的變分推斷優化...")
@@ -963,12 +1006,17 @@ if USE_GPU and (gpu_available_torch or gpu_available_jax):
 else:
     print("   💻 使用CPU計算")
 
-# 準備VI輸入數據：風速特徵 + 真實損失
-X_vi = parametric_indices.reshape(-1, 1)  # [N, 1] 風速特徵
-y_vi = observed_losses_vi  # [N] 真實損失
+# 準備VI輸入數據：風速特徵 + 真實損失（訓練+驗證）
+X_vi_train = parametric_indices_train.reshape(-1, 1)  # [N_train, 1] 風速特徵
+y_vi_train = observed_losses_vi_train  # [N_train] 真實損失
 
-print(f"   VI訓練數據: {X_vi.shape[0]} 樣本, {X_vi.shape[1]} 特徵")
-print(f"   損失範圍: ${np.min(y_vi)/1e6:.1f}M - ${np.max(y_vi)/1e6:.1f}M")
+X_vi_val = parametric_indices_val.reshape(-1, 1)      # [N_val, 1] 風速特徵
+y_vi_val = observed_losses_vi_val      # [N_val] 真實損失
+
+print(f"   VI訓練數據: {X_vi_train.shape[0]} 樣本, {X_vi_train.shape[1]} 特徵")
+print(f"   VI驗證數據: {X_vi_val.shape[0]} 樣本, {X_vi_val.shape[1]} 特徵")
+print(f"   訓練損失範圍: ${np.min(y_vi_train)/1e6:.1f}M - ${np.max(y_vi_train)/1e6:.1f}M")
+print(f"   驗證損失範圍: ${np.min(y_vi_val)/1e6:.1f}M - ${np.max(y_vi_val)/1e6:.1f}M")
 
 # 執行真正的變分推斷（學習最佳參數分佈）
 print("\n🔄 開始VI優化...")
@@ -979,8 +1027,11 @@ print(f"   總共 {len(vi_screener.epsilon_values) * len(vi_screener.basis_risk_
 vi_start_time = time.time()
 print(f"   開始時間: {datetime.now().strftime('%H:%M:%S')}")
 
-# 直接使用BasisRiskAwareVI（現在已有GPU支持）
-vi_results = vi_screener.run_comprehensive_screening(X_vi, y_vi)
+# 直接使用BasisRiskAwareVI（現在已有GPU支持和驗證集監督）
+vi_results = vi_screener.run_comprehensive_screening(
+    X_vi_train, y_vi_train, 
+    X_val=X_vi_val, y_val=y_vi_val
+)
 
 vi_time = time.time() - vi_start_time
 print(f"\n✅ VI優化完成!")

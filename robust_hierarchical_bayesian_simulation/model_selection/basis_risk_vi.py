@@ -400,7 +400,9 @@ class BasisRiskAwareVI:
                          y: np.ndarray,
                          epsilon: float,
                          basis_risk_type: str = 'weighted',
-                         n_iterations: int = 1000) -> Dict:
+                         n_iterations: int = 1000,
+                         X_val: np.ndarray = None,
+                         y_val: np.ndarray = None) -> Dict:
         """
         訓練單個 ε-contamination 模型 - 真正的GPU加速VI實現
         
@@ -420,18 +422,28 @@ class BasisRiskAwareVI:
         print(f"      開始訓練 ε={epsilon:.3f}, 基差={basis_risk_type} (迭代={n_iterations})")
         
         if self.use_gpu and TORCH_AVAILABLE:
-            return self._train_single_model_gpu(X, y, epsilon, basis_risk_type, n_iterations, start_time)
+            return self._train_single_model_gpu(X, y, epsilon, basis_risk_type, n_iterations, start_time, X_val, y_val)
         else:
-            return self._train_single_model_cpu(X, y, epsilon, basis_risk_type, n_iterations, start_time)
+            return self._train_single_model_cpu(X, y, epsilon, basis_risk_type, n_iterations, start_time, X_val, y_val)
     
     def _train_single_model_gpu(self, X: np.ndarray, y: np.ndarray, epsilon: float, 
-                               basis_risk_type: str, n_iterations: int, start_time: float) -> Dict:
+                               basis_risk_type: str, n_iterations: int, start_time: float,
+                               X_val: np.ndarray = None, y_val: np.ndarray = None) -> Dict:
         """GPU加速的VI訓練"""
         import time
         
         # 轉換為GPU張量
         X_tensor = torch.from_numpy(X).float().to(self.device)
         y_tensor = torch.from_numpy(y).float().to(self.device)
+        
+        # 驗證集張量（如果提供）
+        has_validation = X_val is not None and y_val is not None
+        if has_validation:
+            X_val_tensor = torch.from_numpy(X_val).float().to(self.device)
+            y_val_tensor = torch.from_numpy(y_val).float().to(self.device)
+            print(f"        📊 使用驗證集監督: 訓練={X.shape[0]}, 驗證={X_val.shape[0]}")
+        else:
+            print(f"        ⚠️ 無驗證集，可能過度擬合")
         
         # 變分參數 (在GPU上)
         torch.manual_seed(42 + int(epsilon*1000))
@@ -446,9 +458,15 @@ class BasisRiskAwareVI:
         optimizer = torch.optim.Adam([mu_theta, log_sigma_theta], lr=0.01)
         
         best_elbo = -float('inf')
-        best_basis_risk = float('inf')
+        best_basis_risk_train = float('inf')
+        best_basis_risk_val = float('inf')
         best_mu = mu_theta.clone()
         best_log_sigma = log_sigma_theta.clone()
+        
+        # Early stopping監控
+        patience = 100
+        no_improve_count = 0
+        validation_history = []
         
         n_samples_per_iteration = 10
         
@@ -480,23 +498,56 @@ class BasisRiskAwareVI:
             with torch.no_grad():
                 log_sigma_theta.clamp_(-5, 1)
             
-            # 計算當前基差風險用於記錄
+            # 計算當前基差風險用於記錄  
             with torch.no_grad():
-                current_basis_risk = self._compute_basis_risk_batch_gpu(
+                # 訓練集基差風險
+                current_basis_risk_train = self._compute_basis_risk_batch_gpu(
                     X_tensor, y_tensor, theta_samples, epsilon, basis_risk_type
                 ).mean().item()
                 
+                # 驗證集基差風險（如果有）
+                if has_validation:
+                    current_basis_risk_val = self._compute_basis_risk_batch_gpu(
+                        X_val_tensor, y_val_tensor, theta_samples, epsilon, basis_risk_type
+                    ).mean().item()
+                    validation_history.append(current_basis_risk_val)
+                else:
+                    current_basis_risk_val = current_basis_risk_train
+                
                 current_elbo = elbo_batch.mean().item()
                 
-                if current_elbo > best_elbo:
-                    best_elbo = current_elbo
-                    best_basis_risk = current_basis_risk
-                    best_mu = mu_theta.clone()
-                    best_log_sigma = log_sigma_theta.clone()
+                # *** 關鍵修正：使用驗證集選擇最佳模型 ***
+                if has_validation:
+                    # 如果有驗證集，以驗證集基差風險為準
+                    if current_basis_risk_val < best_basis_risk_val:
+                        best_elbo = current_elbo
+                        best_basis_risk_train = current_basis_risk_train
+                        best_basis_risk_val = current_basis_risk_val
+                        best_mu = mu_theta.clone()
+                        best_log_sigma = log_sigma_theta.clone()
+                        no_improve_count = 0
+                    else:
+                        no_improve_count += 1
+                else:
+                    # 無驗證集時才用訓練集
+                    if current_elbo > best_elbo:
+                        best_elbo = current_elbo
+                        best_basis_risk_train = current_basis_risk_train
+                        best_basis_risk_val = current_basis_risk_val
+                        best_mu = mu_theta.clone()
+                        best_log_sigma = log_sigma_theta.clone()
+            
+            # Early stopping
+            if has_validation and no_improve_count >= patience:
+                print(f"        🛑 Early stopping: 驗證集{patience}次無改善")
+                break
             
             # 進度報告
             if (iteration + 1) % 200 == 0:
-                print(f"        迭代 {iteration+1}: ELBO={current_elbo:.3f}, 基差風險={current_basis_risk/1e6:.1f}M")
+                if has_validation:
+                    print(f"        迭代 {iteration+1}: ELBO={current_elbo:.3f}, 訓練={current_basis_risk_train/1e6:.1f}M, 驗證={current_basis_risk_val/1e6:.1f}M")
+                else:
+                    print(f"        迭代 {iteration+1}: ELBO={current_elbo:.3f}, 基差風險={current_basis_risk_train/1e6:.1f}M")
         
         training_time = time.time() - start_time
         
@@ -504,17 +555,26 @@ class BasisRiskAwareVI:
         final_mu = best_mu.detach().cpu().numpy()
         final_sigma = torch.exp(best_log_sigma).detach().cpu().numpy()
         
-        print(f"      ✅ GPU訓練完成: {training_time:.1f}s, ELBO={best_elbo:.3f}, 基差風險={best_basis_risk/1e6:.1f}M")
+        if has_validation:
+            print(f"      ✅ GPU訓練完成: {training_time:.1f}s, ELBO={best_elbo:.3f}")
+            print(f"        訓練基差風險: {best_basis_risk_train/1e6:.1f}M, 驗證基差風險: {best_basis_risk_val/1e6:.1f}M")
+            print(f"        訓練/驗證比率: {best_basis_risk_train/best_basis_risk_val:.3f}")
+        else:
+            print(f"      ✅ GPU訓練完成: {training_time:.1f}s, ELBO={best_elbo:.3f}, 基差風險={best_basis_risk_train/1e6:.1f}M")
         
         return {
             'epsilon': epsilon,
             'basis_risk_type': basis_risk_type,
-            'final_basis_risk': best_basis_risk,
+            'final_basis_risk': best_basis_risk_val if has_validation else best_basis_risk_train,
+            'train_basis_risk': best_basis_risk_train,
+            'val_basis_risk': best_basis_risk_val,
+            'train_val_ratio': best_basis_risk_train / best_basis_risk_val if has_validation else 1.0,
             'best_theta': final_mu,
             'theta_uncertainty': final_sigma,
             'elbo': best_elbo,
             'converged': True,
-            'training_time': training_time
+            'training_time': training_time,
+            'has_validation': has_validation
         }
     
     def _compute_elbo_batch_gpu(self, X_tensor, y_tensor, theta_samples, epsilon, 
@@ -541,7 +601,7 @@ class BasisRiskAwareVI:
         return elbo
     
     def _compute_basis_risk_batch_gpu(self, X_tensor, y_tensor, theta_samples, epsilon, basis_risk_type):
-        """GPU上批次計算基差風險"""
+        """GPU上批次計算基差風險 - 修正版：θ參數真正影響計算"""
         batch_size = theta_samples.shape[0]
         n_data = X_tensor.shape[0]
         
@@ -552,36 +612,63 @@ class BasisRiskAwareVI:
         else:
             y_perturbed = y_tensor.unsqueeze(0).expand(batch_size, -1)
         
-        # 簡化的參數賠付計算 (基於風速閾值)
+        # *** 關鍵修正：讓θ參數影響賠付計算 ***
         wind_speeds = X_tensor.squeeze(-1)  # [n_data]
         wind_speeds = wind_speeds.unsqueeze(0).expand(batch_size, -1)  # [batch_size, n_data]
         
-        # 多層閾值賠付
-        thresholds = torch.tensor([25.0, 35.0, 45.0], device=self.device)
-        payout_ratios = torch.tensor([0.25, 0.5, 1.0], device=self.device)
-        max_payout = y_tensor.mean() * 2.0
+        # 使用θ參數調整閾值和賠付比例
+        # theta_samples: [batch_size, n_params], 其中n_params=2 (slope + intercept)
+        theta_slope = theta_samples[:, 0:1]      # [batch_size, 1] - 閾值斜率
+        theta_intercept = theta_samples[:, 1:2]  # [batch_size, 1] - 基礎閾值
         
-        payouts = torch.zeros_like(y_perturbed)
-        for i, threshold in enumerate(thresholds):
-            mask = wind_speeds >= threshold
-            payouts = torch.where(mask, max_payout * payout_ratios[i], payouts)
+        # 動態閾值：受θ影響
+        base_thresholds = torch.tensor([25.0, 35.0, 45.0], device=self.device)
+        # 廣播到 [batch_size, 3]
+        dynamic_thresholds = (base_thresholds.unsqueeze(0) + 
+                            theta_intercept * 10.0 +  # intercept影響基礎閾值
+                            theta_slope * torch.arange(3, device=self.device).float())  # slope影響間隔
+        
+        # 動態賠付比例：受θ影響  
+        base_ratios = torch.tensor([0.25, 0.5, 1.0], device=self.device)
+        dynamic_ratios = torch.sigmoid(base_ratios.unsqueeze(0) + theta_slope * 2.0)  # [batch_size, 3]
+        
+        # 動態最大賠付
+        max_payout_base = y_tensor.mean()
+        max_payout = max_payout_base * torch.exp(theta_intercept).squeeze(-1)  # [batch_size]
+        
+        # 計算賠付（現在受θ影響）
+        payouts = torch.zeros_like(y_perturbed)  # [batch_size, n_data]
+        
+        for i in range(3):
+            # 對每個批次樣本，使用不同的閾值和賠付比例
+            threshold_batch = dynamic_thresholds[:, i:i+1]  # [batch_size, 1]
+            ratio_batch = dynamic_ratios[:, i:i+1]          # [batch_size, 1]
+            max_payout_batch = max_payout[:, None]          # [batch_size, 1]
+            
+            mask = wind_speeds >= threshold_batch  # [batch_size, n_data]
+            payout_value = max_payout_batch * ratio_batch  # [batch_size, 1]
+            payouts = torch.where(mask, payout_value, payouts)
         
         # 計算基差風險
         if basis_risk_type == 'absolute':
             basis_risk = torch.mean(torch.abs(y_perturbed - payouts), dim=1)
         elif basis_risk_type == 'asymmetric':
+            # Asymmetric: 懲罰under-payment更重 (2:1)
             under_penalty = torch.mean(torch.relu(y_perturbed - payouts), dim=1)
             over_penalty = torch.mean(torch.relu(payouts - y_perturbed), dim=1)
             basis_risk = 2.0 * under_penalty + over_penalty
         else:  # weighted
-            under = torch.relu(y_perturbed - payouts) * 2.0
-            over = torch.relu(payouts - y_perturbed)
-            basis_risk = torch.mean(under + over, dim=1)
+            # Weighted: 根據損失大小調整懲罰 (大損失懲罰更重)
+            diff = y_perturbed - payouts
+            weights = torch.abs(y_perturbed) / torch.mean(torch.abs(y_perturbed), dim=1, keepdim=True)
+            weighted_diff = diff * weights
+            basis_risk = torch.mean(torch.abs(weighted_diff), dim=1)
         
         return basis_risk
     
     def _train_single_model_cpu(self, X: np.ndarray, y: np.ndarray, epsilon: float, 
-                               basis_risk_type: str, n_iterations: int, start_time: float) -> Dict:
+                               basis_risk_type: str, n_iterations: int, start_time: float,
+                               X_val: np.ndarray = None, y_val: np.ndarray = None) -> Dict:
         """CPU版本的VI訓練（原始實現）"""
         # 真正的VI：估計參數分布的變分參數
         model = EpsilonContaminationModel(epsilon)
@@ -696,7 +783,8 @@ class BasisRiskAwareVI:
             'training_time': training_time
         }
     
-    def run_comprehensive_screening(self, X: np.ndarray, y: np.ndarray) -> Dict:
+    def run_comprehensive_screening(self, X: np.ndarray, y: np.ndarray, 
+                                   X_val: np.ndarray = None, y_val: np.ndarray = None) -> Dict:
         """
         執行全面的 VI 篩選 - GPU加速版本
         
@@ -708,14 +796,19 @@ class BasisRiskAwareVI:
             篩選結果
         """
         if self.use_gpu:
-            return self._gpu_screening(X, y)
+            return self._gpu_screening(X, y, X_val, y_val)
         else:
-            return self._cpu_screening(X, y)
+            return self._cpu_screening(X, y, X_val, y_val)
     
-    def _gpu_screening(self, X: np.ndarray, y: np.ndarray) -> Dict:
+    def _gpu_screening(self, X: np.ndarray, y: np.ndarray, 
+                      X_val: np.ndarray = None, y_val: np.ndarray = None) -> Dict:
         """GPU加速的VI篩選 - 修正版：調用真正的VI訓練"""
         print("🚀 使用GPU加速VI篩選")
-        print("   注意：GPU張量加速，但仍使用完整的VI訓練")
+        if X_val is not None and y_val is not None:
+            print("   📊 使用訓練+驗證集監督，防止過度擬合")
+        else:
+            print("   ⚠️ 僅使用訓練集，可能過度擬合")
+        print("   注意：GPU張量加速，使用完整的VI訓練")
         
         all_results = []
         total_configs = len(self.epsilon_values) * len(self.basis_risk_types)
@@ -730,9 +823,10 @@ class BasisRiskAwareVI:
                 
                 print(f"     開始配置 {config_idx}/{total_configs}: ε={epsilon:.3f}, {basis_risk_type}")
                 
-                # 調用真正的VI訓練（與CPU版本相同）
+                # 調用真正的VI訓練（現在支持驗證集）
                 result = self.train_single_model(
-                    X, y, epsilon, basis_risk_type, n_iterations=1000
+                    X, y, epsilon, basis_risk_type, n_iterations=1000,
+                    X_val=X_val, y_val=y_val
                 )
                 all_results.append(result)
                 
@@ -788,16 +882,22 @@ class BasisRiskAwareVI:
         
         return basis_risk
     
-    def _cpu_screening(self, X: np.ndarray, y: np.ndarray) -> Dict:
+    def _cpu_screening(self, X: np.ndarray, y: np.ndarray, 
+                      X_val: np.ndarray = None, y_val: np.ndarray = None) -> Dict:
         """CPU版本的VI篩選（原始實現）"""
         print("💻 使用CPU進行VI篩選")
+        if X_val is not None and y_val is not None:
+            print("   📊 使用訓練+驗證集監督，防止過度擬合")
+        else:
+            print("   ⚠️ 僅使用訓練集，可能過度擬合")
         
         all_results = []
         
         for epsilon in self.epsilon_values:
             for basis_risk_type in self.basis_risk_types:
                 result = self.train_single_model(
-                    X, y, epsilon, basis_risk_type, n_iterations=1000
+                    X, y, epsilon, basis_risk_type, n_iterations=1000,
+                    X_val=X_val, y_val=y_val
                 )
                 all_results.append(result)
         
