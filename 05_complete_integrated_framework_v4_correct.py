@@ -248,20 +248,38 @@ else:
     config = None
 
 # 設置GPU環境 
+# 使用環境變數或參數控制GPU使用
+import os
+USE_GPU = os.environ.get('USE_GPU', 'false').lower() == 'true'
+
 if setup_gpu_environment:
     try:
-        gpu_config, execution_plan = setup_gpu_environment(enable_gpu=False)  # 使用CPU模式
-        framework = getattr(gpu_config, 'framework', 'CPU')
-        # 從 execution_plan 獲取工作進程數
-        total_cores = sum(plan.get('cores', 0) for plan in execution_plan.values()) if execution_plan else 1
-        print(f"計算環境: {framework}, 並行核心: {total_cores}")
+        # 根據環境變數決定是否使用GPU
+        gpu_config, execution_plan = setup_gpu_environment(enable_gpu=USE_GPU)
+        framework = getattr(gpu_config, 'framework', 'GPU' if USE_GPU else 'CPU')
+        
+        # 顯示詳細的計算環境資訊
+        if USE_GPU and hasattr(gpu_config, 'gpu_available') and gpu_config.gpu_available:
+            print(f"🚀 GPU加速已啟用")
+            print(f"   框架: {framework}")
+            print(f"   GPU設備: {getattr(gpu_config, 'device_count', 'N/A')} 個")
+            print(f"   GPU型號: {getattr(gpu_config, 'gpu_name', 'N/A')}")
+        else:
+            # 從 execution_plan 獲取工作進程數
+            total_cores = sum(plan.get('cores', 0) for plan in execution_plan.values()) if execution_plan else 1
+            print(f"💻 CPU模式")
+            print(f"   框架: {framework}")
+            print(f"   並行核心: {total_cores}")
+            
     except Exception as e:
         print(f"⚠️ GPU環境設置失敗，使用CPU模式: {e}")
         framework = 'CPU'
         total_cores = 1
+        USE_GPU = False
 else:
-    print("⚠️ GPU環境配置不可用，使用默認設置")
+    print("⚠️ GPU環境配置不可用，使用默認CPU設置")
     gpu_config = execution_plan = None
+    USE_GPU = False
 
 # =============================================================================
 # 階段1: 數據處理
@@ -725,9 +743,14 @@ selected_events = np.arange(train_hazard.shape[1])  # 使用所有訓練事件
 
 print(f"   使用 {len(selected_events)} 個訓練事件進行VI分析")
 
-# 使用所有產品進行完整VI分析
-selected_products = products_df  # 使用全部350個產品
-print(f"   使用全部 {len(selected_products)} 個產品進行VI分析")
+# 隨機抽取產品進行VI分析 (減少計算時間)
+max_products_for_vi = 50  # 隨機抽取50個產品
+if len(products_df) > max_products_for_vi:
+    selected_products = products_df.sample(n=max_products_for_vi, random_state=42)
+    print(f"   隨機抽取 {max_products_for_vi} 個產品進行VI分析 (總共{len(products_df)}個可用)")
+else:
+    selected_products = products_df
+    print(f"   使用全部 {len(selected_products)} 個產品進行VI分析")
 
 for idx, product in selected_products.iterrows():
     thresholds = product['trigger_thresholds']
@@ -761,11 +784,24 @@ observed_losses_vi = np.array(observed_losses_vi)
 print("🧠 開始真正的變分推斷優化...")
 print("   使用梯度下降學習最佳保險產品參數分佈")
 
-vi_screener = BasisRiskAwareVI(
-    n_features=1,  # 風速作為單一特徵
-    epsilon_values=[0.0, 0.05, 0.10, 0.15, 0.20],  # ε-contamination levels
-    basis_risk_types=['absolute', 'asymmetric', 'weighted']  # 不同基差風險類型
-)
+# 根據GPU可用性配置VI
+vi_kwargs = {
+    'n_features': 1,  # 風速作為單一特徵
+    'epsilon_values': [0.0, 0.05, 0.10, 0.15, 0.20],  # ε-contamination levels
+    'basis_risk_types': ['absolute', 'asymmetric', 'weighted']  # 不同基差風險類型
+}
+
+# 如果GPU可用，添加GPU相關參數
+if USE_GPU and gpu_config and getattr(gpu_config, 'gpu_available', False):
+    vi_kwargs['device'] = 'cuda'  # 或 'gpu'，取決於框架
+    vi_kwargs['use_gpu'] = True
+    print("   🚀 VI將使用GPU加速")
+else:
+    vi_kwargs['device'] = 'cpu'
+    vi_kwargs['use_gpu'] = False
+    print("   💻 VI將使用CPU計算")
+
+vi_screener = BasisRiskAwareVI(**vi_kwargs)
 
 # 準備VI輸入數據：風速特徵 + 真實損失
 X_vi = parametric_indices.reshape(-1, 1)  # [N, 1] 風速特徵
@@ -956,26 +992,43 @@ print(f"\n✅ VI算法超參數優化完成")
 # =============================================================================
 
 print("\n階段6: MCMC驗證與收斂診斷")
+print("   目標：使用MCMC驗證優化後VI模型的後驗分佈")
+
+# 配置MCMC採樣器
+mcmc_kwargs = {
+    'n_samples': config.mcmc_n_samples,
+    'n_chains': config.mcmc_n_chains,
+    'target_accept': config.mcmc_target_accept
+}
+
+# 如果GPU可用，添加GPU相關參數
+if USE_GPU and gpu_config and getattr(gpu_config, 'gpu_available', False):
+    mcmc_kwargs['device'] = 'cuda'
+    mcmc_kwargs['use_gpu'] = True
+    print("   🚀 MCMC將使用GPU加速")
+else:
+    mcmc_kwargs['device'] = 'cpu'
+    mcmc_kwargs['use_gpu'] = False
+    print("   💻 MCMC將使用CPU計算")
 
 # 使用CRPSMCMCValidator進行MCMC採樣
-mcmc_validator = CRPSMCMCValidator(
-    n_samples=config.mcmc_n_samples,
-    n_chains=config.mcmc_n_chains,
-    target_accept=config.mcmc_target_accept
-)
+mcmc_validator = CRPSMCMCValidator(**mcmc_kwargs)
 
-# 準備MCMC數據
+# 準備MCMC數據 - 使用階段5優化後的VI模型結果
 mcmc_data = {
     'parametric_indices': parametric_indices,
     'observed_losses': observed_losses_vi,
-    'parametric_payouts': parametric_payouts,
-    'hierarchical_model': hierarchical_model
+    'vi_model': vi_final,  # 使用優化後的VI模型
+    'vi_results': vi_final_results,  # VI結果
+    'best_product': vi_results['best_model'],  # 最佳產品配置
+    'hierarchical_model': hierarchical_model  # 保留作為先驗參考
 }
 
-# 執行MCMC採樣
+# 執行MCMC採樣 - 驗證VI找到的最佳參數分佈
+print("   驗證VI找到的最佳保險產品參數分佈...")
 mcmc_results = mcmc_validator.run_mcmc_validation(
     data=mcmc_data,
-    model=hierarchical_model
+    model=vi_final  # 使用VI模型而非原始階層模型
 )
 
 if mcmc_results['success']:
