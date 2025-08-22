@@ -725,11 +725,9 @@ selected_events = np.arange(train_hazard.shape[1])  # 使用所有訓練事件
 
 print(f"   使用 {len(selected_events)} 個訓練事件進行VI分析")
 
-# 從前幾個產品中提取數據作為範例
-max_products_for_vi = min(20, len(products_df))
-selected_products = products_df.iloc[:max_products_for_vi]
-
-print(f"   選擇 {max_products_for_vi} 個產品進行VI分析")
+# 使用所有產品進行完整VI分析
+selected_products = products_df  # 使用全部350個產品
+print(f"   使用全部 {len(selected_products)} 個產品進行VI分析")
 
 for idx, product in selected_products.iterrows():
     thresholds = product['trigger_thresholds']
