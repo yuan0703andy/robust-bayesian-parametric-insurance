@@ -109,17 +109,23 @@ except ImportError as e:
 print("ℹ️ 階段1: 數據處理 - 使用直接數據載入方案")
 CLIMADADataLoader = None  # 不存在，使用直接載入
 
-# 階段2: 穩健先驗
+# 階段2: 穩健先驗 - 直接從子模組導入
 try:
-    from robust_hierarchical_bayesian_simulation import (
+    from robust_hierarchical_bayesian_simulation.robust_priors import (
         EpsilonEstimator,
-        DoubleEpsilonContamination,
-        EpsilonContaminationSpec
+        DoubleEpsilonContamination,  
+        EpsilonContaminationSpec,
+        PriorContaminationAnalyzer,
+        create_contamination_analyzer,
+        run_basic_contamination_workflow
     )
-    print("✅ 穩健先驗導入成功")
+    print("✅ 穩健先驗直接導入成功")
+    robust_priors_available = True
 except ImportError as e:
     print(f"❌ 穩健先驗導入失敗: {e}")
     EpsilonEstimator = DoubleEpsilonContamination = EpsilonContaminationSpec = None
+    PriorContaminationAnalyzer = create_contamination_analyzer = run_basic_contamination_workflow = None
+    robust_priors_available = False
 
 # 階段3: 階層建模
 try:
@@ -495,47 +501,101 @@ else:
 
 print("\n階段2: 穩健先驗與ε-Contamination分析")
 
-# 創建ε-contamination規格
-if EpsilonEstimator and DoubleEpsilonContamination and EpsilonContaminationSpec:
-    # 創建默認的contamination_spec使用正確的參數名稱
-    contamination_spec = EpsilonContaminationSpec(
-        epsilon_range=(0.01, 0.20),
-        contamination_class="typhoon_specific",  # 使用字符串，會在__post_init__中轉換為枚舉
-        nominal_prior_family="normal",
-        contamination_prior_family="gev"
-    )
+# 使用完整穩健先驗分析工作流程
+if robust_priors_available:
+    print("🔬 使用完整穩健先驗分析工作流程...")
     
-    # 使用EpsilonEstimator進行ε估計
-    epsilon_estimator = EpsilonEstimator(contamination_spec)
+    # 準備數據
     event_losses_positive = event_losses[event_losses > 0]
+    wind_speeds_positive = wind_speeds[wind_speeds > 20] if 'wind_speeds' in locals() else None
     
-    # 使用可用的方法進行ε估計
-    statistical_result = epsilon_estimator.estimate_from_statistical_tests(event_losses_positive)
-    contamination_result = epsilon_estimator.estimate_contamination_level(event_losses_positive)
-    
-    # 從結果對象提取ε值
-    statistical_epsilon = statistical_result.epsilon_consensus
-    contamination_epsilon = contamination_result.epsilon_consensus
-    
-    # 選擇最終ε值（取平均或使用更保守的值）
-    final_epsilon = max(statistical_epsilon, contamination_epsilon)
-    print(f"ε估計完成: {final_epsilon:.3f}")
-else:
-    print("⚠️ 穩健先驗組件不可用，跳過ε估計")
-    final_epsilon = 0.05  # 使用默認值
-
-# 創建雙重ε-contamination模型
-if DoubleEpsilonContamination:
-    contamination_model = DoubleEpsilonContamination(
-        epsilon_prior=final_epsilon,
-        epsilon_likelihood=min(0.1, final_epsilon * 1.5),
-        prior_contamination_type='typhoon_specific',
-        likelihood_contamination_type='extreme_events'
+    # 執行基本污染分析工作流程
+    contamination_analysis = run_basic_contamination_workflow(
+        data=event_losses_positive,
+        wind_data=wind_speeds_positive,
+        verbose=True
     )
-    print(f"ε-contamination分析完成: 最終ε={final_epsilon:.4f}")
+    
+    # 提取結果
+    epsilon_analysis = contamination_analysis['epsilon_analysis']
+    dual_process = contamination_analysis['dual_process']
+    robust_posterior = contamination_analysis['robust_posterior']
+    
+    final_epsilon = epsilon_analysis.epsilon_consensus
+    
+    print(f"🎯 污染分析完成:")
+    print(f"   統計學ε值: {epsilon_analysis.epsilon_estimates.get('statistical', 'N/A')}")
+    print(f"   共識ε值: {final_epsilon:.4f}")
+    print(f"   雙重過程驗證: {'✅' if dual_process['dual_process_validated'] else '❌'}")
+    print(f"   穩健後驗均值: ${robust_posterior['posterior_mean']/1e6:.2f}M")
+    print(f"   有效樣本數: {robust_posterior['effective_sample_size']:.0f}")
+    
+    # 額外創建專用的PriorContaminationAnalyzer
+    estimator, prior_analyzer = create_contamination_analyzer(
+        epsilon_range=(0.01, 0.20), 
+        contamination_type="typhoon_specific"
+    )
+    
 else:
-    print("⚠️ DoubleEpsilonContamination不可用，跳過contamination建模")
+    print("⚠️ 穩健先驗組件不可用，使用預設ε值")
+    final_epsilon = 0.05  # 使用默認值
+    contamination_analysis = None
+
+# 創建雙重ε-contamination模型（Prior + Likelihood雙重污染）
+if robust_priors_available and DoubleEpsilonContamination:
+    
+    # 使用分析結果設置雙重污染參數
+    epsilon_prior = final_epsilon
+    epsilon_likelihood = min(0.1, final_epsilon * 1.5)  # 似然污染通常較小
+    
+    print(f"🔬 創建雙重ε-contamination模型...")
+    print(f"   先驗污染 (ε₁): {epsilon_prior:.4f}")  
+    print(f"   似然污染 (ε₂): {epsilon_likelihood:.4f}")
+    
+    contamination_model = DoubleEpsilonContamination(
+        epsilon_prior=epsilon_prior,
+        epsilon_likelihood=epsilon_likelihood,
+        prior_contamination_type='typhoon_specific',      # 颱風特定先驗污染
+        likelihood_contamination_type='extreme_events'    # 極值事件似然污染
+    )
+    
+    # 驗證雙重污染模型
+    try:
+        # 測試contaminated prior創建
+        base_prior_params = {
+            'location': robust_posterior['posterior_mean'],
+            'scale': robust_posterior['posterior_std']
+        }
+        contaminated_prior = contamination_model.create_contaminated_prior(base_prior_params)
+        
+        # 測試contaminated likelihood
+        contaminated_data = contamination_model.create_contaminated_likelihood(event_losses_positive)
+        
+        print(f"✅ 雙重污染模型驗證通過:")
+        print(f"   先驗位移: {contaminated_prior['contamination_info']['epsilon']:.4f}")
+        print(f"   污染數據比例: {len(contaminated_data)/len(event_losses_positive):.2f}")
+        
+        # 計算穩健後驗（在雙重污染下）
+        robust_posterior_double = contamination_model.compute_robust_posterior(
+            data=event_losses_positive,
+            base_prior_params=base_prior_params,
+            likelihood_params={}
+        )
+        
+        print(f"   雙重污染後驗均值: ${robust_posterior_double['posterior_mean']/1e6:.2f}M")
+        print(f"   變異數膨脹: {robust_posterior_double['contamination_impact']['variance_inflation']:.2f}x")
+        print(f"   樣本量損失: {robust_posterior_double['contamination_impact']['sample_size_reduction']*100:.1f}%")
+        
+    except Exception as e:
+        print(f"⚠️ 雙重污染模型驗證失敗: {e}")
+        robust_posterior_double = None
+        
+    print(f"🎯 雙重ε-contamination分析完成: ε₁={epsilon_prior:.4f}, ε₂={epsilon_likelihood:.4f}")
+    
+else:
+    print("⚠️ DoubleEpsilonContamination不可用，跳過雙重contamination建模")
     contamination_model = None
+    robust_posterior_double = None
 
 # %%
 # =============================================================================
@@ -1429,9 +1489,18 @@ integrated_results = {
         }
     },
     'epsilon_contamination_analysis': {
-        'statistical_epsilon': statistical_epsilon if 'statistical_epsilon' in locals() else None,
-        'contamination_epsilon': contamination_epsilon if 'contamination_epsilon' in locals() else None,
-        'final_epsilon': final_epsilon
+        'final_epsilon': final_epsilon,
+        'contamination_analysis': contamination_analysis if 'contamination_analysis' in locals() else None,
+        'robust_posterior_single': robust_posterior if 'robust_posterior' in locals() else None,
+        'robust_posterior_double': robust_posterior_double if 'robust_posterior_double' in locals() else None,
+        'dual_process_validation': dual_process if 'dual_process' in locals() else None,
+        'prior_contamination_analyzer': prior_analyzer if 'prior_analyzer' in locals() else None,
+        'double_contamination_model': {
+            'epsilon_prior': epsilon_prior if 'epsilon_prior' in locals() else None,
+            'epsilon_likelihood': epsilon_likelihood if 'epsilon_likelihood' in locals() else None,
+            'prior_contamination_type': 'typhoon_specific',
+            'likelihood_contamination_type': 'extreme_events'
+        } if 'contamination_model' in locals() and contamination_model is not None else None
     },
     'vi_screening_results': vi_results,
     'vi_hyperparameter_optimization': hyperparameter_results,
@@ -1467,8 +1536,25 @@ with open(report_path, 'w', encoding='utf-8') as f:
     f.write("北卡羅來納州颱風風險：完整貝葉斯參數保險分析報告\n")
     f.write("=" * 60 + "\n\n")
     f.write(f"分析時間：{integrated_results['analysis_metadata']['timestamp']}\n")
-    f.write(f"數據摘要：{n_events}事件, ${total_exposure/1e9:.2f}B總暴險\n")
+    f.write(f"數據摘要：{n_events}事件, ${total_exposure/1e9:.2f}B總暴險\n\n")
+    
+    # 穩健先驗與污染分析摘要
+    f.write("穩健先驗與ε-Contamination分析\n")
+    f.write("-" * 40 + "\n")
     f.write(f"最終ε值：{final_epsilon:.4f}\n")
+    
+    if 'contamination_analysis' in locals() and contamination_analysis:
+        f.write(f"雙重過程驗證：{'✅通過' if dual_process['dual_process_validated'] else '❌失敗'}\n")
+        f.write(f"穩健後驗均值：${robust_posterior['posterior_mean']/1e6:.2f}M\n")
+        f.write(f"有效樣本數：{robust_posterior['effective_sample_size']:.0f}\n")
+        
+        if 'robust_posterior_double' in locals() and robust_posterior_double:
+            f.write(f"雙重污染後驗均值：${robust_posterior_double['posterior_mean']/1e6:.2f}M\n")
+            f.write(f"變異數膨脹：{robust_posterior_double['contamination_impact']['variance_inflation']:.2f}x\n")
+            f.write(f"樣本量損失：{robust_posterior_double['contamination_impact']['sample_size_reduction']*100:.1f}%\n")
+    
+    f.write(f"\n產品優化結果\n")
+    f.write("-" * 40 + "\n")
     f.write(f"最佳產品：半徑{best_product['radius']}km\n")
 
 # 創建產品詳細CSV
@@ -1494,7 +1580,18 @@ ranking_df['rank'] = range(1, len(ranking_df) + 1)
 ranking_csv_path = results_dir / 'product_rankings.csv'
 ranking_df.to_csv(ranking_csv_path, index=False)
 
-print("8階段學術級貝葉斯分析完成")
-print(f"結果已儲存至：{main_results_path}")
-print(f"最佳產品：半徑{best_product['radius']}km, ε={final_epsilon:.4f}")
-print("分析完成！")
+print("🎯 8階段學術級貝葉斯分析完成!")
+print(f"📁 結果已儲存至：{main_results_path}")
+print(f"\n📊 分析摘要:")
+print(f"   最佳產品：半徑{best_product['radius']}km")
+print(f"   最終ε值：{final_epsilon:.4f}")
+
+if 'contamination_analysis' in locals() and contamination_analysis:
+    print(f"   穩健先驗：✅ 完整prior + double contamination分析")
+    print(f"   雙重過程驗證：{'✅' if dual_process['dual_process_validated'] else '❌'}")
+    if 'robust_posterior_double' in locals() and robust_posterior_double:
+        print(f"   雙重污染影響：變異數膨脹{robust_posterior_double['contamination_impact']['variance_inflation']:.2f}x")
+else:
+    print(f"   穩健先驗：⚠️ 使用預設ε值")
+
+print(f"\n✅ 完整穩健貝葉斯參數保險框架分析完成！")

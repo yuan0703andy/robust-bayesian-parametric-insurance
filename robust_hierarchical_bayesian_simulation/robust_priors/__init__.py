@@ -65,6 +65,10 @@ try:
         compare_estimation_methods
     )
     
+    # 確保函數在模組級別可用
+    quick_contamination_analysis = quick_contamination_analysis
+    compare_estimation_methods = compare_estimation_methods
+    
     from .contamination_tests import (
         # 主要測試函數
         run_all_contamination_tests,
@@ -137,7 +141,42 @@ def run_basic_contamination_workflow(data, wind_data=None, verbose=True):
         完整分析結果
     """
     if not IMPORT_SUCCESS:
-        raise ImportError("模組導入失敗，無法執行工作流程")
+        # 改為警告而非錯誤，提供fallback實現
+        import warnings
+        warnings.warn("某些模組導入失敗，使用簡化工作流程")
+        
+        # 簡化的fallback實現
+        import numpy as np
+        from .contamination_core import DoubleEpsilonContamination, demonstrate_dual_process_nature
+        from .epsilon_estimation import quick_contamination_analysis
+        
+        if verbose:
+            print("🌀 執行基本污染分析工作流程（簡化版）...")
+        
+        # 快速ε估計
+        contamination_result = quick_contamination_analysis(data, wind_data)
+        
+        # 雙重過程驗證
+        dual_process = demonstrate_dual_process_nature(data, contamination_result.epsilon_consensus)
+        
+        # 雙重污染分析
+        double_contam = DoubleEpsilonContamination(
+            epsilon_prior=contamination_result.epsilon_consensus,
+            epsilon_likelihood=min(0.1, contamination_result.epsilon_consensus * 1.5)
+        )
+        
+        base_prior = {
+            'location': np.median(data),
+            'scale': np.std(data)
+        }
+        
+        robust_posterior = double_contam.compute_robust_posterior(data, base_prior, {})
+        
+        return {
+            'epsilon_analysis': contamination_result,
+            'dual_process': dual_process,
+            'robust_posterior': robust_posterior
+        }
     
     if verbose:
         print("🌀 執行基本污染分析工作流程...")
@@ -147,18 +186,21 @@ def run_basic_contamination_workflow(data, wind_data=None, verbose=True):
     # Step 1: 快速ε估計
     if verbose:
         print("   Step 1: 快速ε估計")
+    from .epsilon_estimation import quick_contamination_analysis
     contamination_result = quick_contamination_analysis(data, wind_data)
     results['epsilon_analysis'] = contamination_result
     
     # Step 2: 雙重過程驗證
     if verbose:
         print("   Step 2: 雙重過程驗證")
+    from .contamination_core import demonstrate_dual_process_nature
     dual_process = demonstrate_dual_process_nature(data, contamination_result.epsilon_consensus)
     results['dual_process'] = dual_process
     
     # Step 3: 雙重污染分析
     if verbose:
         print("   Step 3: 雙重污染分析")
+    from .contamination_core import DoubleEpsilonContamination
     double_contam = DoubleEpsilonContamination(
         epsilon_prior=contamination_result.epsilon_consensus,
         epsilon_likelihood=min(0.1, contamination_result.epsilon_consensus * 1.5)
