@@ -841,7 +841,32 @@ else:
     selected_products = products_df
     print(f"   使用全部 {len(selected_products)} 個產品進行VI分析")
 
-for idx, product in selected_products.iterrows():
+# 添加進度追踪
+import time
+from datetime import datetime, timedelta
+print(f"\n📊 開始處理 {len(selected_products)} × {len(selected_events)} = {len(selected_products) * len(selected_events):,} 個樣本")
+print(f"   開始時間: {datetime.now().strftime('%H:%M:%S')}")
+
+# 進度條設置
+total_products = len(selected_products)
+total_samples = total_products * len(selected_events)
+processed_samples = 0
+start_time = time.time()
+
+# 使用tqdm進度條（如果可用）
+try:
+    from tqdm import tqdm
+    use_tqdm = True
+    product_iterator = tqdm(selected_products.iterrows(), 
+                           total=total_products,
+                           desc="處理產品",
+                           unit="產品")
+except ImportError:
+    use_tqdm = False
+    print("   💡 提示: 安裝 tqdm 可獲得更好的進度條 (pip install tqdm)")
+    product_iterator = selected_products.iterrows()
+
+for product_idx, (idx, product) in enumerate(product_iterator, 1):
     thresholds = product['trigger_thresholds']
     payout_ratios = product['payout_ratios']
     radius = product['radius_km'] 
@@ -864,10 +889,37 @@ for idx, product in selected_products.iterrows():
         # 使用該事件在所有醫院的總觀測損失
         total_observed_loss = np.sum(train_losses[:, event_idx])
         observed_losses_vi.append(total_observed_loss)
+        
+        processed_samples += 1
+    
+    # 如果沒有tqdm，手動顯示進度
+    if not use_tqdm and product_idx % 5 == 0:  # 每5個產品顯示一次
+        elapsed_time = time.time() - start_time
+        progress_pct = (product_idx / total_products) * 100
+        samples_per_sec = processed_samples / elapsed_time if elapsed_time > 0 else 0
+        
+        # 估計剩餘時間
+        if samples_per_sec > 0:
+            remaining_samples = total_samples - processed_samples
+            eta_seconds = remaining_samples / samples_per_sec
+            eta_str = str(timedelta(seconds=int(eta_seconds)))
+        else:
+            eta_str = "計算中..."
+        
+        print(f"   進度: {product_idx}/{total_products} 產品 ({progress_pct:.1f}%) | "
+              f"速度: {samples_per_sec:.0f} 樣本/秒 | "
+              f"預計剩餘: {eta_str}")
 
 parametric_indices = np.array(parametric_indices)
 parametric_payouts = np.array(parametric_payouts)
 observed_losses_vi = np.array(observed_losses_vi)
+
+# 顯示處理完成統計
+total_time = time.time() - start_time
+print(f"\n✅ 樣本處理完成!")
+print(f"   總處理時間: {str(timedelta(seconds=int(total_time)))}")
+print(f"   處理速度: {total_samples/total_time:.0f} 樣本/秒")
+print(f"   總樣本數: {len(parametric_indices):,}")
 
 # 🎯 執行真正的基差風險導向變分推斷
 print("🧠 開始真正的變分推斷優化...")
