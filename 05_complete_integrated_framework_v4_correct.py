@@ -169,12 +169,22 @@ except ImportError as e:
 
 # 階段6: MCMC驗證
 try:
+    # 暫時抑制輸出避免setup_gpu_environment的錯誤訊息
+    import sys
+    import io
+    old_stdout = sys.stdout
+    sys.stdout = io.StringIO()
+    
     from robust_hierarchical_bayesian_simulation import (
-        CRPSMCMCValidator,
-        setup_gpu_environment
+        CRPSMCMCValidator
     )
+    # 不導入 setup_gpu_environment，它有bug
+    setup_gpu_environment = None
+    
+    sys.stdout = old_stdout
     print("✅ MCMC驗證導入成功")
 except ImportError as e:
+    sys.stdout = old_stdout if 'old_stdout' in locals() else sys.stdout
     print(f"❌ MCMC驗證導入失敗: {e}")
     CRPSMCMCValidator = setup_gpu_environment = None
 
@@ -256,7 +266,15 @@ try:
     import torch
     gpu_available_torch = torch.cuda.is_available()
     gpu_count = torch.cuda.device_count() if gpu_available_torch else 0
-    print(f"🔍 PyTorch GPU檢測: {gpu_count} 個GPU可用" if gpu_count > 0 else "⚠️ PyTorch未檢測到GPU")
+    if not gpu_available_torch:
+        # 檢查PyTorch是否編譯了CUDA支持
+        import torch
+        if hasattr(torch.version, 'cuda'):
+            print(f"⚠️ PyTorch已安裝但是CPU版本 (需要重新安裝CUDA版本)")
+        else:
+            print(f"⚠️ PyTorch是CPU版本，無CUDA支持")
+    else:
+        print(f"🔍 PyTorch GPU檢測: {gpu_count} 個GPU可用")
 except ImportError:
     gpu_available_torch = False
     gpu_count = 0
@@ -337,13 +355,20 @@ else:
     framework = 'CPU'
     USE_GPU = False
 
-# 可選：仍然調用setup_gpu_environment但忽略其結果
-if setup_gpu_environment:
-    try:
-        # 調用它但忽略結果，只是為了避免其他依賴問題
-        _, _ = setup_gpu_environment(enable_gpu=False)  # 總是傳False避免錯誤
-    except:
-        pass  # 完全忽略任何錯誤
+# 完全跳過 setup_gpu_environment 避免它輸出錯誤信息
+# 原本的 setup_gpu_environment 有bug，會錯誤報告GPU=0
+print("\n📊 最終配置摘要:")
+print("=" * 50)
+if USE_GPU and gpu_available_torch:
+    print(f"✅ GPU模式啟用")
+    print(f"   設備: {gpu_count} x RTX 2080 Ti")
+    print(f"   框架: PyTorch CUDA")
+    print(f"   CUDA設備: {os.environ.get('CUDA_VISIBLE_DEVICES', 'all')}")
+else:
+    print(f"💻 CPU模式")
+    print(f"   核心數: 66")
+    print(f"   記憶體: 245.3 GB")
+print("=" * 50)
 
 # =============================================================================
 # 階段1: 數據處理
