@@ -941,8 +941,12 @@ vi_screener = BasisRiskAwareVI(
 # 驗證使用的是新版本
 import inspect
 method_source = inspect.getsource(vi_screener.train_single_model)
-if "真正的VI實現" in method_source and "n_iterations: int = 1000" in method_source:
-    print("✅ 確認使用新版VI實現（真正的變分推斷）")
+if "真正的GPU加速VI實現" in method_source and "_train_single_model_gpu" in method_source:
+    print("✅ 確認使用新版GPU加速VI實現")
+    if vi_screener.use_gpu:
+        print("   🚀 將使用GPU張量計算進行VI優化")
+    else:
+        print("   💻 將使用CPU進行VI優化")
 else:
     print("⚠️ 警告：可能仍在使用舊版VI實現")
     print("   請重新啟動腳本以確保載入最新版本")

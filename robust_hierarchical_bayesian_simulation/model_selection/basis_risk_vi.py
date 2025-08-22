@@ -427,6 +427,8 @@ class BasisRiskAwareVI:
     def _train_single_model_gpu(self, X: np.ndarray, y: np.ndarray, epsilon: float, 
                                basis_risk_type: str, n_iterations: int, start_time: float) -> Dict:
         """GPU加速的VI訓練"""
+        import time
+        
         # 轉換為GPU張量
         X_tensor = torch.from_numpy(X).float().to(self.device)
         y_tensor = torch.from_numpy(y).float().to(self.device)
