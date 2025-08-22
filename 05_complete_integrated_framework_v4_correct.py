@@ -822,62 +822,133 @@ print(f"\n基差風險VI完成: 訓練={vi_results['best_model']['final_basis_ri
 
 # %%
 # =============================================================================
-# 階段5: CRPS框架與超參數優化
+# 階段5: VI算法超參數優化（不是產品參數優化）
 # =============================================================================
 
-print("\n階段5: CRPS框架與超參數優化")
+print("\n階段5: VI算法超參數優化")
+print("   目標：優化VI算法的超參數（學習率、epsilon、正則化等）")
+print("   注意：這不是重複優化保險產品，而是優化算法本身")
 
-# 定義目標函數
-def hyperparameter_objective(params):
-    """超參數優化目標函數"""
-    # 簡單的目標函數：最小化CRPS
+# 定義VI超參數優化目標函數
+def vi_hyperparameter_objective(params):
+    """
+    優化VI算法的超參數（而非保險產品參數）
+    使用驗證集評估不同超參數配置的性能
+    """
     try:
-        under_penalty = params.get('under_penalty', 2.0)
-        over_penalty = params.get('over_penalty', 0.5)
-        crps_weight = params.get('crps_weight', 1.0)
+        # 提取VI算法超參數
+        learning_rate = params.get('learning_rate', 0.01)
+        epsilon = params.get('epsilon', 0.1)
+        regularization = params.get('regularization', 0.001)
+        n_iterations = params.get('n_iterations', 100)
         
-        # 計算加權CRPS
-        crps_score = np.mean(np.abs(parametric_payouts - observed_losses_vi))
-        penalty = under_penalty * np.mean(np.maximum(observed_losses_vi - parametric_payouts, 0))
-        penalty += over_penalty * np.mean(np.maximum(parametric_payouts - observed_losses_vi, 0))
+        # 創建新的VI實例with不同超參數
+        vi_temp = BasisRiskAwareVI(
+            n_features=1,
+            epsilon_values=[epsilon],  # 使用單一epsilon值進行快速評估
+            basis_risk_types=['weighted'],  # 使用最佳的基差風險類型
+            learning_rate=learning_rate,
+            regularization=regularization,
+            n_iterations=n_iterations
+        )
         
-        return -(crps_score + penalty)  # 負值因為優化器最大化
-    except:
-        return -1e6  # 錯誤情況返回很低的分數
+        # 在驗證集上評估（不是訓練集！）
+        val_X = val_indices.reshape(-1, 1)
+        val_y = val_losses
+        
+        # 快速訓練並評估
+        vi_temp.fit(X_vi[:1000], y_vi[:1000])  # 用小部分訓練集快速訓練
+        val_predictions = vi_temp.predict(val_X)
+        
+        # 計算驗證集上的基差風險
+        val_basis_risk = np.mean(np.abs(val_predictions - val_y))
+        
+        # 加入正則化懲罰防止過擬合
+        complexity_penalty = regularization * n_iterations * learning_rate
+        
+        return -(val_basis_risk + complexity_penalty)  # 負值因為優化器最大化
+        
+    except Exception as e:
+        print(f"      超參數評估失敗: {e}")
+        return -1e6
 
-# 使用AdaptiveHyperparameterOptimizer進行超參數優化
-hyperparameter_optimizer = AdaptiveHyperparameterOptimizer(
-    objective_function=hyperparameter_objective,
-    strategy='adaptive'
-)
-
-# 執行權重敏感性分析
-weight_combinations = [
-    {'under_penalty': 2.0, 'over_penalty': 0.5, 'crps_weight': 1.0},
-    {'under_penalty': 3.0, 'over_penalty': 0.3, 'crps_weight': 1.2},
-    {'under_penalty': 1.5, 'over_penalty': 0.8, 'crps_weight': 0.8},
-    {'under_penalty': 2.5, 'over_penalty': 0.4, 'crps_weight': 1.5},
+# 定義VI超參數搜索空間
+vi_hyperparameter_space = [
+    {'learning_rate': 0.001, 'epsilon': 0.05, 'regularization': 0.01, 'n_iterations': 50},
+    {'learning_rate': 0.01,  'epsilon': 0.10, 'regularization': 0.001, 'n_iterations': 100},
+    {'learning_rate': 0.05,  'epsilon': 0.15, 'regularization': 0.0001, 'n_iterations': 150},
+    {'learning_rate': 0.1,   'epsilon': 0.20, 'regularization': 0.00001, 'n_iterations': 200},
 ]
 
-weight_sensitivity_results = hyperparameter_optimizer.weight_sensitivity_analysis(
-    parametric_indices=parametric_indices,
-    observed_losses=observed_losses_vi,
-    weight_combinations=weight_combinations
+print(f"\n🔧 測試 {len(vi_hyperparameter_space)} 組VI超參數配置...")
+
+# 評估每組超參數
+best_vi_hyperparams = None
+best_vi_score = -float('inf')
+
+for i, hyperparams in enumerate(vi_hyperparameter_space):
+    score = vi_hyperparameter_objective(hyperparams)
+    print(f"   配置{i+1}: lr={hyperparams['learning_rate']:.3f}, "
+          f"ε={hyperparams['epsilon']:.2f}, score={-score:.4f}")
+    
+    if score > best_vi_score:
+        best_vi_score = score
+        best_vi_hyperparams = hyperparams
+
+print(f"\n✅ 最佳VI超參數:")
+print(f"   學習率: {best_vi_hyperparams['learning_rate']}")
+print(f"   Epsilon: {best_vi_hyperparams['epsilon']}")
+print(f"   正則化: {best_vi_hyperparams['regularization']}")
+print(f"   迭代次數: {best_vi_hyperparams['n_iterations']}")
+print(f"   驗證集基差風險: {-best_vi_score:.4f}")
+
+# 使用最佳超參數重新訓練完整VI模型
+print("\n🎯 使用最佳超參數重新訓練VI模型...")
+vi_final = BasisRiskAwareVI(
+    n_features=1,
+    epsilon_values=[best_vi_hyperparams['epsilon']],
+    basis_risk_types=['weighted'],
+    learning_rate=best_vi_hyperparams['learning_rate'],
+    regularization=best_vi_hyperparams['regularization'],
+    n_iterations=best_vi_hyperparams['n_iterations']
 )
 
-# 選擇最佳權重組合
-best_combination = min(
-    weight_sensitivity_results.items(),
-    key=lambda x: x[1]['final_objective']
-)
+# 在完整訓練集上訓練
+vi_final_results = vi_final.run_comprehensive_screening(X_vi, y_vi)
 
-# 執行密度比估計
-density_ratios = hyperparameter_optimizer.density_ratio_estimation(
-    parametric_indices[:len(parametric_indices)//2],
-    parametric_indices[len(parametric_indices)//2:]
-)
+# 在測試集上最終評估（如果有測試集）
+if test_data is not None:
+    test_indices_all = []
+    test_losses_all = []
+    
+    for event_idx in range(test_data['hazard_intensities'].shape[1]):
+        max_wind = np.max(test_data['hazard_intensities'][:, event_idx])
+        test_indices_all.append(max_wind)
+        total_loss = np.sum(test_data['observed_losses'][:, event_idx])
+        test_losses_all.append(total_loss)
+    
+    test_X = np.array(test_indices_all).reshape(-1, 1)
+    test_y = np.array(test_losses_all)
+    
+    test_predictions = vi_final.predict(test_X)
+    test_basis_risk = np.mean(np.abs(test_predictions - test_y))
+    
+    print(f"\n📊 最終測試集評估:")
+    print(f"   測試集基差風險: {test_basis_risk:.4f}")
+    print(f"   訓練/測試比: {vi_final_results['best_model']['final_basis_risk']/test_basis_risk:.3f}")
+else:
+    print("\n⚠️ 無測試集可用，跳過最終評估")
+    test_basis_risk = None
 
-print(f"超參數優化完成: 最佳目標值={best_combination[1]['final_objective']:.4f}")
+# 保存超參數優化結果
+hyperparameter_results = {
+    'best_hyperparams': best_vi_hyperparams,
+    'best_validation_score': -best_vi_score,
+    'final_training_results': vi_final_results,
+    'test_basis_risk': test_basis_risk
+}
+
+print(f"\n✅ VI算法超參數優化完成")
 
 # %%
 # =============================================================================
@@ -1056,11 +1127,7 @@ integrated_results = {
         'final_epsilon': final_epsilon
     },
     'vi_screening_results': vi_results,
-    'crps_framework_results': {
-        'weight_sensitivity': weight_sensitivity_results,
-        'best_combination': best_combination,
-        'density_ratios': density_ratios
-    },
+    'vi_hyperparameter_optimization': hyperparameter_results,
     'mcmc_validation': {
         'results': mcmc_results,
         'convergence_diagnostics': convergence_diagnostics,
