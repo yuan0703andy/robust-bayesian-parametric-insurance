@@ -144,6 +144,12 @@ except ImportError as e:
     ModelSpec = VulnerabilityData = PriorScenario = LikelihoodFamily = VulnerabilityFunctionType = None
 
 # 階段4: 模型選擇
+# 強制重新載入以確保使用最新版本
+import sys
+if 'robust_hierarchical_bayesian_simulation.model_selection.basis_risk_vi' in sys.modules:
+    del sys.modules['robust_hierarchical_bayesian_simulation.model_selection.basis_risk_vi']
+    print("🔄 強制重新載入BasisRiskAwareVI模組")
+
 try:
     from robust_hierarchical_bayesian_simulation import (
         BasisRiskAwareVI,
@@ -931,6 +937,15 @@ vi_screener = BasisRiskAwareVI(
     epsilon_values=[0.0, 0.05, 0.10, 0.15, 0.20],  # 完整5個epsilon值
     basis_risk_types=['absolute', 'asymmetric', 'weighted']  # 完整3種基差風險類型
 )
+
+# 驗證使用的是新版本
+import inspect
+method_source = inspect.getsource(vi_screener.train_single_model)
+if "真正的VI實現" in method_source and "n_iterations: int = 1000" in method_source:
+    print("✅ 確認使用新版VI實現（真正的變分推斷）")
+else:
+    print("⚠️ 警告：可能仍在使用舊版VI實現")
+    print("   請重新啟動腳本以確保載入最新版本")
 
 # 顯示計算環境資訊
 if USE_GPU and (gpu_available_torch or gpu_available_jax):
