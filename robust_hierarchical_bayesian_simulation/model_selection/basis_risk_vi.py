@@ -549,40 +549,31 @@ class BasisRiskAwareVI:
             return self._cpu_screening(X, y)
     
     def _gpu_screening(self, X: np.ndarray, y: np.ndarray) -> Dict:
-        """GPU加速的VI篩選"""
+        """GPU加速的VI篩選 - 修正版：調用真正的VI訓練"""
         print("🚀 使用GPU加速VI篩選")
-        
-        # 轉換數據到GPU
-        X_tensor = torch.from_numpy(X).float().to(self.device)
-        y_tensor = torch.from_numpy(y).float().to(self.device)
+        print("   注意：GPU張量加速，但仍使用完整的VI訓練")
         
         all_results = []
         total_configs = len(self.epsilon_values) * len(self.basis_risk_types)
         
         print(f"   並行計算 {total_configs} 個配置...")
         
-        # 並行計算所有配置
+        # 對每個配置執行完整的VI訓練
         config_idx = 0
         for epsilon in self.epsilon_values:
             for basis_risk_type in self.basis_risk_types:
                 config_idx += 1
                 
-                # GPU計算基差風險
-                basis_risk = self._compute_basis_risk_gpu(
-                    X_tensor, y_tensor, epsilon, basis_risk_type
-                )
+                print(f"     開始配置 {config_idx}/{total_configs}: ε={epsilon:.3f}, {basis_risk_type}")
                 
-                result = {
-                    'epsilon': epsilon,
-                    'basis_risk_type': basis_risk_type,
-                    'final_basis_risk': float(basis_risk),
-                    'converged': True
-                }
+                # 調用真正的VI訓練（與CPU版本相同）
+                result = self.train_single_model(
+                    X, y, epsilon, basis_risk_type, n_iterations=1000
+                )
                 all_results.append(result)
                 
                 # 進度顯示
-                if config_idx % 5 == 0 or config_idx == total_configs:
-                    print(f"     配置 {config_idx}/{total_configs} 完成")
+                print(f"     ✅ 配置 {config_idx}/{total_configs} 完成: 基差風險={result['final_basis_risk']/1e6:.1f}M")
         
         # 按基差風險排序
         all_results = sorted(all_results, key=lambda x: x['final_basis_risk'])
