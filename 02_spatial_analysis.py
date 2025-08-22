@@ -285,23 +285,35 @@ def process_spatial_data_with_modular_components(hospital_coords, hazard_data=No
                     print(f"   ⚠️ Centroid index {centroid_idx} 超出範圍，使用平均值")
                     hazard_intensities[h_idx, :] = np.mean(intensity_matrix, axis=0)
             
-            # 提取真實的暴險價值 (從exposure中採樣醫院級別的暴險)
-            if hasattr(exposure.value, 'values'):
-                exposure_values = np.random.choice(exposure.value.values, n_hospitals, replace=True)
-            else:
-                # exposure.value 可能已經是 numpy array
-                exposure_values = np.random.choice(exposure.value, n_hospitals, replace=True)
+            # 分配每間醫院相同的價值 (使用配置的標準值)
+            from config.hospital_based_payout_config import HospitalPayoutConfig
+            hospital_config = HospitalPayoutConfig()
             
-            # 計算真實的觀測損失 (基於影響函數)
-            observed_losses = np.zeros((n_hospitals, n_events))
-            for h_idx in range(n_hospitals):
-                for e_idx in range(n_events):
-                    wind_speed = hazard_intensities[h_idx, e_idx]
-                    # 使用Emanuel USA影響函數邏輯
-                    if wind_speed > 25.7:  # Saffir-Simpson scale threshold
-                        damage_ratio = 0.01 * ((wind_speed - 25.7) / 100) ** 3
-                        base_loss = exposure_values[h_idx] * damage_ratio
-                        observed_losses[h_idx, e_idx] = max(base_loss, 0)
+            # 每間醫院分配相同的基礎價值 $10M
+            exposure_values = np.array([hospital_config.base_hospital_value] * n_hospitals)
+            
+            print(f"   💰 使用標準化醫院價值: ${hospital_config.base_hospital_value/1e6:.0f}M 每家醫院")
+            print(f"   💰 總醫院暴險值: ${exposure_values.sum()/1e6:.0f}M")
+            
+            # 使用CLIMADA真實損失作為觀測數據 (避免死循環)
+            from data_processing.climada_loss_distributor import CLIMADALossDistributor
+            
+            # 創建損失分配器
+            loss_distributor = CLIMADALossDistributor(method='wind_exposure_weighted')
+            
+            # 分配CLIMADA真實損失到醫院級別
+            observed_losses, distribution_stats = loss_distributor.distribute_losses(
+                climada_impact=impact,
+                hospital_coords=hospital_coords,
+                exposure_values=exposure_values,
+                hazard_intensities=hazard_intensities
+            )
+            
+            # 驗證分配結果
+            validation_results = loss_distributor.validate_distribution(
+                original_losses=impact.at_event,
+                distributed_losses=observed_losses
+            )
             
             print(f"   ✅ 風速範圍: {np.min(hazard_intensities):.1f} - {np.max(hazard_intensities):.1f} m/s")
             print(f"   ✅ 暴險範圍: ${np.min(exposure_values)/1e6:.1f}M - ${np.max(exposure_values)/1e6:.1f}M")
