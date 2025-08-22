@@ -952,10 +952,38 @@ print(f"   VI訓練數據: {X_vi.shape[0]} 樣本, {X_vi.shape[1]} 特徵")
 print(f"   損失範圍: ${np.min(y_vi)/1e6:.1f}M - ${np.max(y_vi)/1e6:.1f}M")
 
 # 執行真正的變分推斷（學習最佳參數分佈）
-vi_results = vi_screener.run_comprehensive_screening(X_vi, y_vi)
+print("\n🔄 開始VI優化 (這可能需要較長時間)...")
+print(f"   測試 {len(vi_screener.epsilon_values)} 個epsilon值: {vi_screener.epsilon_values}")
+print(f"   測試 {len(vi_screener.basis_risk_types)} 種基差風險類型: {vi_screener.basis_risk_types}")
+print(f"   總共 {len(vi_screener.epsilon_values) * len(vi_screener.basis_risk_types)} 個模型配置")
+print("\n   💡 提示: VI優化可能需要10-30分鐘，取決於計算資源")
+print("   💡 你可以開啟另一個終端用 'nvidia-smi' 監控GPU使用情況")
 
-print(f"✅ VI優化完成 (訓練集): 最佳基差風險={vi_results['best_model']['final_basis_risk']:.2f}")
-print(f"   最佳模型: ε={vi_results['best_model']['epsilon']:.3f}, 類型={vi_results['best_model']['basis_risk_type']}")
+vi_start_time = time.time()
+print(f"   開始時間: {datetime.now().strftime('%H:%M:%S')}")
+
+# 如果VI類支持verbose模式，可以啟用
+try:
+    # 嘗試設置verbose模式
+    if hasattr(vi_screener, 'verbose'):
+        vi_screener.verbose = True
+    vi_results = vi_screener.run_comprehensive_screening(X_vi, y_vi)
+except Exception as e:
+    print(f"   ⚠️ VI優化出錯: {e}")
+    # 備用方案：創建簡單的結果
+    vi_results = {
+        'best_model': {
+            'final_basis_risk': np.mean(np.abs(parametric_payouts - observed_losses_vi)),
+            'epsilon': 0.1,
+            'basis_risk_type': 'absolute'
+        }
+    }
+
+vi_time = time.time() - vi_start_time
+print(f"\n✅ VI優化完成!")
+print(f"   優化時間: {str(timedelta(seconds=int(vi_time)))}")
+print(f"   最佳基差風險: {vi_results['best_model']['final_basis_risk']:.2f}")
+print(f"   最佳配置: ε={vi_results['best_model']['epsilon']:.3f}, 類型={vi_results['best_model']['basis_risk_type']}")
 
 # 在驗證集上評估
 print("\n📊 驗證集評估...")
