@@ -198,7 +198,7 @@ class CRPSMCMCValidator:
             return {
                 'success': True,
                 'trace': trace,
-                'n_samples': len(samples),
+                'n_samples': len(combined_samples),
                 'framework': 'JAX'
             }
             
@@ -387,8 +387,8 @@ class CRPSMCMCValidator:
         }
     
     def _run_simplified_jax_mcmc(self, logp_func, init_params, key):
-        """生產級JAX MCMC採樣 - 使用Hamiltonian Monte Carlo"""
-        print(f"   執行{self.n_chains}條MCMC鏈，每條{self.n_samples}樣本")
+        """生產級JAX MCMC採樣 - 改進的自適應Metropolis算法"""
+        print(f"   執行{self.n_chains}條MCMC鏈，每條{self.n_samples}樣本（改進版本）")
         
         # 多鏈採樣以評估收斂性
         all_samples = []
@@ -397,63 +397,121 @@ class CRPSMCMCValidator:
         for chain_id in range(self.n_chains):
             print(f"     鏈 {chain_id + 1}/{self.n_chains}...")
             
-            # 為每條鏈使用不同的初始值
+            # 為每條鏈使用更分散的初始值，增加鏈間差異
             key, init_key = random.split(key)
-            chain_init = init_params + random.normal(init_key, init_params.shape) * 0.1
+            init_scale = 0.5 + chain_id * 0.2  # 漸增的初始化尺度
+            chain_init = init_params + random.normal(init_key, init_params.shape) * init_scale
             
-            # 自適應Metropolis-Hastings採樣
+            # 確保參數在合理範圍內
+            chain_init = jnp.clip(chain_init, -5.0, 5.0)
+            
             samples = [chain_init]
-            logprobs = [logp_func(chain_init)]
+            logprobs = []
             current_params = chain_init
-            current_logp = logprobs[0]
             
-            # 自適應步長
-            step_size = 0.1
+            # 計算初始log probability
+            try:
+                current_logp = logp_func(current_params)
+                logprobs = [current_logp]
+            except:
+                # 如果初始點有問題，重新選擇
+                key, backup_key = random.split(key)
+                current_params = random.normal(backup_key, init_params.shape) * 0.1
+                current_logp = logp_func(current_params)
+                samples = [current_params]
+                logprobs = [current_logp]
+            
+            # 改進的自適應參數
+            step_size = jnp.array(0.05)  # 較小的初始步長
             accepted = 0
-            batch_size = 50
+            batch_size = 100  # 更大的批次用於更穩定的自適應
             
-            for i in range(self.n_warmup + self.n_samples):
-                # 提案步驟
+            # 協方差自適應
+            param_history = []
+            adaptation_window = 200
+            
+            total_iterations = self.n_warmup + self.n_samples
+            
+            for i in range(total_iterations):
+                # 提案步驟 - 使用自適應協方差
                 key, subkey = random.split(key)
-                proposal = current_params + random.normal(subkey, current_params.shape) * step_size
+                
+                if i > adaptation_window and len(param_history) > 10:
+                    # 使用歷史樣本估計協方差
+                    recent_samples = jnp.array(param_history[-adaptation_window:])
+                    sample_cov = jnp.cov(recent_samples.T) + 1e-6 * jnp.eye(len(init_params))
+                    
+                    # Cholesky分解用於多元正態提案
+                    try:
+                        L = jnp.linalg.cholesky(sample_cov)
+                        z = random.normal(subkey, current_params.shape)
+                        proposal = current_params + step_size * (L @ z)
+                    except:
+                        # 如果Cholesky失敗，使用對角協方差
+                        proposal = current_params + step_size * random.normal(subkey, current_params.shape)
+                else:
+                    # 初期使用簡單提案
+                    proposal = current_params + step_size * random.normal(subkey, current_params.shape)
                 
                 # 計算接受概率
-                proposal_logp = logp_func(proposal)
-                log_alpha = jnp.minimum(0.0, proposal_logp - current_logp)
+                try:
+                    proposal_logp = logp_func(proposal)
+                    log_alpha = jnp.minimum(0.0, proposal_logp - current_logp)
+                    
+                    # 接受/拒絕
+                    key, accept_key = random.split(key)
+                    if jnp.log(random.uniform(accept_key)) < log_alpha:
+                        current_params = proposal
+                        current_logp = proposal_logp
+                        accepted += 1
+                except:
+                    # 如果提案點計算失敗，拒絕
+                    pass
                 
-                # 接受/拒絕
-                key, accept_key = random.split(key)
-                if jnp.log(random.uniform(accept_key)) < log_alpha:
-                    current_params = proposal
-                    current_logp = proposal_logp
-                    accepted += 1
+                # 存儲樣本（包括warmup用於自適應）
+                samples.append(current_params)
+                logprobs.append(current_logp)
                 
-                # 存儲樣本（跳過熱身期）
-                if i >= self.n_warmup:
-                    samples.append(current_params)
-                    logprobs.append(current_logp)
+                # 更新參數歷史（用於協方差估計）
+                if i < self.n_warmup:
+                    param_history.append(current_params)
                 
-                # 自適應步長調整
-                if i > 0 and i % batch_size == 0:
+                # 自適應步長調整（僅在warmup期間）
+                if i < self.n_warmup and i > 0 and i % batch_size == 0:
                     acceptance_rate = accepted / batch_size
-                    if acceptance_rate > 0.6:  # 目標接受率0.4-0.6
-                        step_size *= 1.1
+                    
+                    # 更aggressive的步長調整
+                    if acceptance_rate > 0.7:
+                        step_size *= 1.2
+                    elif acceptance_rate > 0.5:
+                        step_size *= 1.05
+                    elif acceptance_rate < 0.3:
+                        step_size *= 0.8
                     elif acceptance_rate < 0.4:
-                        step_size *= 0.9
+                        step_size *= 0.95
+                    
+                    # 限制步長範圍
+                    step_size = jnp.clip(step_size, 0.001, 2.0)
                     accepted = 0
             
-            chain_samples = jnp.array(samples[1:])  # 去掉初始值
-            chain_logprobs = jnp.array(logprobs[1:])
+            # 只保留post-warmup樣本
+            chain_samples = jnp.array(samples[self.n_warmup + 1:])  
+            chain_logprobs = jnp.array(logprobs[self.n_warmup + 1:])
             
             all_samples.append(chain_samples)
             all_logprobs.append(chain_logprobs)
             
-            final_acceptance = accepted / batch_size
-            print(f"       最終接受率: {final_acceptance:.3f}, 步長: {step_size:.4f}")
+            # 計算最終接受率
+            final_acceptance = accepted / batch_size if i >= batch_size else accepted / max(1, i + 1 - self.n_warmup)
+            print(f"       最終接受率: {final_acceptance:.3f}, 最終步長: {float(step_size):.4f}")
+            print(f"       採樣範圍: θ₀∈[{float(jnp.min(chain_samples[:, 0])):.3f}, {float(jnp.max(chain_samples[:, 0])):.3f}]")
+            print(f"                 θ₁∈[{float(jnp.min(chain_samples[:, 1])):.3f}, {float(jnp.max(chain_samples[:, 1])):.3f}]")
         
         # 合併所有鏈的樣本
         combined_samples = jnp.concatenate(all_samples, axis=0)
         combined_logprobs = jnp.concatenate(all_logprobs, axis=0)
+        
+        print(f"   ✅ MCMC採樣完成：總樣本數 {len(combined_samples)}")
         
         return combined_samples, all_samples, combined_logprobs
     
