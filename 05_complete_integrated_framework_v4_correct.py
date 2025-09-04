@@ -877,14 +877,15 @@ for i, config in enumerate(prior_likelihood_test_configs, 1):
         
         # 由於你的build_hierarchical_model可能不支持prior/likelihood選擇，
         # 我們用ParametricHierarchicalModel來構建
-        from robust_hierarchical_bayesian_simulation.hierarchical_modeling.prior_specifications import ModelSpec, VulnerabilityFunctionType
+        from robust_hierarchical_bayesian_simulation.hierarchical_modeling.prior_specifications import ModelSpec, VulnerabilityFunctionType, VulnerabilityData
+        from robust_hierarchical_bayesian_simulation.hierarchical_modeling.core_model import ParametricHierarchicalModel
         
         # 創建模型規格
         model_spec = ModelSpec(
             prior_scenario=config['prior'],
             likelihood_family=config['likelihood'],
             vulnerability_type=VulnerabilityFunctionType.EMANUEL,
-            contamination_epsilon=config['epsilon']
+            epsilon_contamination=config['epsilon']  # 修復參數名稱
         )
         
         # 創建階層模型
