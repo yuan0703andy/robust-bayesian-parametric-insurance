@@ -29,221 +29,74 @@ import pandas as pd
 from pathlib import Path
 import sys
 
-# 設置路徑 (適用於 Jupyter 和腳本執行)
-try:
-    # 嘗試使用 __file__ (腳本執行時)
-    PATH_ROOT = Path(__file__).parent
-except NameError:
-    # Jupyter notebook 環境
-    import os
-    PATH_ROOT = Path(os.getcwd())
-    
-# 確保能找到模組
-possible_roots = [
-    PATH_ROOT,
-    PATH_ROOT / 'robust-bayesian-parametric-insurance',
-    Path.cwd(),
-    Path.cwd().parent
-]
-
-for root in possible_roots:
-    robust_path = root / 'robust_hierarchical_bayesian_simulation'
-    data_path = root / 'data_processing'
-    insurance_path = root / 'insurance_analysis_refactored'
-    
-    if robust_path.exists():
-        sys.path.insert(0, str(root))
-        print(f"✅ 找到專案根目錄: {root}")
-        break
-else:
-    print("⚠️ 警告: 無法自動找到專案根目錄，請手動設置路徑")
-
-# 路徑診斷
-print(f"\n🔍 路徑診斷:")
-print(f"   當前工作目錄: {Path.cwd()}")
-print(f"   Python 路徑: {sys.path[:3]}...")
-
-# 檢查關鍵模組是否可以找到
-key_modules = [
-    'robust_hierarchical_bayesian_simulation',
-    'data_processing', 
-    'insurance_analysis_refactored'
-]
-
-for module in key_modules:
-    try:
-        __import__(module)
-        print(f"   ✅ {module}: 可導入")
-    except ImportError as e:
-        print(f"   ❌ {module}: 無法導入 ({e})")
+# 設置路徑
+PATH_ROOT = Path(__file__).parent
+sys.path.insert(0, str(PATH_ROOT))
 
 # =============================================================================
 # 導入8階段模組化框架的所有必需組件
 # =============================================================================
 
-print("\n🔧 開始導入模組...")
-
-# 首先檢查模組狀態
-try:
-    from robust_hierarchical_bayesian_simulation import get_module_status
-    print("📊 模組狀態檢查:")
-    print(get_module_status())
-except ImportError as e:
-    print(f"⚠️ 無法導入模組狀態檢查器: {e}")
-
-print("\n📦 開始導入各階段組件...")
-
 # 配置管理
-try:
-    from robust_hierarchical_bayesian_simulation import (
-        create_standard_analysis_config,
-        ModelComplexity
-    )
-    print("✅ 配置管理導入成功")
-except ImportError as e:
-    print(f"❌ 配置管理導入失敗: {e}")
-    create_standard_analysis_config = ModelComplexity = None
+from robust_hierarchical_bayesian_simulation.config.model_configs import (
+    create_standard_analysis_config,
+    ModelComplexity
+)
 
-# 階段1: 數據處理 
-# CLIMADADataLoader 不存在於當前架構中，使用直接數據載入
-print("ℹ️ 階段1: 數據處理 - 使用直接數據載入方案")
-CLIMADADataLoader = None  # 不存在，使用直接載入
-
-# 階段2: 穩健先驗 - 直接從子模組導入
-try:
-    from robust_hierarchical_bayesian_simulation.robust_priors import (
-        EpsilonEstimator,
-        DoubleEpsilonContamination,  
-        EpsilonContaminationSpec,
-        PriorContaminationAnalyzer,
-        create_contamination_analyzer,
-        run_basic_contamination_workflow
-    )
-    print("✅ 穩健先驗直接導入成功")
-    robust_priors_available = True
-except ImportError as e:
-    print(f"❌ 穩健先驗導入失敗: {e}")
-    EpsilonEstimator = DoubleEpsilonContamination = EpsilonContaminationSpec = None
-    PriorContaminationAnalyzer = create_contamination_analyzer = run_basic_contamination_workflow = None
-    robust_priors_available = False
+# 階段2: 穩健先驗
+from robust_hierarchical_bayesian_simulation.robust_priors import (
+    EpsilonEstimator,
+    DoubleEpsilonContamination,  
+    EpsilonContaminationSpec,
+    PriorContaminationAnalyzer,
+    create_contamination_analyzer,
+    run_basic_contamination_workflow
+)
 
 # 階段3: 階層建模
-try:
-    from robust_hierarchical_bayesian_simulation import (
-        ParametricHierarchicalModel,
-        build_hierarchical_model,
-        validate_model_inputs,
-        get_portfolio_loss_predictions
-    )
-    print("✅ 階層建模導入成功")
-except ImportError as e:
-    print(f"❌ 階層建模導入失敗: {e}")
-    ParametricHierarchicalModel = build_hierarchical_model = validate_model_inputs = get_portfolio_loss_predictions = None
-# 先驗規格 - 從子模組直接導入 (不在統一接口中)
-try:
-    from robust_hierarchical_bayesian_simulation.hierarchical_modeling.prior_specifications import (
-        ModelSpec, VulnerabilityData, PriorScenario, LikelihoodFamily, VulnerabilityFunctionType
-    )
-    print("✅ 先驗規格類別導入成功")
-except ImportError as e:
-    print(f"⚠️ 先驗規格導入失敗: {e}")
-    ModelSpec = VulnerabilityData = PriorScenario = LikelihoodFamily = VulnerabilityFunctionType = None
+from robust_hierarchical_bayesian_simulation import (
+    ParametricHierarchicalModel,
+    build_hierarchical_model,
+    validate_model_inputs,
+    get_portfolio_loss_predictions
+)
+
+from robust_hierarchical_bayesian_simulation.hierarchical_modeling.prior_specifications import (
+    ModelSpec, VulnerabilityData, PriorScenario, LikelihoodFamily, VulnerabilityFunctionType
+)
 
 # 階段4: 模型選擇
-# 強制重新載入以確保使用最新版本
-import sys
-if 'robust_hierarchical_bayesian_simulation.model_selection.basis_risk_vi' in sys.modules:
-    del sys.modules['robust_hierarchical_bayesian_simulation.model_selection.basis_risk_vi']
-    print("🔄 強制重新載入BasisRiskAwareVI模組")
-
-try:
-    from robust_hierarchical_bayesian_simulation import (
-        BasisRiskAwareVI,
-        ModelSelector,
-        DifferentiableCRPS,
-        ParametricPayoutFunction
-    )
-    print("✅ 模型選擇導入成功")
-except ImportError as e:
-    print(f"❌ 模型選擇導入失敗: {e}")
-    BasisRiskAwareVI = ModelSelector = DifferentiableCRPS = ParametricPayoutFunction = None
+from robust_hierarchical_bayesian_simulation import (
+    BasisRiskAwareVI,
+    ModelSelector,
+    DifferentiableCRPS,
+    ParametricPayoutFunction
+)
 
 # 階段5: 超參數優化
-try:
-    from robust_hierarchical_bayesian_simulation import (
-        AdaptiveHyperparameterOptimizer,
-        WeightSensitivityAnalyzer
-    )
-    print("✅ 超參數優化導入成功")
-except ImportError as e:
-    print(f"❌ 超參數優化導入失敗: {e}")
-    AdaptiveHyperparameterOptimizer = WeightSensitivityAnalyzer = None
+from robust_hierarchical_bayesian_simulation import (
+    AdaptiveHyperparameterOptimizer,
+    WeightSensitivityAnalyzer
+)
 
 # 階段6: MCMC驗證
-try:
-    # 暫時抑制輸出避免setup_gpu_environment的錯誤訊息
-    import sys
-    import io
-    old_stdout = sys.stdout
-    sys.stdout = io.StringIO()
-    
-    from robust_hierarchical_bayesian_simulation import (
-        CRPSMCMCValidator
-    )
-    # 不導入 setup_gpu_environment，它有bug
-    setup_gpu_environment = None
-    
-    sys.stdout = old_stdout
-    print("✅ MCMC驗證導入成功")
-except ImportError as e:
-    sys.stdout = old_stdout if 'old_stdout' in locals() else sys.stdout
-    print(f"❌ MCMC驗證導入失敗: {e}")
-    CRPSMCMCValidator = setup_gpu_environment = None
+from robust_hierarchical_bayesian_simulation import CRPSMCMCValidator
 
 # 階段7: 後驗分析
-try:
-    from robust_hierarchical_bayesian_simulation import (
-        CredibleIntervalCalculator,
-        PosteriorApproximation,
-        PosteriorPredictiveChecker
-    )
-    print("✅ 後驗分析導入成功")
-except ImportError as e:
-    print(f"❌ 後驗分析導入失敗: {e}")
-    CredibleIntervalCalculator = PosteriorApproximation = PosteriorPredictiveChecker = None
+from robust_hierarchical_bayesian_simulation import (
+    CredibleIntervalCalculator,
+    PosteriorApproximation,
+    PosteriorPredictiveChecker
+)
 
-# 階段8: 參數保險 (使用現有的保險分析框架)
-try:
-    from insurance_analysis_refactored.core import MultiObjectiveOptimizer as ParametricInsuranceOptimizer
-    print("✅ 參數保險優化器導入成功")
-except ImportError as e:
-    print(f"❌ 參數保險優化器導入失敗: {e}")
-    ParametricInsuranceOptimizer = None
+# 階段8: 參數保險
+from insurance_analysis_refactored.core import MultiObjectiveOptimizer as ParametricInsuranceOptimizer
 
 # 空間數據處理
-try:
-    from data_processing import SpatialDataProcessor
-    print("✅ 空間數據處理器導入成功")
-except ImportError as e:
-    print(f"❌ 空間數據處理器導入失敗: {e}")
-    SpatialDataProcessor = None
+from data_processing import SpatialDataProcessor
 
 # 數據分割模組
-try:
-    from data_processing.data_splits import RobustDataSplitter, create_robust_splits
-    print("✅ 數據分割模組導入成功")
-except ImportError as e:
-    print(f"❌ 數據分割模組導入失敗: {e}")
-    RobustDataSplitter = create_robust_splits = None
-
-# 檢查模組狀態
-try:
-    from robust_hierarchical_bayesian_simulation import get_module_status
-    print("🔧 模組可用性檢查:")
-    print(get_module_status())
-except ImportError as e:
-    print(f"❌ 模組狀態檢查失敗: {e}")
-    print("🔧 繼續執行分析...")
+from data_processing.data_splits import RobustDataSplitter, create_robust_splits
 
 print("8階段完整貝葉斯參數保險分析框架")
 print("=" * 60)
@@ -256,18 +109,14 @@ print("=" * 60)
 print("\n階段0: 配置和環境設置")
 
 # 創建標準分析配置
-if create_standard_analysis_config and ModelComplexity:
-    config = create_standard_analysis_config()
-    config.complexity_level = ModelComplexity.STANDARD
-    
-    # 驗證配置
-    is_valid, warnings = config.validate_configuration()
-    if not is_valid:
-        for warning in warnings:
-            print(f"配置警告: {warning}")
-else:
-    print("⚠️ 配置模組不可用，使用默認配置")
-    config = None
+config = create_standard_analysis_config()
+config.complexity_level = ModelComplexity.STANDARD
+
+# 驗證配置
+is_valid, warnings = config.validate_configuration()
+if not is_valid:
+    for warning in warnings:
+        print(f"配置警告: {warning}")
 
 # 設置GPU環境 
 # 自動檢測GPU或使用環境變數
@@ -388,13 +237,7 @@ print("=" * 50)
 
 print("\n階段1: 數據處理")
 
-# 使用CLIMADADataLoader載入所有數據
-if CLIMADADataLoader:
-    data_loader = CLIMADADataLoader(base_path=PATH_ROOT)
-    bayesian_data = data_loader.load_for_bayesian_analysis()
-else:
-    print("⚠️ CLIMADADataLoader不可用，直接載入數據")
-    bayesian_data = None
+# 直接載入數據（CLIMADADataLoader不存在於當前架構中）
 
 # 載入數據 - 嘗試多個數據源
 climada_data = None
@@ -502,12 +345,15 @@ else:
 print("\n階段2: 穩健先驗與ε-Contamination分析")
 
 # 使用完整穩健先驗分析工作流程
-if robust_priors_available:
-    print("🔬 使用完整穩健先驗分析工作流程...")
-    
-    # 準備數據
-    event_losses_positive = event_losses[event_losses > 0]
-    wind_speeds_positive = wind_speeds[wind_speeds > 20] if 'wind_speeds' in locals() else None
+print("🔬 使用完整穩健先驗分析工作流程...")
+
+# 準備數據
+event_losses_positive = event_losses[event_losses > 0]
+wind_speeds_positive = wind_speeds[wind_speeds > 20] if 'wind_speeds' in locals() else None
+
+# 檢查穩健先驗組件是否可用
+try:
+    robust_priors_available = True
     
     # 執行基本污染分析工作流程
     contamination_analysis = run_basic_contamination_workflow(
@@ -515,32 +361,38 @@ if robust_priors_available:
         wind_data=wind_speeds_positive,
         verbose=True
     )
-    
+
     # 提取結果
     epsilon_analysis = contamination_analysis['epsilon_analysis']
     dual_process = contamination_analysis['dual_process']
     robust_posterior = contamination_analysis['robust_posterior']
-    
+
     final_epsilon = epsilon_analysis.epsilon_consensus
-    
+except Exception as e:
+    print(f"⚠️ 穩健先驗分析失敗: {e}")
+    robust_priors_available = False
+    final_epsilon = 0.05  # 使用默認值
+    contamination_analysis = None
+
+if robust_priors_available:
     print(f"🎯 污染分析完成:")
     print(f"   統計學ε值: {epsilon_analysis.epsilon_estimates.get('statistical', 'N/A')}")
     print(f"   共識ε值: {final_epsilon:.4f}")
     print(f"   雙重過程驗證: {'✅' if dual_process['dual_process_validated'] else '❌'}")
     print(f"   穩健後驗均值: ${robust_posterior['posterior_mean']/1e6:.2f}M")
     print(f"   有效樣本數: {robust_posterior['effective_sample_size']:.0f}")
-    
+
     # 額外創建專用的PriorContaminationAnalyzer
     estimator, prior_analyzer = create_contamination_analyzer(
         epsilon_range=(0.01, 0.20), 
         contamination_type="typhoon_specific"
     )
-    
+
     # ==========================================
     # 新增：測試不同模型配置
     # ==========================================
     print("\n🧪 測試不同Prior和Likelihood配置...")
-    
+
     # 定義測試配置（來自robust_model_analysis_report.py）
     model_test_configs = [
         {
@@ -568,15 +420,15 @@ if robust_priors_available:
             'description': '適用於極端事件頻繁的情況'
         }
     ]
-    
+
     # 測試每個配置
     model_comparison_results = []
     best_config = None
     best_bias = float('inf')
-    
+
     # 計算真實均值作為參考
     true_mean = np.mean(event_losses_positive)
-    
+
     for config in model_test_configs:
         print(f"\n📋 測試: {config['name']}")
         print(f"   {config['description']}")
@@ -629,7 +481,7 @@ if robust_priors_available:
             best_bias = bias
             best_config = config
             best_posterior = config_posterior
-    
+
     # 顯示比較結果
     if model_comparison_results:
         print("\n📊 模型配置比較結果:")
@@ -660,15 +512,13 @@ if robust_priors_available:
         final_epsilon_likelihood = selected_config['epsilon_likelihood']
         
     else:
-        # 如果測試失敗，使用原始結果
+        # 如果模型比較結果為空，使用原始結果
         final_epsilon_prior = final_epsilon
         final_epsilon_likelihood = min(0.1, final_epsilon * 1.5)
-        
+
 else:
+    # robust_priors_available is False
     print("⚠️ 穩健先驗組件不可用，使用預設ε值")
-    final_epsilon = 0.05  # 使用默認值
-    contamination_analysis = None
-    model_comparison_results = []
     final_epsilon_prior = 0.05
     final_epsilon_likelihood = 0.08
 
@@ -748,7 +598,7 @@ if SpatialDataProcessor:
     hospital_coords = spatial_results['hospital_coordinates']
     spatial_data = spatial_processor.process_hospital_spatial_data(
         hospital_coords,
-        n_regions=config and config.use_spatial_effects and 3 or 1
+        n_regions=config.use_spatial_effects and 3 or 1
     )
     print(f"空間數據處理完成: {len(hospital_coords)} 醫院座標")
 else:
@@ -1374,7 +1224,7 @@ print("   目標：使用MCMC驗證優化後VI模型的後驗分佈")
 # 配置MCMC採樣器
 # 注意：CRPSMCMCValidator可能不支持device參數
 try:
-    # 嘗試使用所有參數
+    # 創建MCMC驗證器
     mcmc_validator = CRPSMCMCValidator(
         n_samples=config.mcmc_n_samples,
         n_chains=config.mcmc_n_chains,
