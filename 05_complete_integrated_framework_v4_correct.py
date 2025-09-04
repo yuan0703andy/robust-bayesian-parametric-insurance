@@ -1227,13 +1227,15 @@ print(f"\n✅ VI算法超參數優化完成")
 print("\n階段6: MCMC驗證與收斂診斷")
 print("   目標：使用MCMC驗證優化後VI模型的後驗分佈")
 
-# 創建MCMC配置對象
+# 創建MCMC配置對象 - 生產級配置
 class MCMCConfig:
     def __init__(self):
-        self.n_samples = getattr(config, 'mcmc_n_samples', 500)  # 減少採樣數以提高速度
-        self.n_warmup = getattr(config, 'mcmc_n_warmup', 250)   # 熱身採樣數
-        self.n_chains = getattr(config, 'mcmc_n_chains', 2)     # 減少鏈數
+        self.n_samples = getattr(config, 'mcmc_n_samples', 2000)  # 增加採樣數確保收斂
+        self.n_warmup = getattr(config, 'mcmc_n_warmup', 1000)   # 充分的熱身採樣
+        self.n_chains = getattr(config, 'mcmc_n_chains', 4)      # 增加鏈數驗證收斂
         self.target_accept = getattr(config, 'mcmc_target_accept', 0.8)
+        self.max_tree_depth = getattr(config, 'mcmc_max_tree_depth', 10)
+        self.step_size = getattr(config, 'mcmc_step_size', None)  # 自適應步長
 
 # 創建MCMC驗證器
 mcmc_config = MCMCConfig()
