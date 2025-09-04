@@ -1,0 +1,4 @@
+Model,Prior_Contamination,Likelihood_Contamination,Epsilon_Prior,Epsilon_Likelihood,Posterior_Mean_M,Posterior_Std_M,Bias_M,Relative_Bias_%,Effective_Sample_Size,Variance_Inflation,Sample_Size_Reduction_%
+Normal Prior + Extreme Events,typhoon_specific,extreme_events,0.05,0.15,15.293241761020633,1.824441998424475,5.293241761020632,52.93241761020633,161.5,1.238390092879257,19.25
+Normal Prior + Outliers,heavy_tailed,outliers,0.08,0.12,14.827326924379248,2.1110476977453874,4.827326924379248,48.273269243792484,161.92,1.2351778656126482,19.040000000000006
+Normal Prior + Measurement Error,misspecified,measurement_error,0.03,0.08,14.148245068110503,1.1660597419236436,4.148245068110503,41.482450681105036,178.48,1.120573733751681,10.760000000000005

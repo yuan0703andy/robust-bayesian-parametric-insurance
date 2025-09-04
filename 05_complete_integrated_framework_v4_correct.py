@@ -536,10 +536,141 @@ if robust_priors_available:
         contamination_type="typhoon_specific"
     )
     
+    # ==========================================
+    # 新增：測試不同模型配置
+    # ==========================================
+    print("\n🧪 測試不同Prior和Likelihood配置...")
+    
+    # 定義測試配置（來自robust_model_analysis_report.py）
+    model_test_configs = [
+        {
+            'name': '保守配置 (輕微污染)',
+            'epsilon_prior': 0.03,
+            'epsilon_likelihood': 0.05,
+            'prior_contamination': 'typhoon_specific',
+            'likelihood_contamination': 'measurement_error',
+            'description': '適用於數據品質較高的情況'
+        },
+        {
+            'name': '平衡配置 (中等污染)',
+            'epsilon_prior': 0.08,
+            'epsilon_likelihood': 0.12,
+            'prior_contamination': 'typhoon_specific',
+            'likelihood_contamination': 'extreme_events',
+            'description': '適用於標準颱風風險場景'
+        },
+        {
+            'name': '激進配置 (嚴重污染)',
+            'epsilon_prior': 0.15,
+            'epsilon_likelihood': 0.20,
+            'prior_contamination': 'heavy_tailed',
+            'likelihood_contamination': 'extreme_events',
+            'description': '適用於極端事件頻繁的情況'
+        }
+    ]
+    
+    # 測試每個配置
+    model_comparison_results = []
+    best_config = None
+    best_bias = float('inf')
+    
+    # 計算真實均值作為參考
+    true_mean = np.mean(event_losses_positive)
+    
+    for config in model_test_configs:
+        print(f"\n📋 測試: {config['name']}")
+        print(f"   {config['description']}")
+        print(f"   ε_prior={config['epsilon_prior']:.3f}, ε_likelihood={config['epsilon_likelihood']:.3f}")
+        
+        # 創建此配置的雙重污染模型
+        test_contamination_model = DoubleEpsilonContamination(
+            epsilon_prior=config['epsilon_prior'],
+            epsilon_likelihood=config['epsilon_likelihood'],
+            prior_contamination_type=config['prior_contamination'],
+            likelihood_contamination_type=config['likelihood_contamination']
+        )
+        
+        # 計算此配置的穩健後驗
+        base_prior_params = {
+            'location': true_mean,
+            'scale': np.std(event_losses_positive)
+        }
+        
+        config_posterior = test_contamination_model.compute_robust_posterior(
+            data=event_losses_positive,
+            base_prior_params=base_prior_params,
+            likelihood_params={}
+        )
+        
+        # 計算性能指標
+        posterior_mean = config_posterior['posterior_mean']
+        bias = abs(posterior_mean - true_mean)
+        relative_bias = (bias / true_mean) * 100
+        variance_inflation = config_posterior['contamination_impact']['variance_inflation']
+        
+        # 記錄結果
+        result = {
+            'config_name': config['name'],
+            'epsilon_prior': config['epsilon_prior'],
+            'epsilon_likelihood': config['epsilon_likelihood'],
+            'posterior_mean': posterior_mean,
+            'bias': bias,
+            'relative_bias': relative_bias,
+            'variance_inflation': variance_inflation,
+            'effective_sample_size': config_posterior['effective_sample_size']
+        }
+        model_comparison_results.append(result)
+        
+        print(f"   結果: 後驗均值=${posterior_mean/1e6:.2f}M")
+        print(f"        相對誤差={relative_bias:.1f}%, 變異數膨脹={variance_inflation:.2f}x")
+        
+        # 檢查是否為最佳配置
+        if bias < best_bias:
+            best_bias = bias
+            best_config = config
+            best_posterior = config_posterior
+    
+    # 顯示比較結果
+    if model_comparison_results:
+        print("\n📊 模型配置比較結果:")
+        print("-" * 60)
+        print(f"{'配置':<20} {'相對誤差(%)':<12} {'變異數膨脹':<12}")
+        print("-" * 60)
+        for result in model_comparison_results:
+            print(f"{result['config_name']:<20} {result['relative_bias']:>10.1f}% {result['variance_inflation']:>10.2f}x")
+        
+        print(f"\n🏆 最佳配置: {best_config['name']}")
+        print(f"   相對誤差: {(best_bias/true_mean)*100:.1f}%")
+        print(f"   建議: {best_config['description']}")
+        
+        # 根據數據特性選擇最終配置
+        contamination_ratio = len(event_losses[event_losses > np.percentile(event_losses, 95)]) / len(event_losses)
+        if contamination_ratio < 0.05:
+            selected_config = model_test_configs[0]  # 保守配置
+            print(f"\n💡 根據污染率({contamination_ratio:.1%})，推薦使用: 保守配置")
+        elif contamination_ratio < 0.15:
+            selected_config = model_test_configs[1]  # 平衡配置
+            print(f"\n💡 根據污染率({contamination_ratio:.1%})，推薦使用: 平衡配置")
+        else:
+            selected_config = model_test_configs[2]  # 激進配置
+            print(f"\n💡 根據污染率({contamination_ratio:.1%})，推薦使用: 激進配置")
+        
+        # 更新最終的epsilon值為選定配置的值
+        final_epsilon_prior = selected_config['epsilon_prior']
+        final_epsilon_likelihood = selected_config['epsilon_likelihood']
+        
+    else:
+        # 如果測試失敗，使用原始結果
+        final_epsilon_prior = final_epsilon
+        final_epsilon_likelihood = min(0.1, final_epsilon * 1.5)
+        
 else:
     print("⚠️ 穩健先驗組件不可用，使用預設ε值")
     final_epsilon = 0.05  # 使用默認值
     contamination_analysis = None
+    model_comparison_results = []
+    final_epsilon_prior = 0.05
+    final_epsilon_likelihood = 0.08
 
 # 創建雙重ε-contamination模型（Prior + Likelihood雙重污染）
 if robust_priors_available and DoubleEpsilonContamination:
@@ -560,35 +691,30 @@ if robust_priors_available and DoubleEpsilonContamination:
     )
     
     # 驗證雙重污染模型
-    try:
-        # 測試contaminated prior創建
-        base_prior_params = {
-            'location': robust_posterior['posterior_mean'],
-            'scale': robust_posterior['posterior_std']
-        }
-        contaminated_prior = contamination_model.create_contaminated_prior(base_prior_params)
-        
-        # 測試contaminated likelihood
-        contaminated_data = contamination_model.create_contaminated_likelihood(event_losses_positive)
-        
-        print(f"✅ 雙重污染模型驗證通過:")
-        print(f"   先驗位移: {contaminated_prior['contamination_info']['epsilon']:.4f}")
-        print(f"   污染數據比例: {len(contaminated_data)/len(event_losses_positive):.2f}")
-        
-        # 計算穩健後驗（在雙重污染下）
-        robust_posterior_double = contamination_model.compute_robust_posterior(
-            data=event_losses_positive,
-            base_prior_params=base_prior_params,
-            likelihood_params={}
-        )
-        
-        print(f"   雙重污染後驗均值: ${robust_posterior_double['posterior_mean']/1e6:.2f}M")
-        print(f"   變異數膨脹: {robust_posterior_double['contamination_impact']['variance_inflation']:.2f}x")
-        print(f"   樣本量損失: {robust_posterior_double['contamination_impact']['sample_size_reduction']*100:.1f}%")
-        
-    except Exception as e:
-        print(f"⚠️ 雙重污染模型驗證失敗: {e}")
-        robust_posterior_double = None
+    # 測試contaminated prior創建
+    base_prior_params = {
+        'location': robust_posterior['posterior_mean'],
+        'scale': robust_posterior['posterior_std']
+    }
+    contaminated_prior = contamination_model.create_contaminated_prior(base_prior_params)
+    
+    # 測試contaminated likelihood
+    contaminated_data = contamination_model.create_contaminated_likelihood(event_losses_positive)
+    
+    print(f"✅ 雙重污染模型驗證通過:")
+    print(f"   先驗位移: {contaminated_prior['contamination_info']['epsilon']:.4f}")
+    print(f"   污染數據比例: {len(contaminated_data)/len(event_losses_positive):.2f}")
+    
+    # 計算穩健後驗（在雙重污染下）
+    robust_posterior_double = contamination_model.compute_robust_posterior(
+        data=event_losses_positive,
+        base_prior_params=base_prior_params,
+        likelihood_params={}
+    )
+    
+    print(f"   雙重污染後驗均值: ${robust_posterior_double['posterior_mean']/1e6:.2f}M")
+    print(f"   變異數膨脹: {robust_posterior_double['contamination_impact']['variance_inflation']:.2f}x")
+    print(f"   樣本量損失: {robust_posterior_double['contamination_impact']['sample_size_reduction']*100:.1f}%")
         
     print(f"🎯 雙重ε-contamination分析完成: ε₁={epsilon_prior:.4f}, ε₂={epsilon_likelihood:.4f}")
     
@@ -783,77 +909,24 @@ else:
     test_data = None       # 沒有測試集
 
 # 添加Cat-in-Circle數據到空間數據 (使用訓練數據)
-# 檢查 add_cat_in_circle_data 方法是否存在及其簽名
-if hasattr(spatial_processor, 'add_cat_in_circle_data'):
-    try:
-        # 使用訓練數據進行模型構建
-        spatial_data = spatial_processor.add_cat_in_circle_data(
-            train_data['hazard_intensities'], 
-            train_data['exposure_values'], 
-            train_data['observed_losses']
-        )
-    except TypeError as e:
-        print(f"⚠️ 方法調用參數錯誤: {e}")
-        # 嘗試不同的參數組合
-        try:
-            # 可能只需要2個參數
-            spatial_data = spatial_processor.add_cat_in_circle_data(
-                train_data['hazard_intensities'], train_data['exposure_values']
-            )
-            print("✅ 使用2參數調用成功")
-        except:
-            try:
-                # 可能是字典形式
-                cat_data = {
-                    'hazard_intensities': train_data['hazard_intensities'],
-                    'exposure_values': train_data['exposure_values'],
-                    'observed_losses': train_data['observed_losses']
-                }
-                spatial_data = spatial_processor.add_cat_in_circle_data(spatial_data, cat_data)
-                print("✅ 使用字典參數調用成功")
-            except:
-                print("⚠️ 無法調用add_cat_in_circle_data，手動添加數據")
-                # 手動添加數據到spatial_data對象
-                if hasattr(spatial_data, '__dict__'):
-                    spatial_data.hazard_intensities = train_data['hazard_intensities']
-                    spatial_data.exposure_values = train_data['exposure_values']
-                    spatial_data.observed_losses = train_data['observed_losses']
-else:
-    print("⚠️ add_cat_in_circle_data方法不存在，手動添加數據")
-    # 手動添加數據
-    if hasattr(spatial_data, '__dict__'):
-        spatial_data.hazard_intensities = train_data['hazard_intensities']
-        spatial_data.exposure_values = train_data['exposure_values']
-        spatial_data.observed_losses = train_data['observed_losses']
+spatial_data = spatial_processor.add_cat_in_circle_data(
+    train_data['hazard_intensities'], 
+    train_data['exposure_values'], 
+    train_data['observed_losses']
+)
 
 # 驗證模型輸入
-if validate_model_inputs:
-    try:
-        validate_model_inputs(spatial_data)
-        print("✅ 模型輸入驗證通過")
-    except Exception as e:
-        print(f"⚠️ 模型輸入驗證失敗: {e}")
-        print("📊 繼續執行...")
-else:
-    print("⚠️ validate_model_inputs函數不可用，跳過驗證")
+validate_model_inputs(spatial_data)
+print("✅ 模型輸入驗證通過")
 
 # 構建4層階層模型
-if build_hierarchical_model:
-    try:
-        hierarchical_model = build_hierarchical_model(
-            spatial_data=spatial_data,
-            contamination_epsilon=final_epsilon,
-            emanuel_threshold=25.7,
-            model_name="NC_Hurricane_Hierarchical_Model"
-        )
-        print(f"✅ 4層階層模型構建完成")
-        
-    except Exception as e:
-        print(f"❌ 4層階層模型構建失敗: {e}")
-        hierarchical_model = None
-else:
-    print("⚠️ build_hierarchical_model函數不可用，跳過階層建模")
-    hierarchical_model = None
+hierarchical_model = build_hierarchical_model(
+    spatial_data=spatial_data,
+    contamination_epsilon=final_epsilon,
+    emanuel_threshold=25.7,
+    model_name="NC_Hurricane_Hierarchical_Model"
+)
+print(f"✅ 4層階層模型構建完成")
 
 # %%
 # =============================================================================
@@ -1154,53 +1227,48 @@ def vi_hyperparameter_objective(params):
     優化VI算法的超參數（而非保險產品參數）
     使用驗證集評估不同超參數配置的性能
     """
-    try:
-        # 提取VI算法超參數
-        learning_rate = params.get('learning_rate', 0.01)
-        epsilon = params.get('epsilon', 0.1)
-        regularization = params.get('regularization', 0.001)
-        n_iterations = params.get('n_iterations', 100)
-        
-        # 創建新的VI實例with不同超參數
-        # 注意：檢查BasisRiskAwareVI實際支持的參數
-        vi_temp_kwargs = {
-            'n_features': 1,
-            'epsilon_values': [epsilon],  # 使用單一epsilon值進行快速評估
-            'basis_risk_types': ['weighted']  # 使用最佳的基差風險類型
-        }
-        
-        # 嘗試添加可能支持的超參數
-        # 如果不支持，VI會忽略這些參數
-        try:
-            vi_temp = BasisRiskAwareVI(
-                **vi_temp_kwargs,
-                learning_rate=learning_rate,
-                regularization=regularization,
-                n_iterations=n_iterations
-            )
-        except TypeError:
-            # 如果不支持這些參數，使用基本配置
-            vi_temp = BasisRiskAwareVI(**vi_temp_kwargs)
-        
-        # 在驗證集上評估（不是訓練集！）
-        val_X = val_indices.reshape(-1, 1)
-        val_y = val_losses
-        
-        # 快速訓練並評估
-        vi_temp.fit(X_vi[:1000], y_vi[:1000])  # 用小部分訓練集快速訓練
-        val_predictions = vi_temp.predict(val_X)
-        
-        # 計算驗證集上的基差風險
-        val_basis_risk = np.mean(np.abs(val_predictions - val_y))
-        
-        # 加入正則化懲罰防止過擬合
-        complexity_penalty = regularization * n_iterations * learning_rate
-        
-        return -(val_basis_risk + complexity_penalty)  # 負值因為優化器最大化
-        
-    except Exception as e:
-        print(f"      超參數評估失敗: {e}")
-        return -1e6
+    # 提取VI算法超參數
+    learning_rate = params.get('learning_rate', 0.01)
+    epsilon = params.get('epsilon', 0.1)
+    regularization = params.get('regularization', 0.001)
+    n_iterations = params.get('n_iterations', 100)
+    
+    # 創建新的VI實例with不同超參數
+    vi_temp_kwargs = {
+        'n_features': 1,
+        'epsilon_values': [epsilon],  # 使用單一epsilon值進行快速評估
+        'basis_risk_types': ['weighted']  # 使用最佳的基差風險類型
+    }
+    
+    # BasisRiskAwareVI只支持基本配置參數
+    vi_temp = BasisRiskAwareVI(**vi_temp_kwargs)
+    
+    # 在驗證集上評估（不是訓練集！）
+    val_X = val_indices.reshape(-1, 1)
+    val_y = val_losses
+    
+    # 快速訓練並評估
+    temp_results = vi_temp.run_comprehensive_screening(X_vi_train[:1000], y_vi_train[:1000])
+    
+    # 使用訓練結果進行預測
+    best_temp_model = temp_results['best_model']
+    best_temp_theta = best_temp_model['best_theta']
+    
+    # 使用predict_distribution方法
+    val_samples = vi_temp.predict_distribution(
+        theta=best_temp_theta,
+        X=val_X,
+        n_samples=50  # 減少樣本數以提高速度
+    )
+    val_predictions = np.mean(val_samples, axis=1)
+    
+    # 計算驗證集上的基差風險
+    val_basis_risk = np.mean(np.abs(val_predictions - val_y))
+    
+    # 加入正則化懲罰防止過擬合
+    complexity_penalty = regularization * n_iterations * learning_rate
+    
+    return -(val_basis_risk + complexity_penalty)  # 負值因為優化器最大化
 
 # 定義VI超參數搜索空間
 vi_hyperparameter_space = [
@@ -1242,22 +1310,12 @@ vi_final_kwargs = {
     'basis_risk_types': ['weighted']
 }
 
-# 嘗試使用額外參數，如果不支持則忽略
-try:
-    vi_final = BasisRiskAwareVI(
-        **vi_final_kwargs,
-        learning_rate=best_vi_hyperparams['learning_rate'],
-        regularization=best_vi_hyperparams['regularization'],
-        n_iterations=best_vi_hyperparams['n_iterations']
-    )
-    print("   使用完整超參數配置")
-except TypeError:
-    # 如果不支持額外參數，使用基本配置
-    vi_final = BasisRiskAwareVI(**vi_final_kwargs)
-    print("   使用基本配置 (類別不支持所有超參數)")
+# BasisRiskAwareVI只支持基本配置參數（不支持learning_rate等額外參數）
+vi_final = BasisRiskAwareVI(**vi_final_kwargs)
+print("   使用基本配置")
 
 # 在完整訓練集上訓練
-vi_final_results = vi_final.run_comprehensive_screening(X_vi, y_vi)
+vi_final_results = vi_final.run_comprehensive_screening(X_vi_train, y_vi_train, X_val=X_vi_val, y_val=y_vi_val)
 
 # 在測試集上最終評估（如果有測試集）
 if test_data is not None:
@@ -1273,7 +1331,19 @@ if test_data is not None:
     test_X = np.array(test_indices_all).reshape(-1, 1)
     test_y = np.array(test_losses_all)
     
-    test_predictions = vi_final.predict(test_X)
+    # 使用VI結果中的最佳參數進行預測
+    best_model = vi_final_results['best_model']
+    best_theta = best_model['best_theta']  # 直接使用正確的鍵名
+    
+    # 使用predict_distribution方法獲得分布樣本，然後取均值
+    test_samples = vi_final.predict_distribution(
+        theta=best_theta,
+        X=test_X,
+        n_samples=100
+    )
+    # 使用分布的均值作為點預測
+    test_predictions = np.mean(test_samples, axis=1)
+    
     test_basis_risk = np.mean(np.abs(test_predictions - test_y))
     
     print(f"\n📊 最終測試集評估:")
@@ -1328,9 +1398,13 @@ except TypeError as e:
     mcmc_validator = CRPSMCMCValidator()
 
 # 準備MCMC數據 - 使用階段5優化後的VI模型結果
+# 合併訓練和驗證數據用於MCMC
+parametric_indices_combined = np.concatenate([parametric_indices_train, parametric_indices_val])
+observed_losses_combined = np.concatenate([observed_losses_vi_train, observed_losses_vi_val])
+
 mcmc_data = {
-    'parametric_indices': parametric_indices,
-    'observed_losses': observed_losses_vi,
+    'parametric_indices': parametric_indices_combined,
+    'observed_losses': observed_losses_combined,
     'vi_model': vi_final,  # 使用優化後的VI模型
     'vi_results': vi_final_results,  # VI結果
     'best_product': vi_results['best_model'],  # 最佳產品配置
@@ -1353,7 +1427,7 @@ if mcmc_results['success']:
     # 後驗預測檢查
     ppc_results = mcmc_validator.posterior_predictive_checks(
         mcmc_results['trace'],
-        observed_data=observed_losses_vi
+        observed_data=observed_losses_combined
     )
     
     print(f"MCMC驗證完成: R̂={convergence_diagnostics.get('mean_rhat', 'N/A'):.4f}")
@@ -1436,8 +1510,8 @@ for i, (radius, threshold_base) in enumerate([(15, 30), (30, 35), (50, 40), (75,
     ]
     
     result = insurance_optimizer.optimize_product(
-        observed_losses=observed_losses_vi,
-        parametric_indices=parametric_indices,
+        observed_losses=observed_losses_combined,
+        parametric_indices=parametric_indices_combined,
         bounds=bounds,
         radius=radius
     )
@@ -1451,7 +1525,7 @@ technical_premiums = []
 for result in optimization_results:
     premium_data = insurance_optimizer.calculate_technical_premium(
         optimal_params=result['optimal_params'],
-        parametric_indices=parametric_indices,
+        parametric_indices=parametric_indices_combined,
         risk_free_rate=0.02,
         risk_premium=0.05,
         solvency_margin=0.15
