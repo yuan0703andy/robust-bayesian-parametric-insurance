@@ -30,7 +30,13 @@ from pathlib import Path
 import sys
 
 # 設置路徑
-PATH_ROOT = Path(__file__).parent
+try:
+    # 當作為腳本運行時
+    PATH_ROOT = Path(__file__).parent
+except NameError:
+    # 當在 Jupyter notebook 中運行時
+    PATH_ROOT = Path.cwd()
+    
 sys.path.insert(0, str(PATH_ROOT))
 
 # =============================================================================
