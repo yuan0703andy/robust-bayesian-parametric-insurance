@@ -22,16 +22,16 @@ try:
     from .crps_logp_functions import (
         CRPSLogProbabilityFunction,
         create_nuts_compatible_logp,
-        PyMCCRPSLogProbability,
+        JAXCRPSLogProbability,
         TorchCRPSLogProbability
     )
-except ImportError:
-    from crps_logp_functions import (
-        CRPSLogProbabilityFunction,
-        create_nuts_compatible_logp,
-        PyMCCRPSLogProbability,
-        TorchCRPSLogProbability
-    )
+    CRPS_LOGP_AVAILABLE = True
+except ImportError as e:
+    print(f"⚠️ CRPS logp functions import failed: {e}")
+    CRPSLogProbabilityFunction = None
+    JAXCRPSLogProbability = None
+    TorchCRPSLogProbability = None
+    CRPS_LOGP_AVAILABLE = False
 
 # Try importing JAX (replaces PyMC)
 try:

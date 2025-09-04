@@ -1227,15 +1227,21 @@ print(f"\n✅ VI算法超參數優化完成")
 print("\n階段6: MCMC驗證與收斂診斷")
 print("   目標：使用MCMC驗證優化後VI模型的後驗分佈")
 
-# 配置MCMC採樣器
-# 注意：CRPSMCMCValidator可能不支持device參數
+# 創建MCMC配置對象
+class MCMCConfig:
+    def __init__(self):
+        self.n_samples = getattr(config, 'mcmc_n_samples', 500)  # 減少採樣數以提高速度
+        self.n_warmup = getattr(config, 'mcmc_n_warmup', 250)   # 熱身採樣數
+        self.n_chains = getattr(config, 'mcmc_n_chains', 2)     # 減少鏈數
+        self.target_accept = getattr(config, 'mcmc_target_accept', 0.8)
+
+# 創建MCMC驗證器
 try:
-    # 創建MCMC驗證器
-    mcmc_validator = CRPSMCMCValidator(
-        n_samples=getattr(config, 'mcmc_n_samples', 1000),
-        n_chains=getattr(config, 'mcmc_n_chains', 4),
-        target_accept=getattr(config, 'mcmc_target_accept', 0.8)
-    )
+    mcmc_config = MCMCConfig()
+    mcmc_validator = CRPSMCMCValidator(config=mcmc_config, verbose=True)
+    
+    print(f"✅ MCMC驗證器創建成功")
+    print(f"   採樣數: {mcmc_config.n_samples}, 鏈數: {mcmc_config.n_chains}")
     
     # 顯示計算環境
     if USE_GPU and (gpu_available_torch or gpu_available_jax):
@@ -1248,10 +1254,11 @@ try:
     else:
         print("   💻 使用CPU計算")
         
-except TypeError as e:
-    print(f"   ⚠️ MCMC配置警告: {e}")
-    # 使用最基本的配置
-    mcmc_validator = CRPSMCMCValidator()
+except Exception as e:
+    print(f"   ❌ MCMC驗證器創建失敗: {e}")
+    import traceback
+    traceback.print_exc()
+    mcmc_validator = None
 
 # 準備MCMC數據 - 使用階段5優化後的VI模型結果
 # 合併訓練和驗證數據用於MCMC
@@ -1268,11 +1275,15 @@ mcmc_data = {
 }
 
 # 執行MCMC採樣 - 驗證VI找到的最佳參數分佈
-print("   驗證VI找到的最佳保險產品參數分佈...")
-mcmc_results = mcmc_validator.run_mcmc_validation(
-    data=mcmc_data,
-    model=vi_final  # 使用VI模型而非原始階層模型
-)
+if mcmc_validator is not None:
+    print("   驗證VI找到的最佳保險產品參數分佈...")
+    mcmc_results = mcmc_validator.run_mcmc_validation(
+        data=mcmc_data,
+        model=vi_final  # 使用VI模型而非原始階層模型
+    )
+else:
+    print("   ⚠️ 跳過MCMC採樣")
+    mcmc_results = {'success': False, 'error': 'MCMC驗證器不可用'}
 
 if mcmc_results['success']:
     # 收斂診斷
