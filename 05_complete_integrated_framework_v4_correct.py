@@ -1236,29 +1236,22 @@ class MCMCConfig:
         self.target_accept = getattr(config, 'mcmc_target_accept', 0.8)
 
 # 創建MCMC驗證器
-try:
-    mcmc_config = MCMCConfig()
-    mcmc_validator = CRPSMCMCValidator(config=mcmc_config, verbose=True)
-    
-    print(f"✅ MCMC驗證器創建成功")
-    print(f"   採樣數: {mcmc_config.n_samples}, 鏈數: {mcmc_config.n_chains}")
-    
-    # 顯示計算環境
-    if USE_GPU and (gpu_available_torch or gpu_available_jax):
-        print("   🚀 GPU環境已配置 (MCMC將嘗試使用GPU)")
-        # 確保JAX使用GPU
-        if gpu_available_jax:
-            import os
-            os.environ['JAX_PLATFORM_NAME'] = 'gpu'
-            print("   📌 JAX MCMC將使用GPU")
-    else:
-        print("   💻 使用CPU計算")
-        
-except Exception as e:
-    print(f"   ❌ MCMC驗證器創建失敗: {e}")
-    import traceback
-    traceback.print_exc()
-    mcmc_validator = None
+mcmc_config = MCMCConfig()
+mcmc_validator = CRPSMCMCValidator(config=mcmc_config, verbose=True)
+
+print(f"✅ MCMC驗證器創建成功")
+print(f"   採樣數: {mcmc_config.n_samples}, 鏈數: {mcmc_config.n_chains}")
+
+# 顯示計算環境
+if USE_GPU and (gpu_available_torch or gpu_available_jax):
+    print("   🚀 GPU環境已配置 (MCMC將嘗試使用GPU)")
+    # 確保JAX使用GPU
+    if gpu_available_jax:
+        import os
+        os.environ['JAX_PLATFORM_NAME'] = 'gpu'
+        print("   📌 JAX MCMC將使用GPU")
+else:
+    print("   💻 使用CPU計算")
 
 # 準備MCMC數據 - 使用階段5優化後的VI模型結果
 # 合併訓練和驗證數據用於MCMC
@@ -1275,33 +1268,24 @@ mcmc_data = {
 }
 
 # 執行MCMC採樣 - 驗證VI找到的最佳參數分佈
-if mcmc_validator is not None:
-    print("   驗證VI找到的最佳保險產品參數分佈...")
-    mcmc_results = mcmc_validator.run_mcmc_validation(
-        data=mcmc_data,
-        model=vi_final  # 使用VI模型而非原始階層模型
-    )
-else:
-    print("   ⚠️ 跳過MCMC採樣")
-    mcmc_results = {'success': False, 'error': 'MCMC驗證器不可用'}
+print("   驗證VI找到的最佳保險產品參數分佈...")
+mcmc_results = mcmc_validator.run_mcmc_validation(
+    data=mcmc_data,
+    model=vi_final  # 使用VI模型而非原始階層模型
+)
 
-if mcmc_results['success']:
-    # 收斂診斷
-    convergence_diagnostics = mcmc_validator.compute_convergence_diagnostics(
-        mcmc_results['trace']
-    )
-    
-    # 後驗預測檢查
-    ppc_results = mcmc_validator.posterior_predictive_checks(
-        mcmc_results['trace'],
-        observed_data=observed_losses_combined
-    )
-    
-    print(f"MCMC驗證完成: R̂={convergence_diagnostics.get('mean_rhat', 'N/A'):.4f}")
-else:
-    print(f"MCMC採樣失敗: {mcmc_results.get('error', 'Unknown error')}")
-    convergence_diagnostics = {}
-    ppc_results = {}
+# 收斂診斷
+convergence_diagnostics = mcmc_validator.compute_convergence_diagnostics(
+    mcmc_results['trace']
+)
+
+# 後驗預測檢查
+ppc_results = mcmc_validator.posterior_predictive_checks(
+    mcmc_results['trace'],
+    observed_data=observed_losses_combined
+)
+
+print(f"MCMC驗證完成: R̂={convergence_diagnostics.get('mean_rhat', 'N/A'):.4f}")
 
 # %%
 # =============================================================================
