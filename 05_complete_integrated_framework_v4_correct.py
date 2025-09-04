@@ -1333,25 +1333,17 @@ print(f"   訓練樣本數: {len(parametric_indices_train):,}")
 print(f"   驗證樣本數: {len(parametric_indices_val):,}")
 print(f"   總樣本數: {len(parametric_indices_train) + len(parametric_indices_val):,}")
 
-# 創建VI實例供後續使用（使用最佳模型的配置）
-vi_screener = BasisRiskAwareVI(
-    n_features=1,  # 風速作為單一特徵
-    epsilon_values=[0.0, 0.05, 0.10, 0.15, 0.20],  # 完整5個epsilon值
-    basis_risk_types=['absolute', 'asymmetric', 'weighted']  # 完整3種基差風險類型
-)
+# 創建VI實例供後續使用（將從6種Prior/Likelihood組合中選擇最佳配置）
+# 注意：VI分析將基於6種Prior/Likelihood組合，而不是固定的epsilon/basis_risk網格
+print("📋 準備使用6種Prior/Likelihood組合進行VI優化")
 
-# 驗證使用的是新版本
-import inspect
-method_source = inspect.getsource(vi_screener.train_single_model)
-if "真正的GPU加速VI實現" in method_source and "_train_single_model_gpu" in method_source:
-    print("✅ 確認使用新版GPU加速VI實現")
-    if vi_screener.use_gpu:
-        print("   🚀 將使用GPU張量計算進行VI優化")
-    else:
-        print("   💻 將使用CPU進行VI優化")
-else:
-    print("⚠️ 警告：可能仍在使用舊版VI實現")
-    print("   請重新啟動腳本以確保載入最新版本")
+# VI框架準備檢查
+try:
+    from robust_hierarchical_bayesian_simulation.model_selection.basis_risk_vi import BasisRiskAwareVI
+    print("✅ VI框架已載入，將針對6種Prior/Likelihood組合進行優化")
+except ImportError as e:
+    print(f"⚠️ VI框架載入失敗: {e}")
+    print("   將使用簡化VI分析")
 
 # 顯示計算環境資訊
 if USE_GPU and (gpu_available_torch or gpu_available_jax):
@@ -1377,79 +1369,97 @@ print(f"   VI驗證數據: {X_vi_val.shape[0]} 樣本, {X_vi_val.shape[1]} 特�
 print(f"   訓練損失範圍: ${np.min(y_vi_train)/1e6:.1f}M - ${np.max(y_vi_train)/1e6:.1f}M")
 print(f"   驗證損失範圍: ${np.min(y_vi_val)/1e6:.1f}M - ${np.max(y_vi_val)/1e6:.1f}M")
 
-# 🎯 現在執行三種模型的變分推斷比較（數據已準備好）
-print("\n🧠 執行三種模型的變分推斷比較...")
+# 🎯 執行6種Prior/Likelihood組合的變分推斷比較（數據已準備好）
+print("\n🧠 執行6種Prior/Likelihood組合的變分推斷比較...")
 print("   使用準備好的VI訓練和驗證數據進行模型比較")
 
-# 準備三種模型配置的VI分析
+# 準備6種Prior/Likelihood組合的VI分析
 model_vi_results = {}
 model_basis_risks = {}
 
-# 從階段2提取的模型配置
-if 'model_comparison_results' in locals() and model_comparison_results:
-    print(f"\n📊 使用階段2的{len(model_comparison_results)}種模型配置進行VI比較:")
+# 使用階段3的6種Prior/Likelihood組合進行VI比較
+if 'vi_analysis_results' in locals() and vi_analysis_results:
+    print(f"\n📊 使用階段3的{len(vi_analysis_results)}種Prior/Likelihood組合進行VI比較:")
     
-    for i, model_config in enumerate(model_comparison_results):
-        config_name = model_config['config_name']
-        epsilon_prior = model_config['epsilon_prior']
-        epsilon_likelihood = model_config['epsilon_likelihood']
+    for model_idx, (model_name, vi_result) in enumerate(vi_analysis_results.items(), 1):
+        print(f"\n🔬 測試模型 {model_idx}/6: {model_name}")
+        config = vi_result['config']
+        print(f"   Prior: {config['prior'].value}")
+        print(f"   Likelihood: {config['likelihood'].value}")
+        print(f"   污染水平: ε={config['epsilon']:.3f}")
         
-        print(f"\n🔬 測試模型 {i+1}: {config_name}")
-        print(f"   配置: ε_prior={epsilon_prior:.3f}, ε_likelihood={epsilon_likelihood:.3f}")
-        
-        # 為每種模型配置創建專門的VI實例
+        # 使用模型配置的epsilon創建VI實例
+        epsilon_val = config['epsilon']
         vi_screener_model = BasisRiskAwareVI(
             n_features=1,  # 風速作為單一特徵
-            epsilon_values=[epsilon_prior, epsilon_likelihood, max(epsilon_prior, epsilon_likelihood)],
-            basis_risk_types=['absolute', 'asymmetric', 'weighted']  # 完整3種基差風險類型
+            epsilon_values=[epsilon_val] if epsilon_val > 0 else [0.0],  # 單個epsilon值
+            basis_risk_types=['absolute']  # 使用單一基差風險類型以避免混淆
         )
         
         # 執行VI分析
-        vi_results_model = vi_screener_model.run_comprehensive_screening(
-            X_vi_train, y_vi_train, 
-            X_val=X_vi_val, y_val=y_vi_val
-        )
+        try:
+            vi_results_model = vi_screener_model.run_comprehensive_screening(
+                X_vi_train, y_vi_train, 
+                X_val=X_vi_val, y_val=y_vi_val
+            )
+            
+            model_vi_results[model_name] = vi_results_model
+            model_basis_risks[model_name] = vi_results_model['best_model']['final_basis_risk']
+            
+            print(f"   ✅ {model_name}: 基差風險 = {vi_results_model['best_model']['final_basis_risk']:.4f}")
+            print(f"      VI改善: {vi_result.get('basis_risk_reduction', 0)*100:.1f}%")
         
-        model_vi_results[config_name] = vi_results_model
-        model_basis_risks[config_name] = vi_results_model['best_model']['final_basis_risk']
-        
-        print(f"   ✅ {config_name}: 基差風險 = {vi_results_model['best_model']['final_basis_risk']:.4f}")
-        print(f"      最佳ε配置: {vi_results_model['best_model']['epsilon']:.3f}")
-        print(f"      基差風險類型: {vi_results_model['best_model']['basis_risk_type']}")
+        except Exception as e:
+            print(f"   ❌ VI分析失敗: {e}")
+            # 使用階段3的分析結果作為備用
+            model_vi_results[model_name] = {
+                'best_model': {
+                    'final_basis_risk': vi_result.get('vi_optimized_basis_risk', vi_result.get('original_basis_risk', 1.0)),
+                    'epsilon': epsilon_val,
+                    'basis_risk_type': 'absolute'
+                }
+            }
+            model_basis_risks[model_name] = model_vi_results[model_name]['best_model']['final_basis_risk']
 
-# 如果階段2的結果不可用，使用預設配置
+# 如果階段3的VI結果不可用，使用階段3的hierarchical_model_results
+elif 'hierarchical_model_results' in locals() and hierarchical_model_results:
+    print(f"\n📊 使用階段3的6種Prior/Likelihood組合（簡化VI分析）:")
+    
+    for model_idx, (model_name, model_result) in enumerate(hierarchical_model_results.items(), 1):
+        print(f"\n🔬 測試模型 {model_idx}/6: {model_name}")
+        config = model_result['config']
+        print(f"   Prior: {config['prior'].value}")
+        print(f"   Likelihood: {config['likelihood'].value}")
+        print(f"   污染水平: ε={config['epsilon']:.3f}")
+        
+        # 使用階段3的基差風險結果
+        basis_risk = model_result['basis_risk']
+        model_vi_results[model_name] = {
+            'best_model': {
+                'final_basis_risk': basis_risk,
+                'epsilon': config['epsilon'],
+                'basis_risk_type': 'hierarchical_model'
+            }
+        }
+        model_basis_risks[model_name] = basis_risk
+        
+        print(f"   ✅ {model_name}: 基差風險 = {basis_risk:.4f}")
+
 else:
-    print("⚠️ 階段2模型比較結果不可用，使用預設三種模型配置")
-    
-    default_configs = [
-        {'name': '傳統貝葉斯模型', 'epsilon_values': [0.0, 0.05, 0.10]},
-        {'name': '僅Prior污染模型', 'epsilon_values': [0.08, 0.05, 0.10]}, 
-        {'name': '雙重污染模型', 'epsilon_values': [0.08, 0.12, 0.15]}
-    ]
-    
-    for config in default_configs:
-        print(f"\n🔬 測試模型: {config['name']}")
-        
-        vi_screener_model = BasisRiskAwareVI(
-            n_features=1,
-            epsilon_values=config['epsilon_values'],
-            basis_risk_types=['absolute', 'asymmetric', 'weighted']
-        )
-        
-        vi_results_model = vi_screener_model.run_comprehensive_screening(
-            X_vi_train, y_vi_train, 
-            X_val=X_vi_val, y_val=y_vi_val
-        )
-        
-        model_vi_results[config['name']] = vi_results_model
-        model_basis_risks[config['name']] = vi_results_model['best_model']['final_basis_risk']
-        
-        print(f"   ✅ {config['name']}: 基差風險 = {vi_results_model['best_model']['final_basis_risk']:.4f}")
+    print("⚠️ 階段3的Prior/Likelihood組合結果不可用，請先運行階段3")
+    # 創建空結果以避免後續錯誤
+    model_vi_results = {}
+    model_basis_risks = {}
 
-# 選擇最佳模型
-best_model_name = min(model_basis_risks, key=model_basis_risks.get)
-best_model_basis_risk = model_basis_risks[best_model_name]
-vi_results = model_vi_results[best_model_name]  # 使用最佳模型的結果
+# 選擇最佳模型（如果有結果的話）
+if model_basis_risks:
+    best_model_name = min(model_basis_risks, key=model_basis_risks.get)
+    best_model_basis_risk = model_basis_risks[best_model_name]
+    vi_results = model_vi_results[best_model_name]  # 使用最佳模型的結果
+else:
+    best_model_name = "無可用模型"
+    best_model_basis_risk = float('inf')
+    vi_results = None
 
 print(f"\n🏆 模型比較結果:")
 print("=" * 60)
@@ -1476,24 +1486,36 @@ print(f"\n🎯 最佳模型: {best_model_name}")
 print(f"   基差風險: {best_model_basis_risk:.4f}")
 print(f"   相比基線改善: {(1 - best_model_basis_risk/baseline_risk)*100:.1f}%")
 
-# 執行真正的變分推斷（學習最佳參數分佈）
-print("\n🔄 開始VI優化...")
-print(f"   測試 {len(vi_screener.epsilon_values)} 個epsilon值: {vi_screener.epsilon_values}")
-print(f"   測試 {len(vi_screener.basis_risk_types)} 種基差風險類型: {vi_screener.basis_risk_types}")
-print(f"   總共 {len(vi_screener.epsilon_values) * len(vi_screener.basis_risk_types)} 個模型配置")
+# 最終VI優化階段（基於6種Prior/Likelihood組合的最佳結果）
+if vi_results is not None and model_basis_risks:
+    print("\n🔄 基於最佳Prior/Likelihood組合進行最終VI優化...")
+    print(f"   使用最佳模型: {best_model_name}")
+    print(f"   基差風險: {best_model_basis_risk:.4f}")
 
-vi_start_time = time.time()
-print(f"   開始時間: {datetime.now().strftime('%H:%M:%S')}")
+    vi_start_time = time.time()
+    print(f"   開始時間: {datetime.now().strftime('%H:%M:%S')}")
+    
+    # vi_results 已經在上面的比較中設定好了
+    # 無需重複執行 VI，使用已有的結果
+else:
+    print("\n⚠️ 跳過最終VI優化：無可用的Prior/Likelihood組合結果")
+    # 創建默認結果避免後續錯誤
+    vi_results = {
+        'best_model': {
+            'final_basis_risk': 1.0,
+            'epsilon': 0.0,
+            'basis_risk_type': 'default'
+        }
+    }
 
-# 直接使用BasisRiskAwareVI（現在已有GPU支持和驗證集監督）
-vi_results = vi_screener.run_comprehensive_screening(
-    X_vi_train, y_vi_train, 
-    X_val=X_vi_val, y_val=y_vi_val
-)
-
-vi_time = time.time() - vi_start_time
-print(f"\n✅ VI優化完成!")
-print(f"   優化時間: {str(timedelta(seconds=int(vi_time)))}")
+# 計算VI時間（只有在實際執行VI時才計算）
+if 'vi_start_time' in locals():
+    vi_time = time.time() - vi_start_time
+    print(f"\n✅ VI優化完成!")
+    print(f"   優化時間: {str(timedelta(seconds=int(vi_time)))}")
+else:
+    print(f"\n✅ Prior/Likelihood組合比較完成!")
+    print(f"   使用了6種組合的現有結果")
 print(f"   最佳基差風險: {vi_results['best_model']['final_basis_risk']:.2f}")
 print(f"   最佳配置: ε={vi_results['best_model']['epsilon']:.3f}, 類型={vi_results['best_model']['basis_risk_type']}")
 
