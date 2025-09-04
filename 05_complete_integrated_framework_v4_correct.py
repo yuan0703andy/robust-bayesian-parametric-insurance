@@ -1111,8 +1111,9 @@ def vi_hyperparameter_objective(params):
     best_temp_model = temp_results['best_model']
     best_temp_theta = best_temp_model['best_theta']
     
-    # 使用predict_distribution方法
-    val_samples = vi_temp.predict_distribution(
+    # 使用 ParametricPayoutFunction 生成預測
+    # vi_temp.payout_function 是 ParametricPayoutFunction 的實例
+    val_samples = vi_temp.payout_function.predict_distribution(
         theta=best_temp_theta,
         X=val_X,
         n_samples=50  # 減少樣本數以提高速度
@@ -1192,8 +1193,8 @@ if test_data is not None:
     best_model = vi_final_results['best_model']
     best_theta = best_model['best_theta']  # 直接使用正確的鍵名
     
-    # 使用predict_distribution方法獲得分布樣本，然後取均值
-    test_samples = vi_final.predict_distribution(
+    # 使用 ParametricPayoutFunction 獲得分布樣本，然後取均值
+    test_samples = vi_final.payout_function.predict_distribution(
         theta=best_theta,
         X=test_X,
         n_samples=100
