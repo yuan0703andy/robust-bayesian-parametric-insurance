@@ -448,6 +448,13 @@ if robust_priors_available:
             variance_inflation = 1.0
             effective_sample_size = len(event_losses_positive)
             
+            # 創建標準貝葉斯結果字典，保持與污染模型一致的格式
+            config_posterior = {
+                'posterior_mean': posterior_mean,
+                'contamination_impact': {'variance_inflation': variance_inflation},
+                'effective_sample_size': effective_sample_size
+            }
+            
             print(f"   使用標準貝葉斯推斷（無污染）")
         else:
             # 使用雙重污染模型
