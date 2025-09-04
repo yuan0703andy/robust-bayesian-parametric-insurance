@@ -364,6 +364,40 @@ class BasisRiskAwareVI:
         # 存儲結果
         self.vi_results = {}
     
+    def predict_distribution(self, theta: np.ndarray, X: np.ndarray, n_samples: int = 100) -> np.ndarray:
+        """
+        基於變分參數進行預測
+        
+        Args:
+            theta: 變分參數均值
+            X: 輸入特徵 [N, d]  
+            n_samples: 每個預測點的樣本數
+            
+        Returns:
+            預測損失分布樣本 [N, n_samples]
+        """
+        N = X.shape[0]
+        
+        # 使用變分參數生成預測
+        # theta 包含線性係數和噪聲參數
+        if len(theta) >= X.shape[1]:
+            linear_pred = X @ theta[:X.shape[1]]
+        else:
+            # 如果參數不足，使用簡化預測
+            linear_pred = np.ones(N) * np.mean(theta)
+        
+        # 添加噪聲
+        noise_std = np.abs(theta[-1]) if len(theta) > X.shape[1] else 1e6
+        
+        # 生成樣本
+        samples = np.zeros((N, n_samples))
+        for i in range(N):
+            # 生成對數正態分布樣本 (適合損失數據)
+            log_mean = np.log(np.maximum(linear_pred[i], 1e3))  # 避免過小值
+            samples[i] = np.random.lognormal(log_mean, noise_std, n_samples)
+        
+        return samples
+    
     def compute_basis_risk(self, y_true: np.ndarray, payout_samples: np.ndarray,
                           basis_risk_type: str = 'weighted') -> float:
         """
