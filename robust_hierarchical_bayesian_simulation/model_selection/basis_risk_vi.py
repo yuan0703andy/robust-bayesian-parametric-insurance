@@ -641,7 +641,15 @@ class BasisRiskAwareVI:
             theta_intercept = torch.zeros_like(theta_slope)
         
         # 線性預測: μ = slope * X + intercept
-        X_expanded = X_tensor.squeeze(-1).unsqueeze(0).expand(batch_size, -1)  # [batch_size, n_data]
+        # 處理可能的3維輸入張量
+        if X_tensor.dim() == 3:
+            # 如果是 3 維 [batch, seq, features]，取最後一維並展平
+            X_flat = X_tensor.view(-1, X_tensor.size(-1)).squeeze(-1)  # [total_data]
+        else:
+            X_flat = X_tensor.squeeze(-1)  # [n_data]
+        
+        n_data = X_flat.shape[0]
+        X_expanded = X_flat.unsqueeze(0).expand(batch_size, -1)  # [batch_size, n_data]
         mu_pred = theta_slope * X_expanded + theta_intercept  # [batch_size, n_data]
         
         # 預測標準差 (假設同質性)
@@ -649,7 +657,15 @@ class BasisRiskAwareVI:
         sigma_pred = sigma_pred.expand(-1, n_data)  # [batch_size, n_data]
         
         # 計算log likelihood
-        y_expanded = y_tensor.unsqueeze(0).expand(batch_size, -1)  # [batch_size, n_data]
+        # 處理可能的維度不匹配
+        if y_tensor.dim() > 1:
+            y_flat = y_tensor.view(-1)  # 展平為1維
+        else:
+            y_flat = y_tensor
+        
+        # 確保 y 和 X 的數據點數量匹配
+        y_flat = y_flat[:n_data]  # 截取匹配的數據點數量
+        y_expanded = y_flat.unsqueeze(0).expand(batch_size, -1)  # [batch_size, n_data]
         
         if likelihood_family == 'normal':
             # Normal likelihood: log p(y|μ,σ) = -0.5*log(2πσ²) - (y-μ)²/(2σ²)
@@ -749,18 +765,30 @@ class BasisRiskAwareVI:
     def _compute_basis_risk_batch_gpu(self, X_tensor, y_tensor, theta_samples, epsilon, basis_risk_type):
         """GPU上批次計算基差風險 - 修正版：θ參數真正影響計算"""
         batch_size = theta_samples.shape[0]
-        n_data = X_tensor.shape[0]
+        
+        # 處理可能的維度問題
+        if X_tensor.dim() == 3:
+            X_flat = X_tensor.view(-1, X_tensor.size(-1)).squeeze(-1)
+        else:
+            X_flat = X_tensor.squeeze(-1)
+        
+        if y_tensor.dim() > 1:
+            y_flat = y_tensor.view(-1)
+        else:
+            y_flat = y_tensor
+            
+        n_data = X_flat.shape[0]
+        y_flat = y_flat[:n_data]  # 確保數據點匹配
         
         # epsilon contamination
         if epsilon > 0:
-            noise = torch.randn_like(y_tensor.unsqueeze(0).expand(batch_size, -1)) * epsilon * y_tensor.mean()
-            y_perturbed = y_tensor.unsqueeze(0).expand(batch_size, -1) + noise
+            noise = torch.randn_like(y_flat.unsqueeze(0).expand(batch_size, -1)) * epsilon * y_flat.mean()
+            y_perturbed = y_flat.unsqueeze(0).expand(batch_size, -1) + noise
         else:
-            y_perturbed = y_tensor.unsqueeze(0).expand(batch_size, -1)
+            y_perturbed = y_flat.unsqueeze(0).expand(batch_size, -1)
         
         # *** 關鍵修正：讓θ參數影響賠付計算 ***
-        wind_speeds = X_tensor.squeeze(-1)  # [n_data]
-        wind_speeds = wind_speeds.unsqueeze(0).expand(batch_size, -1)  # [batch_size, n_data]
+        wind_speeds = X_flat.unsqueeze(0).expand(batch_size, -1)  # [batch_size, n_data]
         
         # 使用θ參數調整閾值和賠付比例
         # theta_samples: [batch_size, n_params], 其中n_params=2 (slope + intercept)
@@ -828,7 +856,20 @@ class BasisRiskAwareVI:
             CRPS scores [batch_size] - 每個θ樣本的CRPS
         """
         batch_size = theta_samples.shape[0]
-        n_data = X_tensor.shape[0]
+        
+        # 處理維度問題
+        if X_tensor.dim() == 3:
+            X_flat = X_tensor.view(-1, X_tensor.size(-1)).squeeze(-1)
+        else:
+            X_flat = X_tensor.squeeze(-1) if X_tensor.dim() > 1 else X_tensor
+        
+        if y_tensor.dim() > 1:
+            y_flat = y_tensor.view(-1)
+        else:
+            y_flat = y_tensor
+            
+        n_data = X_flat.shape[0]
+        y_flat = y_flat[:n_data]  # 確保數據點匹配
         
         # 為每個θ樣本生成參數保險賠付分布 F(θ)
         crps_scores = torch.zeros(batch_size, device=self.device)
@@ -838,15 +879,15 @@ class BasisRiskAwareVI:
             
             # 1. 基於θ生成參數保險賠付分布樣本
             payout_distribution_samples = self._generate_payout_distribution_gpu(
-                X_tensor, theta, n_samples=50  # 每個數據點生成50個賠付樣本
+                X_flat.unsqueeze(-1), theta, n_samples=50  # 每個數據點生成50個賠付樣本
             )  # [n_data, n_samples]
             
             # 2. 添加ε-contamination到觀測值
             if epsilon > 0:
-                noise = torch.randn_like(y_tensor) * epsilon * y_tensor.std()
-                y_contaminated = y_tensor + noise
+                noise = torch.randn_like(y_flat) * epsilon * y_flat.std()
+                y_contaminated = y_flat + noise
             else:
-                y_contaminated = y_tensor
+                y_contaminated = y_flat
             
             # 3. 計算CRPS(y_contaminated, payout_distribution)
             crps_per_event = torch.zeros(n_data, device=self.device)
@@ -919,9 +960,12 @@ class BasisRiskAwareVI:
             payout_std = deterministic_payout * 0.1  # 10%的變異性
             
             if payout_std > 0:
+                # 修正torch.normal參數格式
                 payout_samples[i] = torch.normal(
-                    deterministic_payout, payout_std, (n_samples,), device=self.device
-                ).clamp(min=0)  # 確保非負
+                    mean=deterministic_payout, 
+                    std=payout_std, 
+                    size=(n_samples,)
+                ).to(self.device).clamp(min=0)  # 確保非負
             else:
                 payout_samples[i] = torch.zeros(n_samples, device=self.device)
         
