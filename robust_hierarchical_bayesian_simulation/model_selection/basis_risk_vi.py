@@ -960,11 +960,9 @@ class BasisRiskAwareVI:
             payout_std = deterministic_payout * 0.1  # 10%的變異性
             
             if payout_std > 0:
-                # 使用正確的torch.normal語法 (PyTorch 1.7+)
-                payout_samples[i] = torch.normal(
-                    deterministic_payout.expand(n_samples), 
-                    payout_std.expand(n_samples) if hasattr(payout_std, 'expand') else torch.full((n_samples,), payout_std, device=self.device)
-                ).to(self.device).clamp(min=0)  # 確保非負
+                # 使用torch.randn生成標準正態分佈，然後變換
+                standard_normal = torch.randn(n_samples, device=self.device)
+                payout_samples[i] = (deterministic_payout + payout_std * standard_normal).clamp(min=0)
             else:
                 payout_samples[i] = torch.zeros(n_samples, device=self.device)
         
