@@ -804,7 +804,7 @@ for i, config in enumerate(prior_likelihood_test_configs, 1):
         
         # 使用真實的ParametricHierarchicalModel創建模型
         from robust_hierarchical_bayesian_simulation.hierarchical_modeling.core_model import ParametricHierarchicalModel
-        from robust_hierarchical_bayesian_simulation.hierarchical_modeling.prior_specifications import ModelSpec
+        from robust_hierarchical_bayesian_simulation.hierarchical_modeling.prior_specifications import ModelSpec, VulnerabilityData
         
         # 準備模型數據
         model_data = {
@@ -829,13 +829,19 @@ for i, config in enumerate(prior_likelihood_test_configs, 1):
             model_spec=model_spec
         )
         
+        # 創建VulnerabilityData對象
+        vulnerability_data = VulnerabilityData(
+            hazard_intensities=model_data['hazard_intensities'],
+            exposure_values=model_data['exposure_values'],
+            observed_losses=model_data['observed_losses'],
+            hospital_coordinates=hospital_coords if 'hospital_coords' in locals() else None
+        )
+        
         # 進行真實的模型擬合
         print(f"     🎯 執行階層貝葉斯推斷...")
         model_results = hierarchical_model.fit(
-            hazard_data=model_data['hazard_intensities'],
-            loss_data=model_data['observed_losses'],
-            exposure_data=model_data['exposure_values'],
-            spatial_data=model_data['spatial_data']
+            vulnerability_data=vulnerability_data,
+            return_trace=True
         )
         
         # 驗證模型收斂性
