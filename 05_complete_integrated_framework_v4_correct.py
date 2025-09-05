@@ -804,6 +804,7 @@ for i, config in enumerate(prior_likelihood_test_configs, 1):
         
         # 使用真實的ParametricHierarchicalModel創建模型
         from robust_hierarchical_bayesian_simulation.hierarchical_modeling.core_model import ParametricHierarchicalModel
+        from robust_hierarchical_bayesian_simulation.hierarchical_modeling.prior_specifications import ModelSpec
         
         # 準備模型數據
         model_data = {
@@ -813,13 +814,19 @@ for i, config in enumerate(prior_likelihood_test_configs, 1):
             'spatial_data': spatial_data
         }
         
+        # 創建ModelSpec配置對象
+        model_spec = ModelSpec(
+            likelihood_family=config['likelihood'],
+            prior_scenario=config['prior'],
+            epsilon_contamination=config['epsilon'],
+            include_spatial_effects=True,
+            include_region_effects=True,
+            model_name=config['name']
+        )
+        
         # 創建真實的階層模型實例
         hierarchical_model = ParametricHierarchicalModel(
-            prior_scenario=config['prior'],
-            likelihood_family=config['likelihood'],
-            epsilon_contamination=config['epsilon'],
-            n_levels=4,  # 4層階層結構
-            use_spatial_effects=True
+            model_spec=model_spec
         )
         
         # 進行真實的模型擬合
