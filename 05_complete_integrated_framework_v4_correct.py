@@ -885,9 +885,12 @@ for model_idx, (model_name, model_result) in enumerate(hierarchical_model_result
     print("-" * 60)
     
     try:
+        # 調試：檢查model_result的結構
+        print(f"   🔍 調試: model_result keys = {list(model_result.keys())}")
+        
         # 使用該模型的階層結構進行三層比較分析
         model_config = model_result['config']
-        hierarchical_model = model_result['model']
+        hierarchical_model = model_result.get('model', None)
         
         if hierarchical_model is not None:
             # 準備訓練數據 - 使用實際的CLIMADA數據
