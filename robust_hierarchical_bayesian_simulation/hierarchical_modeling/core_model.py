@@ -32,8 +32,9 @@ os.environ['MKL_THREADING_LAYER'] = 'GNU'
 
 # JAX imports (replaces PyMC)
 try:
-    # 配置JAX平台，跳過TPU避免警告
-    os.environ['JAX_PLATFORMS'] = 'gpu,cpu'  # 優先GPU，回退到CPU，跳過TPU
+    # Duke HPC双GPU配置
+    os.environ['JAX_PLATFORMS'] = 'cuda,cpu'  # NVIDIA CUDA + CPU fallback
+    os.environ['CUDA_VISIBLE_DEVICES'] = '0,1'  # 使用两张GPU
     
     import jax
     import jax.numpy as jnp

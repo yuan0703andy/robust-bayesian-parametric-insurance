@@ -3,7 +3,12 @@ Tropical cyclone track data processing functions
 """
 
 import numpy as np
-from climada.hazard import TCTracks
+try:
+    from climada.hazard import TCTracks
+    CLIMADA_AVAILABLE = True
+except ImportError:
+    CLIMADA_AVAILABLE = False
+    print("⚠️ CLIMADA not available - track processing functions will be limited")
 
 
 def get_regional_tracks(bounds, year_range, nb_synth=10):
@@ -21,9 +26,13 @@ def get_regional_tracks(bounds, year_range, nb_synth=10):
         
     Returns:
     --------
-    TCTracks
-        Filtered and perturbed tropical cyclone tracks
+    TCTracks or None
+        Filtered and perturbed tropical cyclone tracks, None if CLIMADA unavailable
     """
+    
+    if not CLIMADA_AVAILABLE:
+        print("⚠️ CLIMADA not available - cannot generate tracks")
+        return None
     
     # 獲取北大西洋數據
     print(f"正在下載北大西洋颱風軌跡資料 ({year_range[0]}-{year_range[1]})...")
