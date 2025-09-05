@@ -28,6 +28,7 @@ import numpy as np
 import pandas as pd
 from pathlib import Path
 import sys
+import torch
 
 # 設置路徑
 try:
@@ -866,11 +867,24 @@ for i, config in enumerate(prior_likelihood_test_configs, 1):
             hospital_coordinates=hospital_coords if 'hospital_coords' in locals() else None
         )
         
-        # 進行真實的模型擬合
-        print(f"     🎯 執行階層貝葉斯推斷...")
-        model_results = hierarchical_model.fit(
-            vulnerability_data=vulnerability_data,
-            return_trace=True
+        # 進行真實的VI推斷（不是MCMC）
+        print(f"     🎯 執行基差風險感知變分推斷...")
+        
+        # 使用BasisRiskVariationalInference進行VI算法
+        from robust_hierarchical_bayesian_simulation.model_selection.basis_risk_vi import BasisRiskVariationalInference
+        
+        vi_engine = BasisRiskVariationalInference(
+            n_iterations=1000,
+            learning_rate=0.01,
+            device='cuda:0' if torch.cuda.is_available() else 'cpu'
+        )
+        
+        # VI推斷（basis risk aware）
+        model_results = vi_engine.fit_vi_with_basis_risk_optimization(
+            hazard_intensities=hazard_data,
+            observed_losses=loss_data, 
+            exposure_values=exposure_data,
+            model_spec=model_spec
         )
         
         # 驗證模型收斂性（HierarchicalModelResult是對象，不是字典）
