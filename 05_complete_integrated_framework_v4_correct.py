@@ -1007,7 +1007,13 @@ for model_idx, (model_name, model_result) in enumerate(hierarchical_model_result
             # 進行基差風險導向的變分推斷
             from robust_hierarchical_bayesian_simulation.model_selection.basis_risk_vi import BasisRiskAwareVI
             
-            vi_optimizer = BasisRiskAwareVI()
+            # HPC環境：GPU VI分析
+            vi_optimizer = BasisRiskAwareVI(
+                n_features=1,  # 風速特徵
+                epsilon_values=[model_result['config']['epsilon']],
+                basis_risk_types=['absolute'],
+                use_gpu=True  # HPC強制GPU
+            )
             
             # 使用模型的基差風險作為優化目標
             model_basis_risk = model_result['basis_risk']
