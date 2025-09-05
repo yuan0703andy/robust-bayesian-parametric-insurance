@@ -532,8 +532,11 @@ class ParametricHierarchicalModel:
         # 計算脆弱度函數
         vulnerability = self._compute_jax_vulnerability_function(params, hazard_intensities)
         
-        # 計算預期損失
-        expected_loss = vulnerability * exposure_values
+        # 計算預期損失 - 修正維度廣播問題
+        # vulnerability: (n_hospitals, n_events), exposure_values: (n_hospitals,)
+        # 需要將exposure_values擴展為 (n_hospitals, 1) 以支持廣播
+        exposure_expanded = jnp.expand_dims(exposure_values, axis=1)  # (n_hospitals, 1)
+        expected_loss = vulnerability * exposure_expanded  # (n_hospitals, n_events)
         
         # 計算likelihood
         if self.model_spec.likelihood_family == LikelihoodFamily.NORMAL:
