@@ -203,63 +203,67 @@ try:
 except Exception as e:
     print(f"⚠️ CLIMADA數據載入失敗: {e}")
 
-# 如果CLIMADA數據不可用，使用備用數據源
+# 嚴格驗證CLIMADA數據必須存在 - 不接受任何簡化或備用方案
 if hazard_obj is None or exposure_obj is None or impact_obj is None:
-    print("📊 使用備用數據源...")
-    
-    # 從傳統分析結果生成模擬數據
-    try:
-        with open('results/traditional_analysis/traditional_results.pkl', 'rb') as f:
-            traditional_data = pickle.load(f)
-        
-        # 提取或生成基本數據
-        n_events = 100  # 模擬事件數
-        total_exposure = 2e11  # 模擬總暴險 ($200B)
-        event_losses = np.random.gamma(2, 5e8, n_events)  # 模擬損失數據
-        wind_speeds = np.random.beta(2, 5, n_events) * 100  # 模擬風速 (0-100 m/s)
-        
-        print(f"📊 備用數據生成完成: {n_events}事件, ${total_exposure/1e9:.1f}B總暴險")
-        
-    except Exception as e:
-        print(f"❌ 備用數據生成失敗: {e}")
-        # 最後的備用方案
-        n_events = 100
-        total_exposure = 2e11
-        event_losses = np.random.gamma(2, 5e8, n_events)
-        wind_speeds = np.random.beta(2, 5, n_events) * 100
-        
-        print("📊 使用默認模擬數據")
+    print("❌ 錯誤: 缺少必要的CLIMADA數據對象")
+    print("   必須先運行 01_run_climada.py 生成真實的CLIMADA數據")
+    print("   不接受任何模擬或備用數據")
+    sys.exit(1)
 
-else:
-    # 從CLIMADA對象提取關鍵數據
-    try:
-        n_events = len(getattr(impact_obj, 'event_id', range(100)))
-        total_exposure = float(np.sum(getattr(exposure_obj, 'value', [2e11])))
-        event_losses = getattr(impact_obj, 'at_event', np.random.gamma(2, 5e8, n_events))
-        
-        # 處理風速數據
-        if hasattr(hazard_obj, 'intensity'):
-            if hasattr(hazard_obj.intensity, 'max'):
-                wind_speeds = hazard_obj.intensity.max(axis=0)
-                if hasattr(wind_speeds, 'toarray'):
-                    wind_speeds = wind_speeds.toarray().flatten()
-                else:
-                    wind_speeds = np.array(wind_speeds).flatten()
-            else:
-                wind_speeds = np.random.beta(2, 5, n_events) * 100
+# 從CLIMADA對象提取真實數據 - 不允許任何默認值或模擬數據
+try:
+    # 嚴格提取事件數據
+    if not hasattr(impact_obj, 'event_id') or len(impact_obj.event_id) == 0:
+        raise ValueError("Impact對象缺少event_id數據")
+    n_events = len(impact_obj.event_id)
+    
+    # 嚴格提取暴險數據
+    if not hasattr(exposure_obj, 'value') or len(exposure_obj.value) == 0:
+        raise ValueError("Exposure對象缺少value數據")
+    total_exposure = float(np.sum(exposure_obj.value))
+    
+    # 嚴格提取損失數據
+    if not hasattr(impact_obj, 'at_event') or len(impact_obj.at_event) == 0:
+        raise ValueError("Impact對象缺少at_event損失數據")
+    event_losses = np.array(impact_obj.at_event)
+    
+    # 嚴格提取風速數據
+    if not hasattr(hazard_obj, 'intensity'):
+        raise ValueError("Hazard對象缺少intensity數據")
+    
+    # 計算每個事件的最大風速
+    if hasattr(hazard_obj.intensity, 'max'):
+        wind_speeds = hazard_obj.intensity.max(axis=0)
+        if hasattr(wind_speeds, 'toarray'):
+            wind_speeds = wind_speeds.toarray().flatten()
         else:
-            wind_speeds = np.random.beta(2, 5, n_events) * 100
-        
-        print(f"✅ CLIMADA數據處理完成: {n_events}事件, ${total_exposure/1e9:.1f}B總暴險")
-        
-    except Exception as e:
-        print(f"⚠️ CLIMADA數據處理出錯: {e}")
-        # 備用數據
-        n_events = 100
-        total_exposure = 2e11
-        event_losses = np.random.gamma(2, 5e8, n_events)
-        wind_speeds = np.random.beta(2, 5, n_events) * 100
-        print("📊 使用備用模擬數據")
+            wind_speeds = np.array(wind_speeds).flatten()
+    else:
+        raise ValueError("無法從hazard intensity矩陣計算最大風速")
+    
+    # 數據一致性檢查
+    if len(event_losses) != n_events or len(wind_speeds) != n_events:
+        raise ValueError(f"數據維度不一致: events={n_events}, losses={len(event_losses)}, winds={len(wind_speeds)}")
+    
+    # 數據有效性檢查
+    if total_exposure <= 0:
+        raise ValueError(f"總暴險值無效: {total_exposure}")
+    if np.any(event_losses < 0):
+        raise ValueError("發現負數損失值")
+    if np.any(wind_speeds < 0) or np.all(wind_speeds == 0):
+        raise ValueError("風速數據無效")
+    
+    print(f"✅ 真實CLIMADA數據驗證通過:")
+    print(f"   事件數量: {n_events}")
+    print(f"   總暴險: ${total_exposure/1e9:.1f}B")
+    print(f"   損失範圍: ${event_losses.min()/1e6:.1f}M - ${event_losses.max()/1e6:.1f}M")
+    print(f"   風速範圍: {wind_speeds.min():.1f} - {wind_speeds.max():.1f} m/s")
+    
+except Exception as e:
+    print(f"❌ CLIMADA數據驗證失敗: {e}")
+    print("   請確保運行 01_run_climada.py 生成完整的真實數據")
+    print("   不接受任何簡化、模擬或備用數據方案")
+    sys.exit(1)
 
 # %%
 # =============================================================================
@@ -543,17 +547,12 @@ if SpatialDataProcessor:
         hospital_coords,
         n_regions=getattr(config, 'use_spatial_effects', True) and 3 or 1
     )
-    print(f"空間數據處理完成: {len(hospital_coords)} 醫院座標")
+    print(f"✅ 空間數據處理完成: {len(hospital_coords)} 醫院座標")
 else:
-    print("⚠️ SpatialDataProcessor不可用，使用備用空間數據")
-    # 創建備用空間數據結構
-    class DummySpatialData:
-        def __init__(self):
-            self.n_regions = 1
-            self.region_assignments = np.zeros(100)  # 假設100個觀測
-            self.hospital_coordinates = np.random.rand(100, 2)
-    
-    spatial_data = DummySpatialData()
+    print("❌ 錯誤: SpatialDataProcessor不可用")
+    print("   必須確保 robust_hierarchical_bayesian_simulation 模組完整可用")
+    print("   不接受任何備用或簡化的空間數據")
+    sys.exit(1)
 
 # 構建hazard intensities和損失數據  
 # 檢查空間結果的結構並提取醫院座標
@@ -690,16 +689,11 @@ if RobustDataSplitter and hazard_intensities is not None and observed_losses is 
     print(f"   測試集: {test_data['hazard_intensities'].shape[1]} 事件")
     
 else:
-    print("⚠️ 數據分割模組不可用或數據缺失，使用原始數據")
-    # 備用方案：使用所有數據作為訓練集
-    train_data = {
-        'hazard_intensities': hazard_intensities,
-        'observed_losses': observed_losses,
-        'exposure_values': exposure_values,
-        'event_indices': np.arange(hazard_intensities.shape[1])
-    }
-    val_data = train_data  # 沒有驗證集
-    test_data = None       # 沒有測試集
+    print("❌ 錯誤: 數據分割模組不可用或數據缺失")
+    print("   必須確保 RobustDataSplitter 正常運作")
+    print("   不接受將所有數據作為訓練集的備用方案")
+    print("   正確的訓練/驗證/測試分割對學術分析至關重要")
+    sys.exit(1)
 
 # 添加Cat-in-Circle數據到空間數據 (使用訓練數據)
 spatial_data = spatial_processor.add_cat_in_circle_data(
@@ -784,79 +778,76 @@ for i, config in enumerate(prior_likelihood_test_configs, 1):
     print(f"   污染水平: ε={config['epsilon']:.3f}")
     
     try:
-        # 簡化模型創建，避免複雜的依賴問題
-        print(f"     🔄 創建簡化的階層模型...")
+        print(f"     🔄 創建真實的階層貝葉斯模型...")
         
-        # 直接模擬不同Prior/Likelihood組合的效果
-        # 根據配置調整基差風險的模擬範圍
-        base_risk = np.random.uniform(1e8, 4e8)
+        # 使用真實的ParametricHierarchicalModel創建模型
+        from robust_hierarchical_bayesian_simulation.hierarchical_modeling.core_model import ParametricHierarchicalModel
         
-        # 根據Prior類型調整
-        if config['prior'] == PriorScenario.PESSIMISTIC:
-            base_risk *= 0.8  # 悲觀先驗通常基差風險較低
-        elif config['prior'] == PriorScenario.NON_INFORMATIVE:
-            base_risk *= 1.2  # 非信息先驗基差風險較高
-        elif config['prior'] == PriorScenario.CONSERVATIVE:
-            base_risk *= 0.9  # 保守先驗中等
-            
-        # 根據Likelihood類型調整
-        if config['likelihood'] == LikelihoodFamily.STUDENT_T:
-            base_risk *= 0.85  # Student-t對極值建模較好
-        elif config['likelihood'] == LikelihoodFamily.GAMMA:
-            base_risk *= 0.9   # Gamma分佈對正值建模較好
-        elif config['likelihood'] == LikelihoodFamily.NORMAL:
-            base_risk *= 1.1   # 正態分佈較簡單
-            
-        # 根據污染水平調整
-        contamination_factor = 1 - config['epsilon'] * 0.5  # 污染可能降低基差風險
-        basis_risk = base_risk * contamination_factor
-        
-        # 模擬收斂診斷
-        rhat = np.random.uniform(0.98, 1.05)
-        ess = np.random.randint(400, 800)
-        
-        # 創建簡化的模型結果
-        model_results = {
-            'samples': np.random.multivariate_normal([0, 0.1], [[0.1, 0.02], [0.02, 0.1]], (500, 2)),
-            'rhat': rhat,
-            'ess': ess,
-            'converged': rhat < 1.1
+        # 準備模型數據
+        model_data = {
+            'hazard_intensities': train_data['hazard_intensities'],
+            'observed_losses': train_data['observed_losses'],
+            'exposure_values': train_data['exposure_values'],
+            'spatial_data': spatial_data
         }
         
-        # 創建模型佔位符（不是真實的ParametricHierarchicalModel，但足夠用於比較）
-        hierarchical_model = {
-            'model_type': f"{config['prior'].value}_{config['likelihood'].value}",
-            'epsilon': config['epsilon'],
-            'created': True
-        }
+        # 創建真實的階層模型實例
+        hierarchical_model = ParametricHierarchicalModel(
+            prior_scenario=config['prior'],
+            likelihood_family=config['likelihood'],
+            epsilon_contamination=config['epsilon'],
+            n_levels=4,  # 4層階層結構
+            use_spatial_effects=True
+        )
         
+        # 進行真實的模型擬合
+        print(f"     🎯 執行階層貝葉斯推斷...")
+        model_results = hierarchical_model.fit(
+            hazard_data=model_data['hazard_intensities'],
+            loss_data=model_data['observed_losses'],
+            exposure_data=model_data['exposure_values'],
+            spatial_data=model_data['spatial_data']
+        )
+        
+        # 驗證模型收斂性
+        if not model_results.get('converged', False):
+            raise ValueError(f"模型未收斂: R̂={model_results.get('rhat', 'N/A')}")
+        
+        # 計算真實基差風險
+        posterior_samples = model_results['samples']
+        posterior_predictions = hierarchical_model.predict(posterior_samples, model_data)
+        basis_risk = np.mean(np.abs(model_data['observed_losses'] - posterior_predictions))
+        
+        # 存儲真實結果
         hierarchical_model_results[config['name']] = {
-            'model': hierarchical_model,  # 不再是None
+            'model': hierarchical_model,  # 真實的模型實例
             'results': model_results,
             'basis_risk': basis_risk,
-            'rhat': rhat,
-            'ess': ess,
-            'config': config
+            'rhat': model_results['rhat'],
+            'ess': model_results['ess'],
+            'config': config,
+            'posterior_samples': posterior_samples,
+            'predictions': posterior_predictions
         }
         
         basis_risk_by_model[config['name']] = basis_risk
         
-        print(f"     ✅ 完成: 基差風險={basis_risk:.2e}, R̂={rhat:.3f}")
+        print(f"     ✅ 真實推斷完成:")
+        print(f"        基差風險: ${basis_risk:.2e}")
+        print(f"        R̂: {model_results['rhat']:.3f}")
+        print(f"        ESS: {model_results['ess']}")
+        print(f"        樣本數: {len(posterior_samples)}")
         
     except Exception as e:
-        print(f"     ❌ 失敗: {e}")
-        # 使用默認值，但確保model不是None
-        basis_risk = np.random.uniform(2e8, 8e8)
+        print(f"     ❌ 真實模型創建失敗: {e}")
+        print(f"        這是嚴重錯誤 - 不接受任何簡化或模擬替代方案")
+        print(f"        請確保 ParametricHierarchicalModel 正確實現且可用")
+        # 不提供任何備用方案，直接記錄失敗
         hierarchical_model_results[config['name']] = {
-            'model': {'model_type': 'fallback', 'created': False},  # 確保不是None
-            'results': {'samples': np.random.normal(0, 1, (100, 2))},
-            'basis_risk': basis_risk,
-            'rhat': 1.5,
-            'ess': 100,
+            'error': str(e),
             'config': config
         }
-        basis_risk_by_model[config['name']] = basis_risk
-        print(f"     ⚠️ 使用預設值: 基差風險={basis_risk:.2e}")
+        print(f"     ⚠️ 標記為失敗，將不參與後續分析")
 
 # %%
 # =============================================================================
@@ -1938,44 +1929,88 @@ for model_idx, (model_name, model_result) in enumerate(hierarchical_model_result
         else:
             vi_basis_risk = model_result['basis_risk']
         
-        print(f"   🔄 開始VI-MCMC混合採樣...")
+        print(f"   🔄 開始真實的VI-MCMC混合採樣...")
         print(f"      採樣數: {hybrid_config.n_samples}, 鏈數: {hybrid_config.n_chains}")
         
-        # 模擬MCMC採樣過程（實際應該調用真實的MCMC採樣器）
-        mcmc_samples = np.random.multivariate_normal(
-            mean=[0.0, 0.1], 
-            cov=[[0.1, 0.02], [0.02, 0.1]], 
-            size=(hybrid_config.n_samples, hybrid_config.n_chains)
+        # 檢查是否有有效的階層模型
+        if 'error' in model_result:
+            raise ValueError(f"階層模型創建失敗，無法進行MCMC: {model_result['error']}")
+        
+        hierarchical_model = model_result['model']
+        if hierarchical_model is None:
+            raise ValueError("階層模型實例為None")
+        
+        # 使用真實的CRPSMCMCValidator進行MCMC驗證
+        mcmc_validator = CRPSMCMCValidator(
+            n_samples=hybrid_config.n_samples,
+            n_warmup=hybrid_config.n_warmup,
+            n_chains=hybrid_config.n_chains,
+            target_accept=hybrid_config.target_accept
         )
         
-        # 計算收斂診斷
-        rhat_values = np.random.uniform(0.98, 1.05, 2)  # 模擬R-hat值
-        ess_values = np.random.randint(400, 900, 2)      # 模擬有效樣本數
+        # 準備MCMC數據
+        mcmc_data = {
+            'hazard_intensities': train_data['hazard_intensities'],
+            'observed_losses': train_data['observed_losses'],
+            'exposure_values': train_data['exposure_values'],
+            'spatial_data': spatial_data
+        }
         
-        # 計算tail risk修正效果
-        original_tail_risk = vi_basis_risk
-        mcmc_tail_risk = original_tail_risk * np.random.uniform(0.7, 0.95)  # MCMC通常能減少tail risk
+        # 使用VI結果初始化MCMC
+        if 'posterior_samples' in model_result:
+            vi_init = model_result['posterior_samples'][-1]  # 使用VI最後的樣本
+        else:
+            raise ValueError("缺少VI後驗樣本用於MCMC初始化")
+        
+        print(f"      🎯 執行真實MCMC採樣...")
+        mcmc_results = mcmc_validator.validate_vi_with_mcmc(
+            hierarchical_model=hierarchical_model,
+            vi_posterior=model_result['posterior_samples'],
+            data=mcmc_data,
+            init_values=vi_init
+        )
+        
+        # 驗證收斂性
+        if not mcmc_results.get('converged', False):
+            raise ValueError(f"MCMC未收斂: R̂={mcmc_results.get('rhat', 'N/A')}")
+        
+        # 提取真實結果
+        mcmc_samples = mcmc_results['samples']  # 真實樣本
+        rhat_values = mcmc_results['rhat']      # 真實R-hat值
+        ess_values = mcmc_results['ess']        # 真實有效樣本數
+        
+        # 計算真實的tail risk修正效果
+        original_tail_risk = model_result['basis_risk']
+        mcmc_predictions = mcmc_validator.predict_with_mcmc_samples(mcmc_samples, mcmc_data)
+        mcmc_tail_risk = np.mean(np.abs(mcmc_data['observed_losses'] - mcmc_predictions))
         tail_improvement = (original_tail_risk - mcmc_tail_risk) / original_tail_risk
         
+        # 存儲真實MCMC結果
         mcmc_hybrid_results[model_name] = {
             'model_config': model_config,
             'hybrid_config': hybrid_config,
             'samples': mcmc_samples,
-            'rhat': np.mean(rhat_values),
-            'ess': np.mean(ess_values),
+            'rhat': np.mean(rhat_values) if isinstance(rhat_values, (list, np.ndarray)) else rhat_values,
+            'ess': np.mean(ess_values) if isinstance(ess_values, (list, np.ndarray)) else ess_values,
             'original_tail_risk': original_tail_risk,
             'mcmc_tail_risk': mcmc_tail_risk,
             'tail_improvement': tail_improvement,
-            'converged': np.all(rhat_values < 1.1),
-            'sampling_time': np.random.uniform(120, 300)  # 模擬採樣時間(秒)
+            'converged': mcmc_results['converged'],
+            'sampling_time': mcmc_results.get('sampling_time', 0),  # 真實採樣時間
+            'n_samples': len(mcmc_samples),
+            'mcmc_diagnostics': mcmc_results.get('diagnostics', {})
         }
         
-        print(f"   ✅ MCMC完成: R̂={np.mean(rhat_values):.3f}, ESS={np.mean(ess_values):.0f}")
-        print(f"      Tail risk改善: {tail_improvement*100:.1f}% ({original_tail_risk:.2e} → {mcmc_tail_risk:.2e})")
-        print(f"      採樣時間: {mcmc_hybrid_results[model_name]['sampling_time']:.1f}秒")
+        print(f"   ✅ 真實MCMC完成:")
+        print(f"      R̂: {mcmc_hybrid_results[model_name]['rhat']:.3f}")
+        print(f"      ESS: {mcmc_hybrid_results[model_name]['ess']:.0f}")
+        print(f"      樣本數: {mcmc_hybrid_results[model_name]['n_samples']}")
+        print(f"      Tail risk改善: {tail_improvement*100:.1f}%")
+        print(f"      真實採樣時間: {mcmc_hybrid_results[model_name]['sampling_time']:.1f}秒")
         
     except Exception as e:
-        print(f"   ❌ VI-MCMC混合分析失敗: {e}")
+        print(f"   ❌ 真實VI-MCMC混合分析失敗: {e}")
+        print(f"      這是嚴重錯誤 - 不接受任何模擬替代方案")
         mcmc_hybrid_results[model_name] = {
             'model_config': model_config,
             'error': str(e),
@@ -2476,21 +2511,32 @@ for model_idx, (model_name, posterior_result) in enumerate(posterior_analysis_re
                     (threshold_base-5, threshold_base+10)  # threshold
                 ]
                 
-                # 模擬優化過程（實際應該調用真實的優化器）
-                optimal_params = [
-                    np.random.uniform(0.5, 5.0),  # alpha
-                    np.random.uniform(1e6, 5e7),  # beta
-                    np.random.uniform(threshold_base-3, threshold_base+5)  # threshold
-                ]
-                
-                # 計算優化目標值
-                basis_risk_score = posterior_uncertainty * np.random.uniform(0.8, 1.2)
-                crps_score = np.random.uniform(0.1, 0.5)
-                risk_score = np.random.uniform(0.05, 0.3)
-                
-                objective_value = (basis_risk_weight * basis_risk_score + 
-                                 crps_weight * crps_score + 
-                                 0.2 * risk_score)
+                # 使用真實的ParametricInsuranceOptimizer進行優化
+                try:
+                    optimizer = ParametricInsuranceOptimizer(
+                        lambda_crps=crps_weight,
+                        lambda_under=basis_risk_weight,
+                        lambda_over=0.2
+                    )
+                    
+                    # 使用真實數據進行優化
+                    optimization_result = optimizer.optimize(
+                        hazard_intensities=hazard_intensities,
+                        observed_losses=observed_losses,
+                        bounds=bounds
+                    )
+                    
+                    optimal_params = optimization_result['optimal_params']
+                    objective_value = optimization_result['objective_value']
+                    basis_risk_score = optimization_result.get('basis_risk_score', posterior_uncertainty)
+                    crps_score = optimization_result.get('crps_score', 0.0)
+                    risk_score = optimization_result.get('risk_score', 0.0)
+                    
+                except Exception as opt_error:
+                    print(f"⚠️ 優化器調用失敗: {opt_error}")
+                    print("   確保ParametricInsuranceOptimizer正確實現")
+                    # 退出而不是使用模擬數據
+                    continue
                 
                 result = {
                     'optimal_params': optimal_params,
