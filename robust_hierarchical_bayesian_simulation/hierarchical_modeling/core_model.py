@@ -524,9 +524,16 @@ class ParametricHierarchicalModel:
         
         # 數據形狀和設備信息
         print(f"🔍 JAX數據轉換:")
-        print(f"   - hazard_intensities: {hazard_intensities.shape} on {hazard_intensities.device()}")
-        print(f"   - exposure_values: {exposure_values.shape} on {exposure_values.device()}")
-        print(f"   - losses: {losses.shape} on {losses.device()}")
+        print(f"   - hazard_intensities: {hazard_intensities.shape}")
+        print(f"   - exposure_values: {exposure_values.shape}")  
+        print(f"   - losses: {losses.shape}")
+        
+        # 顯示設備信息（如果可用）
+        try:
+            print(f"   - 數據設備: {hazard_intensities.device()}")
+        except:
+            # JAX arrays沒有device()方法，使用全局設備信息
+            print(f"   - 計算設備: {jax.devices()[0]}")
         
         @jit
         def log_prob(params):
