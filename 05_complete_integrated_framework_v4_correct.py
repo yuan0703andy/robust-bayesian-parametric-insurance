@@ -810,11 +810,28 @@ print(f"\n✅ 配置定義完成，準備進入階段4進行推斷")
 hierarchical_model_results = {}
 basis_risk_by_model = {}
 
-# 由於階段3只定義配置，為階段4準備空的結果結構
+# 由於階段3只定義配置，為階段4準備結果結構
 for config in prior_likelihood_test_configs:
     model_name = config['name']
+    
+    # 檢查是否有真實CLIMADA數據可用
+    has_real_data = ('hazard_obj' in globals() and hazard_obj is not None and
+                    'exposure_obj' in globals() and exposure_obj is not None)
+    
+    if has_real_data:
+        # 有真實數據時，創建簡單的模型結構
+        model_placeholder = {
+            'config': config,
+            'has_data': True,
+            'data_ready': True
+        }
+    else:
+        # 無數據時設為None
+        model_placeholder = None
+    
     hierarchical_model_results[model_name] = {
         'config': config,
+        'model': model_placeholder,
         'inference_method': 'to_be_determined',
         'converged': False,
         'placeholder': True
