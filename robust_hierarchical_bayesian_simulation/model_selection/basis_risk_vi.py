@@ -644,7 +644,7 @@ class BasisRiskAwareVI:
         # 處理可能的3維輸入張量
         if X_tensor.dim() == 3:
             # 如果是 3 維 [batch, seq, features]，取最後一維並展平
-            X_flat = X_tensor.view(-1, X_tensor.size(-1)).squeeze(-1)  # [total_data]
+            X_flat = X_tensor.reshape(-1, X_tensor.size(-1)).squeeze(-1)  # [total_data]
         else:
             X_flat = X_tensor.squeeze(-1)  # [n_data]
         
@@ -659,7 +659,7 @@ class BasisRiskAwareVI:
         # 計算log likelihood
         # 處理可能的維度不匹配
         if y_tensor.dim() > 1:
-            y_flat = y_tensor.view(-1)  # 展平為1維
+            y_flat = y_tensor.reshape(-1)  # 展平為1維
         else:
             y_flat = y_tensor
         
@@ -768,12 +768,12 @@ class BasisRiskAwareVI:
         
         # 處理可能的維度問題
         if X_tensor.dim() == 3:
-            X_flat = X_tensor.view(-1, X_tensor.size(-1)).squeeze(-1)
+            X_flat = X_tensor.reshape(-1, X_tensor.size(-1)).squeeze(-1)
         else:
             X_flat = X_tensor.squeeze(-1)
         
         if y_tensor.dim() > 1:
-            y_flat = y_tensor.view(-1)
+            y_flat = y_tensor.reshape(-1)
         else:
             y_flat = y_tensor
             
@@ -859,12 +859,12 @@ class BasisRiskAwareVI:
         
         # 處理維度問題
         if X_tensor.dim() == 3:
-            X_flat = X_tensor.view(-1, X_tensor.size(-1)).squeeze(-1)
+            X_flat = X_tensor.reshape(-1, X_tensor.size(-1)).squeeze(-1)
         else:
             X_flat = X_tensor.squeeze(-1) if X_tensor.dim() > 1 else X_tensor
         
         if y_tensor.dim() > 1:
-            y_flat = y_tensor.view(-1)
+            y_flat = y_tensor.reshape(-1)
         else:
             y_flat = y_tensor
             
