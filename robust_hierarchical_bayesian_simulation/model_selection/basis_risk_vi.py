@@ -472,16 +472,30 @@ class BasisRiskAwareVI:
         """GPU加速的VI訓練"""
         import time
         
+        # 🔧 數據縮放防止數值爆炸 (GPU優化)
+        y_scale = np.std(y) if np.std(y) > 0 else 1.0
+        y_mean = np.mean(y)
+        y_scaled = (y - y_mean) / y_scale
+        
         # 轉換為GPU張量
         X_tensor = torch.from_numpy(X).float().to(self.device)
-        y_tensor = torch.from_numpy(y).float().to(self.device)
+        y_tensor = torch.from_numpy(y_scaled).float().to(self.device)  # 使用縮放後的數據
+        
+        print(f"        🔧 數據縮放 - 原始損失: {y.mean()/1e6:.1f}M±{y.std()/1e6:.1f}M → 標準化: {y_scaled.mean():.3f}±{y_scaled.std():.3f}")
+        
+        # 保存縮放參數用於後續恢復
+        self._y_scale = y_scale
+        self._y_mean = y_mean
         
         # 驗證集張量（如果提供）
         has_validation = X_val is not None and y_val is not None
         if has_validation:
+            # 🔧 驗證集也需要相同的縮放
+            y_val_scaled = (y_val - y_mean) / y_scale
             X_val_tensor = torch.from_numpy(X_val).float().to(self.device)
-            y_val_tensor = torch.from_numpy(y_val).float().to(self.device)
+            y_val_tensor = torch.from_numpy(y_val_scaled).float().to(self.device)
             print(f"        📊 使用驗證集監督: 訓練={X.shape[0]}, 驗證={X_val.shape[0]}")
+            print(f"        🔧 驗證集縮放: {y_val.mean()/1e6:.1f}M±{y_val.std()/1e6:.1f}M → {y_val_scaled.mean():.3f}±{y_val_scaled.std():.3f}")
         else:
             print(f"        ⚠️ 無驗證集，可能過度擬合")
         
@@ -494,8 +508,14 @@ class BasisRiskAwareVI:
         mu_theta.requires_grad_(True)
         log_sigma_theta.requires_grad_(True)
         
-        # Adam優化器
-        optimizer = torch.optim.Adam([mu_theta, log_sigma_theta], lr=0.01)
+        # 🔧 GPU優化的Adam優化器配置
+        optimizer = torch.optim.Adam([mu_theta, log_sigma_theta], 
+                                   lr=0.001,  # 降低學習率避免數值不穩定
+                                   betas=(0.9, 0.999),
+                                   eps=1e-8,
+                                   weight_decay=1e-5)  # 輕微L2正則化
+        
+        print(f"        🔧 GPU優化器配置: lr=0.001, 參數數量={len(list(optimizer.param_groups[0]['params']))}")
         
         best_elbo = -float('inf')
         best_basis_risk_train = float('inf')
@@ -527,29 +547,43 @@ class BasisRiskAwareVI:
             
             # 3. 反向傳播
             loss = -elbo_batch.mean()  # 最大化ELBO = 最小化負ELBO
+            
+            # 🔧 數值檢查防止NaN/Inf
+            if torch.isnan(loss) or torch.isinf(loss):
+                print(f"        ⚠️ 警告: 迭代{iteration+1} loss異常: {loss.item()}")
+                continue
+                
             loss.backward()
             
-            # 梯度裁剪避免爆炸
-            torch.nn.utils.clip_grad_norm_([mu_theta, log_sigma_theta], max_norm=1.0)
+            # 🔧 梯度裁剪避免爆炸 (GPU優化)
+            total_grad_norm = torch.nn.utils.clip_grad_norm_([mu_theta, log_sigma_theta], max_norm=1.0)
             
+            # 檢查梯度是否有效
+            if torch.isnan(total_grad_norm) or total_grad_norm == 0:
+                print(f"        ⚠️ 警告: 迭代{iteration+1} 梯度異常: {total_grad_norm}")
+                
             optimizer.step()
             
             # 約束log_sigma範圍
             with torch.no_grad():
                 log_sigma_theta.clamp_(-5, 1)
             
-            # 計算當前基差風險用於記錄  
+            # 🔧 計算當前基差風險用於記錄 (需要恢復原始尺度)
             with torch.no_grad():
-                # 訓練集基差風險
-                current_basis_risk_train = self._compute_basis_risk_batch_gpu(
+                # 訓練集基差風險 - 恢復到原始損失尺度
+                basis_risk_scaled = self._compute_basis_risk_batch_gpu(
                     X_tensor, y_tensor, theta_samples, epsilon, basis_risk_type
                 ).mean().item()
+                # 恢復到原始尺度 (百萬美元)
+                current_basis_risk_train = basis_risk_scaled * self._y_scale
                 
                 # 驗證集基差風險（如果有）
                 if has_validation:
-                    current_basis_risk_val = self._compute_basis_risk_batch_gpu(
+                    basis_risk_val_scaled = self._compute_basis_risk_batch_gpu(
                         X_val_tensor, y_val_tensor, theta_samples, epsilon, basis_risk_type
                     ).mean().item()
+                    # 恢復到原始尺度 (百萬美元)
+                    current_basis_risk_val = basis_risk_val_scaled * self._y_scale
                     validation_history.append(current_basis_risk_val)
                 else:
                     current_basis_risk_val = current_basis_risk_train
@@ -582,12 +616,30 @@ class BasisRiskAwareVI:
                 print(f"        🛑 Early stopping: 驗證集{patience}次無改善")
                 break
             
-            # 進度報告
+            # 進度報告 + GPU診斷監控
             if (iteration + 1) % 200 == 0:
+                # 🔧 GPU參數和梯度診斷
+                mu_sample = mu_theta[:3].detach().cpu().numpy()  # 前3個參數
+                sigma_sample = torch.exp(log_sigma_theta[:3]).detach().cpu().numpy()
+                mu_grad_norm = torch.norm(mu_theta.grad).item() if mu_theta.grad is not None else 0.0
+                sigma_grad_norm = torch.norm(log_sigma_theta.grad).item() if log_sigma_theta.grad is not None else 0.0
+                
                 if has_validation:
                     print(f"        迭代 {iteration+1}: ELBO={current_elbo:.3f}, 訓練={current_basis_risk_train/1e6:.1f}M, 驗證={current_basis_risk_val/1e6:.1f}M")
                 else:
                     print(f"        迭代 {iteration+1}: ELBO={current_elbo:.3f}, 基差風險={current_basis_risk_train/1e6:.1f}M")
+                
+                # 🔍 GPU診斷信息
+                print(f"        🔧 GPU診斷 - μ樣本: {mu_sample}, σ樣本: {sigma_sample}")
+                print(f"        📊 梯度norm - μ: {mu_grad_norm:.6f}, σ: {sigma_grad_norm:.6f}")
+                
+                # 檢查參數變化
+                if iteration > 0:
+                    mu_change = torch.norm(mu_theta - prev_mu).item() if 'prev_mu' in locals() else 0
+                    print(f"        🎯 參數變化 - Δμ: {mu_change:.6f}")
+                
+                # 保存當前參數用於下次比較
+                prev_mu = mu_theta.clone()
         
         training_time = time.time() - start_time
         
