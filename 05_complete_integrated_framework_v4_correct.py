@@ -1373,6 +1373,11 @@ print(f"   驗證損失範圍: ${np.min(y_vi_val)/1e6:.1f}M - ${np.max(y_vi_val)
 print("\n🧠 執行6種Prior/Likelihood組合的變分推斷比較...")
 print("   使用準備好的VI訓練和驗證數據進行模型比較")
 
+# 全域設置：強制使用GPU進行VI優化（HPC環境）
+import os
+# HPC環境配置 - 確保可以使用GPU
+print("   🚀 HPC環境：強制使用GPU進行VI優化")
+
 # 準備6種Prior/Likelihood組合的VI分析
 model_vi_results = {}
 model_basis_risks = {}
@@ -1390,40 +1395,32 @@ if 'vi_analysis_results' in locals() and vi_analysis_results:
         
         # 使用模型配置的epsilon創建VI實例
         epsilon_val = config['epsilon']
+        # HPC環境：強制使用GPU進行VI分析
         vi_screener_model = BasisRiskAwareVI(
             n_features=1,  # 風速作為單一特徵
             epsilon_values=[epsilon_val] if epsilon_val > 0 else [0.0],  # 單個epsilon值
-            basis_risk_types=['absolute']  # 使用單一基差風險類型以避免混淆
+            basis_risk_types=['absolute'],  # 使用單一基差風險類型以避免混淆
+            use_gpu=True  # HPC環境強制使用GPU
+        )
+        print(f"   🚀 VI實例創建成功（GPU模式）")
+        
+        # 執行VI分析（GPU加速）
+        vi_results_model = vi_screener_model.run_comprehensive_screening(
+            X_vi_train, y_vi_train, 
+            X_val=X_vi_val, y_val=y_vi_val
         )
         
-        # 執行VI分析
-        try:
-            vi_results_model = vi_screener_model.run_comprehensive_screening(
-                X_vi_train, y_vi_train, 
-                X_val=X_vi_val, y_val=y_vi_val
-            )
-            
-            model_vi_results[model_name] = vi_results_model
-            model_basis_risks[model_name] = vi_results_model['best_model']['final_basis_risk']
-            
-            print(f"   ✅ {model_name}: 基差風險 = {vi_results_model['best_model']['final_basis_risk']:.4f}")
-            print(f"      VI改善: {vi_result.get('basis_risk_reduction', 0)*100:.1f}%")
+        model_vi_results[model_name] = vi_results_model
+        model_basis_risks[model_name] = vi_results_model['best_model']['final_basis_risk']
         
-        except Exception as e:
-            print(f"   ❌ VI分析失敗: {e}")
-            # 使用階段3的分析結果作為備用
-            model_vi_results[model_name] = {
-                'best_model': {
-                    'final_basis_risk': vi_result.get('vi_optimized_basis_risk', vi_result.get('original_basis_risk', 1.0)),
-                    'epsilon': epsilon_val,
-                    'basis_risk_type': 'absolute'
-                }
-            }
-            model_basis_risks[model_name] = model_vi_results[model_name]['best_model']['final_basis_risk']
+        print(f"   ✅ {model_name}: 基差風險 = {vi_results_model['best_model']['final_basis_risk']:.4f}")
+        print(f"      🚀 GPU加速VI優化完成")
+        print(f"      最佳ε: {vi_results_model['best_model']['epsilon']:.3f}")
+        print(f"      基差風險類型: {vi_results_model['best_model']['basis_risk_type']}")
 
-# 如果階段3的VI結果不可用，使用階段3的hierarchical_model_results
+# 如果階段3的VI結果不可用，必須有hierarchical_model_results
 elif 'hierarchical_model_results' in locals() and hierarchical_model_results:
-    print(f"\n📊 使用階段3的6種Prior/Likelihood組合（簡化VI分析）:")
+    print(f"\n📊 對階段3的6種Prior/Likelihood組合進行GPU VI分析:")
     
     for model_idx, (model_name, model_result) in enumerate(hierarchical_model_results.items(), 1):
         print(f"\n🔬 測試模型 {model_idx}/6: {model_name}")
@@ -1432,24 +1429,29 @@ elif 'hierarchical_model_results' in locals() and hierarchical_model_results:
         print(f"   Likelihood: {config['likelihood'].value}")
         print(f"   污染水平: ε={config['epsilon']:.3f}")
         
-        # 使用階段3的基差風險結果
-        basis_risk = model_result['basis_risk']
-        model_vi_results[model_name] = {
-            'best_model': {
-                'final_basis_risk': basis_risk,
-                'epsilon': config['epsilon'],
-                'basis_risk_type': 'hierarchical_model'
-            }
-        }
-        model_basis_risks[model_name] = basis_risk
+        # HPC環境：對每個模型進行GPU VI分析
+        epsilon_val = config['epsilon']
+        vi_screener_model = BasisRiskAwareVI(
+            n_features=1,
+            epsilon_values=[epsilon_val] if epsilon_val > 0 else [0.0],
+            basis_risk_types=['absolute'],
+            use_gpu=True  # 強制GPU模式
+        )
         
-        print(f"   ✅ {model_name}: 基差風險 = {basis_risk:.4f}")
+        # 執行GPU VI分析
+        vi_results_model = vi_screener_model.run_comprehensive_screening(
+            X_vi_train, y_vi_train, 
+            X_val=X_vi_val, y_val=y_vi_val
+        )
+        
+        model_vi_results[model_name] = vi_results_model
+        model_basis_risks[model_name] = vi_results_model['best_model']['final_basis_risk']
+        
+        print(f"   ✅ {model_name}: 基差風險 = {vi_results_model['best_model']['final_basis_risk']:.4f}")
+        print(f"      🚀 GPU VI優化完成")
 
 else:
-    print("⚠️ 階段3的Prior/Likelihood組合結果不可用，請先運行階段3")
-    # 創建空結果以避免後續錯誤
-    model_vi_results = {}
-    model_basis_risks = {}
+    raise RuntimeError("❌ 階段3的Prior/Likelihood組合結果不可用，無法進行VI分析")
 
 # 選擇最佳模型（如果有結果的話）
 if model_basis_risks:
