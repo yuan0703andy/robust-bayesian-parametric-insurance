@@ -14,6 +14,7 @@ Date: 2025-01-17
 """
 
 import numpy as np
+import time
 from typing import Dict, List, Optional, Tuple, Callable
 import warnings
 warnings.filterwarnings('ignore')
@@ -321,7 +322,8 @@ class BasisRiskAwareVI:
                  n_features: int,
                  epsilon_values: List[float] = None,
                  basis_risk_types: List[str] = None,
-                 use_gpu: bool = True):
+                 use_gpu: bool = True,
+                 objective: str = 'crps_basis_risk'):
         """
         初始化基差風險導向 VI
         
@@ -330,6 +332,9 @@ class BasisRiskAwareVI:
             epsilon_values: ε-contamination 參數候選
             basis_risk_types: 基差風險類型
             use_gpu: 是否使用GPU加速
+            objective: 目標函數類型
+                - 'traditional_elbo': 傳統ELBO (第二層比較)
+                - 'crps_basis_risk': CRPS-based ELBO創新 (第三層比較)
         """
         if epsilon_values is None:
             epsilon_values = [0.0, 0.05, 0.10, 0.15, 0.20]
@@ -340,6 +345,7 @@ class BasisRiskAwareVI:
         self.n_params = n_features + 1  # 線性係數 + 噪音參數
         self.epsilon_values = epsilon_values
         self.basis_risk_types = basis_risk_types
+        self.objective = objective
         
         # GPU配置
         self.use_gpu = use_gpu and TORCH_AVAILABLE
@@ -349,10 +355,10 @@ class BasisRiskAwareVI:
                 print("⚠️ GPU不可用，降級到CPU")
                 self.use_gpu = False
         else:
-            self.device = torch.device('cpu')
+            self.device = 'cpu' if not TORCH_AVAILABLE else torch.device('cpu')
             
         print(f"🔧 BasisRiskAwareVI初始化: {'GPU' if self.use_gpu else 'CPU'}模式")
-        if self.use_gpu:
+        if self.use_gpu and TORCH_AVAILABLE:
             print(f"   GPU設備: {torch.cuda.get_device_name(self.device)}")
         
         # 賠付函數
@@ -611,26 +617,132 @@ class BasisRiskAwareVI:
             'has_validation': has_validation
         }
     
-    def _compute_elbo_batch_gpu(self, X_tensor, y_tensor, theta_samples, epsilon, 
-                               basis_risk_type, mu_theta, sigma_theta):
-        """GPU上批次計算ELBO"""
-        batch_size = theta_samples.shape[0]  # n_samples_per_iteration
+    def _compute_traditional_elbo_batch_gpu(self, X_tensor, y_tensor, theta_samples, 
+                                          mu_theta, sigma_theta, likelihood_family='normal'):
+        """GPU上批次計算傳統ELBO - 第二層比較的標準方法
         
-        # 批次計算基差風險 (似然項)
-        basis_risks = self._compute_basis_risk_batch_gpu(
-            X_tensor, y_tensor, theta_samples, epsilon, basis_risk_type
-        )
-        log_likelihood = -basis_risks / 1e9  # 標準化
+        實現標準公式: ℒTraditional(φ) = E[log p(data|θ)] - KL(qφ(θ)||p(θ))
         
-        # 先驗項 (標準高斯)
-        log_prior = -0.5 * torch.sum(theta_samples**2, dim=1)
+        這是backward-looking目標，優化歷史數據擬合度
         
-        # 變分分布log密度
+        Args:
+            likelihood_family: 似然函數族 ('normal', 'student_t', 'laplace')
+        """
+        batch_size = theta_samples.shape[0]
+        n_data = X_tensor.shape[0]
+        
+        # *** 傳統似然項：E[log p(y|X, θ)] ***
+        # θ參數: [batch_size, n_params] where n_params=2 (slope, intercept)
+        if theta_samples.shape[1] >= 2:
+            theta_slope = theta_samples[:, 0:1]      # [batch_size, 1]
+            theta_intercept = theta_samples[:, 1:2]  # [batch_size, 1]
+        else:
+            theta_slope = theta_samples[:, 0:1]
+            theta_intercept = torch.zeros_like(theta_slope)
+        
+        # 線性預測: μ = slope * X + intercept
+        X_expanded = X_tensor.squeeze(-1).unsqueeze(0).expand(batch_size, -1)  # [batch_size, n_data]
+        mu_pred = theta_slope * X_expanded + theta_intercept  # [batch_size, n_data]
+        
+        # 預測標準差 (假設同質性)
+        sigma_pred = torch.abs(theta_samples[:, -1:]) + 1e-6  # [batch_size, 1], 使用最後一個參數
+        sigma_pred = sigma_pred.expand(-1, n_data)  # [batch_size, n_data]
+        
+        # 計算log likelihood
+        y_expanded = y_tensor.unsqueeze(0).expand(batch_size, -1)  # [batch_size, n_data]
+        
+        if likelihood_family == 'normal':
+            # Normal likelihood: log p(y|μ,σ) = -0.5*log(2πσ²) - (y-μ)²/(2σ²)
+            log_likelihood = (-0.5 * torch.log(2 * np.pi * sigma_pred**2) - 
+                            (y_expanded - mu_pred)**2 / (2 * sigma_pred**2))
+        elif likelihood_family == 'student_t':
+            # Student-t likelihood (簡化版，自由度=3)
+            nu = 3.0
+            log_likelihood = (torch.lgamma(torch.tensor((nu + 1) / 2, device=self.device)) - 
+                            torch.lgamma(torch.tensor(nu / 2, device=self.device)) - 
+                            0.5 * torch.log(torch.tensor(nu * np.pi, device=self.device)) - 
+                            torch.log(sigma_pred) - 
+                            ((nu + 1) / 2) * torch.log(1 + (y_expanded - mu_pred)**2 / (nu * sigma_pred**2)))
+        elif likelihood_family == 'laplace':
+            # Laplace likelihood: log p(y|μ,b) = -log(2b) - |y-μ|/b
+            log_likelihood = (-torch.log(2 * sigma_pred) - torch.abs(y_expanded - mu_pred) / sigma_pred)
+        else:
+            raise ValueError(f"不支持的似然函數族: {likelihood_family}")
+        
+        # 所有數據點的平均log likelihood
+        likelihood_term = torch.sum(log_likelihood, dim=1)  # [batch_size]
+        
+        # *** KL散度正則化項 ***
+        # 先驗 p(θ) ~ N(0,I)
+        log_prior = -0.5 * torch.sum(theta_samples**2, dim=1) - \
+                    0.5 * self.n_params * torch.log(torch.tensor(2 * np.pi, device=self.device))
+        
+        # 變分後驗 qφ(θ) ~ N(μφ, σφ²I)
         log_q = -0.5 * torch.sum((theta_samples - mu_theta)**2 / sigma_theta**2, dim=1) - \
                 0.5 * torch.sum(torch.log(2 * np.pi * sigma_theta**2))
         
-        # ELBO = E[log p(y|θ)] + E[log p(θ)] - E[log q(θ)]
-        elbo = log_likelihood + log_prior - log_q
+        # KL散度
+        kl_divergence = log_q - log_prior
+        
+        # 傳統ELBO = E[log p(data|θ)] - KL(qφ||p)
+        elbo = likelihood_term - kl_divergence
+        
+        return elbo
+    
+    def _compute_elbo_batch_gpu(self, X_tensor, y_tensor, theta_samples, epsilon, 
+                               basis_risk_type, mu_theta, sigma_theta):
+        """GPU上批次計算ELBO - 支援兩種模式
+        
+        根據self.objective選擇:
+        - 'traditional_elbo': 傳統ELBO (第二層比較)
+        - 'crps_basis_risk': CRPS-based ELBO創新 (第三層比較)
+        """
+        if self.objective == 'traditional_elbo':
+            # 第二層：使用傳統ELBO
+            return self._compute_traditional_elbo_batch_gpu(
+                X_tensor, y_tensor, theta_samples, mu_theta, sigma_theta
+            )
+        elif self.objective == 'crps_basis_risk':
+            # 第三層：使用創新的CRPS-based ELBO
+            return self._compute_crps_based_elbo_batch_gpu(
+                X_tensor, y_tensor, theta_samples, epsilon, mu_theta, sigma_theta
+            )
+        else:
+            raise ValueError(f"不支持的目標函數: {self.objective}")
+    
+    def _compute_crps_based_elbo_batch_gpu(self, X_tensor, y_tensor, theta_samples, epsilon, 
+                                         mu_theta, sigma_theta):
+        """GPU上批次計算Basis-Risk-Aware ELBO - 核心創新實現
+        
+        實現創新公式: ℒBR(φ) = -E_qφ(θ)[CRPS(y, F(θ))] - KL(qφ(θ)||p(θ))
+        
+        這是forward-looking目標，直接優化未來預測質量而非歷史擬合度
+        """
+        batch_size = theta_samples.shape[0]  # n_samples_per_iteration
+        
+        # *** 核心創新：使用CRPS(y, F(θ))替代傳統似然 ***
+        # 計算 CRPS(y_observed, F_payout(θ)) for each θ sample
+        crps_scores = self._compute_crps_batch_gpu(
+            X_tensor, y_tensor, theta_samples, epsilon
+        )
+        # CRPS項：負號使得最小化CRPS等效於最大化ELBO
+        crps_term = -crps_scores
+        
+        # KL散度正則化項 = E_qφ[log qφ(θ)] - E_qφ[log p(θ)]
+        # 先驗 p(θ) ~ N(0,I)
+        log_prior = -0.5 * torch.sum(theta_samples**2, dim=1) - \
+                    0.5 * self.n_params * torch.log(torch.tensor(2 * np.pi, device=self.device))
+        
+        # 變分後驗 qφ(θ) ~ N(μφ, σφ²I)
+        log_q = -0.5 * torch.sum((theta_samples - mu_theta)**2 / sigma_theta**2, dim=1) - \
+                0.5 * torch.sum(torch.log(2 * np.pi * sigma_theta**2))
+        
+        # KL散度: KL(qφ||p) = E_qφ[log qφ(θ)] - E_qφ[log p(θ)]
+        kl_divergence = log_q - log_prior
+        
+        # Basis-Risk-Aware ELBO = -E[CRPS] - KL
+        # 注意：我們要最大化這個值，所以最小化CRPS，最小化KL
+        elbo = crps_term - kl_divergence
         
         return elbo
     
@@ -699,6 +811,121 @@ class BasisRiskAwareVI:
             basis_risk = torch.mean(torch.abs(weighted_diff), dim=1)
         
         return basis_risk
+    
+    def _compute_crps_batch_gpu(self, X_tensor, y_tensor, theta_samples, epsilon):
+        """GPU上批次計算CRPS(y_observed, F_payout(θ)) - 核心創新實現
+        
+        這個函數實現你的創新公式中的核心CRPS項：
+        ℒBR(φ) = -E_qφ(θ)[CRPS(y, F(θ))] - KL
+        
+        Args:
+            X_tensor: 風速特徵 [n_data]
+            y_tensor: 觀測損失 [n_data] 
+            theta_samples: 參數樣本 [batch_size, n_params]
+            epsilon: ε-contamination參數
+            
+        Returns:
+            CRPS scores [batch_size] - 每個θ樣本的CRPS
+        """
+        batch_size = theta_samples.shape[0]
+        n_data = X_tensor.shape[0]
+        
+        # 為每個θ樣本生成參數保險賠付分布 F(θ)
+        crps_scores = torch.zeros(batch_size, device=self.device)
+        
+        for batch_idx in range(batch_size):
+            theta = theta_samples[batch_idx]  # [n_params]
+            
+            # 1. 基於θ生成參數保險賠付分布樣本
+            payout_distribution_samples = self._generate_payout_distribution_gpu(
+                X_tensor, theta, n_samples=50  # 每個數據點生成50個賠付樣本
+            )  # [n_data, n_samples]
+            
+            # 2. 添加ε-contamination到觀測值
+            if epsilon > 0:
+                noise = torch.randn_like(y_tensor) * epsilon * y_tensor.std()
+                y_contaminated = y_tensor + noise
+            else:
+                y_contaminated = y_tensor
+            
+            # 3. 計算CRPS(y_contaminated, payout_distribution)
+            crps_per_event = torch.zeros(n_data, device=self.device)
+            
+            for i in range(n_data):
+                # 對每個事件計算CRPS
+                y_true = y_contaminated[i]
+                payout_samples = payout_distribution_samples[i]  # [n_samples]
+                
+                # 使用ensemble CRPS公式
+                # CRPS = E|X - y| - 0.5 * E|X - X'|
+                term1 = torch.mean(torch.abs(payout_samples - y_true))
+                
+                # 計算 E|X - X'| 
+                n_samples = payout_samples.shape[0]
+                payout_expanded1 = payout_samples.unsqueeze(0).expand(n_samples, -1)
+                payout_expanded2 = payout_samples.unsqueeze(1).expand(-1, n_samples)
+                term2 = torch.mean(torch.abs(payout_expanded1 - payout_expanded2))
+                
+                crps_per_event[i] = term1 - 0.5 * term2
+            
+            # 平均所有事件的CRPS作為此θ樣本的總CRPS
+            crps_scores[batch_idx] = torch.mean(crps_per_event)
+        
+        return crps_scores
+    
+    def _generate_payout_distribution_gpu(self, X_tensor, theta, n_samples=50):
+        """基於θ參數生成參數保險賠付分布樣本
+        
+        Args:
+            X_tensor: 風速特徵 [n_data]
+            theta: 模型參數 [n_params]
+            n_samples: 每個數據點的分布樣本數
+            
+        Returns:
+            賠付分布樣本 [n_data, n_samples]
+        """
+        n_data = X_tensor.shape[0]
+        wind_speeds = X_tensor.squeeze(-1) if len(X_tensor.shape) > 1 else X_tensor
+        
+        # 使用θ參數調整參數保險設計
+        theta_slope = theta[0] if len(theta) > 0 else 0.0
+        theta_intercept = theta[1] if len(theta) > 1 else 0.0
+        
+        # θ影響的動態閾值
+        base_thresholds = torch.tensor([25.0, 35.0, 45.0], device=self.device)
+        dynamic_thresholds = base_thresholds + theta_intercept * 5.0 + theta_slope * torch.arange(3, device=self.device).float()
+        
+        # θ影響的動態賠付比例
+        base_ratios = torch.tensor([0.25, 0.5, 1.0], device=self.device) 
+        dynamic_ratios = torch.sigmoid(base_ratios + theta_slope)
+        
+        # 基礎最大賠付（可以基於歷史數據估計）
+        base_max_payout = 5e6  # $5M基礎賠付
+        max_payout = base_max_payout * torch.exp(theta_intercept * 0.1)
+        
+        # 為每個數據點生成賠付分布樣本
+        payout_samples = torch.zeros(n_data, n_samples, device=self.device)
+        
+        for i in range(n_data):
+            wind_speed = wind_speeds[i]
+            
+            # 確定性賠付邏輯
+            deterministic_payout = 0.0
+            for j in range(3):
+                if wind_speed >= dynamic_thresholds[j]:
+                    deterministic_payout = max_payout * dynamic_ratios[j]
+            
+            # 添加隨機性：參數保險通常有一定的不確定性
+            payout_std = deterministic_payout * 0.1  # 10%的變異性
+            
+            if payout_std > 0:
+                payout_samples[i] = torch.normal(
+                    deterministic_payout, payout_std, (n_samples,), device=self.device
+                ).clamp(min=0)  # 確保非負
+            else:
+                payout_samples[i] = torch.zeros(n_samples, device=self.device)
+        
+        return payout_samples
     
     def _train_single_model_cpu(self, X: np.ndarray, y: np.ndarray, epsilon: float, 
                                basis_risk_type: str, n_iterations: int, start_time: float,
