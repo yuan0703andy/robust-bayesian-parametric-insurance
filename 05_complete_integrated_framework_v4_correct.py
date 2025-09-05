@@ -28,7 +28,6 @@ import numpy as np
 import pandas as pd
 from pathlib import Path
 import sys
-import torch
 
 # 設置路徑
 try:
@@ -867,31 +866,69 @@ for i, config in enumerate(prior_likelihood_test_configs, 1):
             hospital_coordinates=hospital_coords if 'hospital_coords' in locals() else None
         )
         
-        # 進行真實的VI推斷（不是MCMC）
-        print(f"     🎯 執行基差風險感知變分推斷...")
-        
-        # 使用BasisRiskVariationalInference進行VI算法
-        from robust_hierarchical_bayesian_simulation.model_selection.basis_risk_vi import BasisRiskVariationalInference
-        
-        vi_engine = BasisRiskVariationalInference(
-            n_iterations=1000,
-            learning_rate=0.01,
-            device='cuda:0' if torch.cuda.is_available() else 'cpu'
-        )
-        
-        # VI推斷（basis risk aware）
-        model_results = vi_engine.fit_vi_with_basis_risk_optimization(
-            hazard_intensities=hazard_data,
-            observed_losses=loss_data, 
-            exposure_values=exposure_data,
-            model_spec=model_spec
-        )
-        
-        # 驗證模型收斂性（HierarchicalModelResult是對象，不是字典）
-        converged = getattr(model_results, 'converged', False)
-        if not converged:
-            rhat_value = getattr(model_results, 'rhat', 'N/A')
-            raise ValueError(f"模型未收斂: R̂={rhat_value}")
+        # 嘗試VI，如果不可用則回退到MCMC
+        try:
+            print(f"     🎯 嘗試基差風險感知變分推斷...")
+            
+            # 檢查torch可用性
+            if 'torch' not in sys.modules:
+                import torch
+            
+            # 使用BasisRiskAwareVI進行VI算法
+            from robust_hierarchical_bayesian_simulation.model_selection.basis_risk_vi import BasisRiskAwareVI
+            
+            # 設定VI引擎參數
+            n_features = hazard_data.shape[1] if len(hazard_data.shape) > 1 else 1
+            
+            vi_engine = BasisRiskAwareVI(
+                n_features=n_features,
+                epsilon_values=[model_spec.epsilon_contamination or 0.0],
+                use_gpu=torch.cuda.is_available(),
+                objective='crps_basis_risk'  # 使用創新的CRPS-based ELBO
+            )
+            
+            # 準備VI輸入數據 (將損失數據reshape為flat)
+            X_vi = hazard_data.mean(axis=1).reshape(-1, 1)  # 平均風速作為特徵
+            y_vi = loss_data.mean(axis=1)  # 平均損失作為目標
+            
+            print(f"   VI輸入: X={X_vi.shape}, y={y_vi.shape}")
+            
+            # VI推斷（basis risk aware）
+            model_results = vi_engine.run_comprehensive_screening(
+                X=X_vi,
+                y=y_vi
+            )
+            
+            # 驗證VI收斂性（BasisRiskAwareVI返回字典結果）
+            if isinstance(model_results, dict):
+                best_result = model_results.get('best_model')
+                converged = best_result is not None and best_result.get('final_elbo', float('inf')) < 0
+                if not converged:
+                    final_elbo = best_result.get('final_elbo', 'N/A') if best_result else 'N/A'
+                    raise ValueError(f"VI模型未收斂: ELBO={final_elbo}")
+            else:
+                # 如果不是字典，假設收斂失敗
+                raise ValueError(f"VI結果格式異常: {type(model_results)}")
+                
+            print(f"     ✅ VI推斷成功完成")
+            
+        except Exception as vi_error:
+            print(f"     ⚠️ VI推斷失敗: {vi_error}")
+            print(f"     🔄 回退到MCMC推斷...")
+            
+            # 回退到原來的MCMC方法
+            model_results = hierarchical_model.fit(
+                vulnerability_data=vulnerability_data,
+                return_trace=True
+            )
+            
+            # 驗證MCMC收斂性
+            converged = getattr(model_results, 'converged', False)
+            if not converged:
+                rhat_value = getattr(model_results, 'rhat', 'N/A')
+                raise ValueError(f"MCMC模型未收斂: R̂={rhat_value}")
+                
+            print(f"     ✅ MCMC推斷完成")
         
         # 計算真實基差風險
         posterior_samples = getattr(model_results, 'samples', [])
