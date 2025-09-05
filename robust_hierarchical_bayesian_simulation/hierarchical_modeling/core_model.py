@@ -479,12 +479,17 @@ class ParametricHierarchicalModel:
     
     def _build_jax_log_probability_function(self, vulnerability_data):
         """建構JAX log probability函數"""
-        # 提取數據
+        # 提取數據並添加調試信息
         hazard_intensities = jnp.array(vulnerability_data.hazard_intensities)
         exposure_values = jnp.array(vulnerability_data.exposure_values)
         losses = jnp.array(vulnerability_data.observed_losses)
         
-        @jit
+        print(f"🔍 JAX數據轉換調試:")
+        print(f"   - 轉換後 hazard_intensities: {hazard_intensities.shape}")
+        print(f"   - 轉換後 exposure_values: {exposure_values.shape}")
+        print(f"   - 轉換後 losses: {losses.shape}")
+        
+        # @jit  # 暫時移除JIT以顯示調試信息
         def log_prob(params):
             """計算參數的log probability"""
             log_prior = self._compute_jax_log_prior(params)
@@ -529,14 +534,23 @@ class ParametricHierarchicalModel:
     
     def _compute_jax_log_likelihood(self, params, hazard_intensities, exposure_values, losses):
         """計算JAX log likelihood"""
+        # 調試信息
+        print(f"🔍 JAX likelihood 調試:")
+        print(f"   - hazard_intensities: {hazard_intensities.shape}")
+        print(f"   - exposure_values: {exposure_values.shape}")
+        print(f"   - losses: {losses.shape}")
+        
         # 計算脆弱度函數
         vulnerability = self._compute_jax_vulnerability_function(params, hazard_intensities)
+        print(f"   - vulnerability: {vulnerability.shape}")
         
         # 計算預期損失 - 修正維度廣播問題
         # vulnerability: (n_hospitals, n_events), exposure_values: (n_hospitals,)
         # 需要將exposure_values擴展為 (n_hospitals, 1) 以支持廣播
         exposure_expanded = jnp.expand_dims(exposure_values, axis=1)  # (n_hospitals, 1)
+        print(f"   - exposure_expanded: {exposure_expanded.shape}")
         expected_loss = vulnerability * exposure_expanded  # (n_hospitals, n_events)
+        print(f"   - expected_loss: {expected_loss.shape}")
         
         # 計算likelihood
         if self.model_spec.likelihood_family == LikelihoodFamily.NORMAL:
@@ -624,9 +638,10 @@ class ParametricHierarchicalModel:
             params_dict = unflatten_params(params_vector)
             return log_prob_fn(params_dict)
         
-        # 編譯函數
-        vector_log_prob = jit(vector_log_prob)
-        grad_log_prob = jit(grad(vector_log_prob))
+        # 編譯函數 - 暫時移除JIT以顯示調試信息
+        # vector_log_prob = jit(vector_log_prob)
+        # grad_log_prob = jit(grad(vector_log_prob))
+        grad_log_prob = grad(vector_log_prob)
         
         # 簡單的Metropolis-Hastings採樣器
         key = random.PRNGKey(self.mcmc_config.random_seed)
@@ -644,6 +659,7 @@ class ParametricHierarchicalModel:
             
             # 計算接受概率
             try:
+                print(f"🔍 MCMC採樣步驟 {i}: 計算proposal log prob")
                 proposal_logp = vector_log_prob(proposal)
                 log_accept_ratio = proposal_logp - current_logp
                 accept_prob = jnp.minimum(1.0, jnp.exp(log_accept_ratio))
@@ -654,7 +670,12 @@ class ParametricHierarchicalModel:
                     current_params = proposal
                     current_logp = proposal_logp
                     n_accepted += 1
-            except:
+            except Exception as e:
+                print(f"❌ MCMC採樣步驟 {i} 出錯: {e}")
+                if i < 5:  # 只在前幾步顯示詳細錯誤
+                    import traceback
+                    print(f"詳細錯誤: {traceback.format_exc()}")
+                    raise e  # 前幾步就退出，不要繼續
                 pass
             
             # 儲存樣本 (在warmup後)
