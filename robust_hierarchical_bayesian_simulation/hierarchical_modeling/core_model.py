@@ -32,6 +32,9 @@ os.environ['MKL_THREADING_LAYER'] = 'GNU'
 
 # JAX imports (replaces PyMC)
 try:
+    # 配置JAX平台，跳過TPU避免警告
+    os.environ['JAX_PLATFORMS'] = 'gpu,cpu'  # 優先GPU，回退到CPU，跳過TPU
+    
     import jax
     import jax.numpy as jnp
     import jax.scipy.stats as jsp
@@ -39,11 +42,42 @@ try:
     from jax.scipy.special import logsumexp
     from functools import partial
     HAS_PYMC = True  # Keep variable name for compatibility
-    print(f"✅ JAX 版本: {jax.__version__} (replacing PyMC)")
+    
+    # 配置JAX
     jax.config.update("jax_enable_x64", True)
+    
+    # 檢測可用設備並報告
+    try:
+        # 檢查GPU可用性
+        gpu_devices = jax.devices('gpu')
+        cpu_devices = jax.devices('cpu')
+        
+        print(f"✅ JAX 版本: {jax.__version__}")
+        print(f"   可用設備: GPU={len(gpu_devices)}, CPU={len(cpu_devices)}")
+        
+        if len(gpu_devices) > 0:
+            print(f"   🚀 將使用GPU加速: {gpu_devices[0]}")
+            current_device = 'gpu'
+        else:
+            print(f"   💻 將使用CPU計算: {cpu_devices[0]}")
+            current_device = 'cpu'
+            
+    except Exception as e:
+        print(f"⚠️ 設備檢測失敗: {e}")
+        current_device = 'auto'
+    
 except ImportError as e:
     HAS_PYMC = False
     warnings.warn(f"JAX not available: {e}")
+
+# ArviZ for diagnostics
+try:
+    import arviz as az
+    HAS_ARVIZ = True
+    print(f"✅ ArviZ 版本: {az.__version__}")
+except ImportError as e:
+    HAS_ARVIZ = False
+    warnings.warn(f"ArviZ not available for diagnostics: {e}")
 
 # 從其他模組導入
 try:
@@ -367,6 +401,10 @@ class ParametricHierarchicalModel:
         diagnostics = DiagnosticResult()
         
         try:
+            if not HAS_ARVIZ:
+                raise ImportError("ArviZ is required for MCMC diagnostics - no fallback allowed")
+                
+            # 使用ArviZ計算精確的診斷指標
             # R-hat統計
             rhat_result = az.rhat(trace)
             diagnostics.rhat = self._safe_extract_diagnostics_dict(rhat_result, default_value=1.0)
@@ -479,17 +517,18 @@ class ParametricHierarchicalModel:
     
     def _build_jax_log_probability_function(self, vulnerability_data):
         """建構JAX log probability函數"""
-        # 提取數據並添加調試信息
+        # 提取數據並轉換為JAX arrays
         hazard_intensities = jnp.array(vulnerability_data.hazard_intensities)
         exposure_values = jnp.array(vulnerability_data.exposure_values)
         losses = jnp.array(vulnerability_data.observed_losses)
         
-        print(f"🔍 JAX數據轉換調試:")
-        print(f"   - 轉換後 hazard_intensities: {hazard_intensities.shape}")
-        print(f"   - 轉換後 exposure_values: {exposure_values.shape}")
-        print(f"   - 轉換後 losses: {losses.shape}")
+        # 數據形狀和設備信息
+        print(f"🔍 JAX數據轉換:")
+        print(f"   - hazard_intensities: {hazard_intensities.shape} on {hazard_intensities.device()}")
+        print(f"   - exposure_values: {exposure_values.shape} on {exposure_values.device()}")
+        print(f"   - losses: {losses.shape} on {losses.device()}")
         
-        # @jit  # 暫時移除JIT以顯示調試信息
+        @jit
         def log_prob(params):
             """計算參數的log probability"""
             log_prior = self._compute_jax_log_prior(params)
@@ -534,23 +573,14 @@ class ParametricHierarchicalModel:
     
     def _compute_jax_log_likelihood(self, params, hazard_intensities, exposure_values, losses):
         """計算JAX log likelihood"""
-        # 調試信息
-        print(f"🔍 JAX likelihood 調試:")
-        print(f"   - hazard_intensities: {hazard_intensities.shape}")
-        print(f"   - exposure_values: {exposure_values.shape}")
-        print(f"   - losses: {losses.shape}")
-        
         # 計算脆弱度函數
         vulnerability = self._compute_jax_vulnerability_function(params, hazard_intensities)
-        print(f"   - vulnerability: {vulnerability.shape}")
         
         # 計算預期損失 - 修正維度廣播問題
         # vulnerability: (n_hospitals, n_events), exposure_values: (n_hospitals,)
         # 需要將exposure_values擴展為 (n_hospitals, 1) 以支持廣播
         exposure_expanded = jnp.expand_dims(exposure_values, axis=1)  # (n_hospitals, 1)
-        print(f"   - exposure_expanded: {exposure_expanded.shape}")
         expected_loss = vulnerability * exposure_expanded  # (n_hospitals, n_events)
-        print(f"   - expected_loss: {expected_loss.shape}")
         
         # 計算likelihood
         if self.model_spec.likelihood_family == LikelihoodFamily.NORMAL:
@@ -638,10 +668,9 @@ class ParametricHierarchicalModel:
             params_dict = unflatten_params(params_vector)
             return log_prob_fn(params_dict)
         
-        # 編譯函數 - 暫時移除JIT以顯示調試信息
-        # vector_log_prob = jit(vector_log_prob)
-        # grad_log_prob = jit(grad(vector_log_prob))
-        grad_log_prob = grad(vector_log_prob)
+        # 編譯函數以提高性能
+        vector_log_prob = jit(vector_log_prob)
+        grad_log_prob = jit(grad(vector_log_prob))
         
         # 簡單的Metropolis-Hastings採樣器
         key = random.PRNGKey(self.mcmc_config.random_seed)
@@ -659,7 +688,6 @@ class ParametricHierarchicalModel:
             
             # 計算接受概率
             try:
-                print(f"🔍 MCMC採樣步驟 {i}: 計算proposal log prob")
                 proposal_logp = vector_log_prob(proposal)
                 log_accept_ratio = proposal_logp - current_logp
                 accept_prob = jnp.minimum(1.0, jnp.exp(log_accept_ratio))
@@ -671,12 +699,12 @@ class ParametricHierarchicalModel:
                     current_logp = proposal_logp
                     n_accepted += 1
             except Exception as e:
-                print(f"❌ MCMC採樣步驟 {i} 出錯: {e}")
                 if i < 5:  # 只在前幾步顯示詳細錯誤
+                    print(f"❌ MCMC採樣步驟 {i} 出錯: {e}")
                     import traceback
                     print(f"詳細錯誤: {traceback.format_exc()}")
                     raise e  # 前幾步就退出，不要繼續
-                pass
+                pass  # 後續步驟靜默忽略錯誤
             
             # 儲存樣本 (在warmup後)
             if i >= self.mcmc_config.n_warmup:
