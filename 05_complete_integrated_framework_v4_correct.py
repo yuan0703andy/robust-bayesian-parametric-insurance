@@ -672,11 +672,14 @@ if RobustDataSplitter and hazard_intensities is not None and observed_losses is 
     # 創建數據分割器
     data_splitter = RobustDataSplitter(random_state=42)
     
-    # 創建分割 (使用100個合成事件樣本進行高效訓練)
+    # 創建分割 - 確保保留足夠的數據用於階層建模
+    n_events_total = hazard_intensities.shape[1]
+    print(f"🔍 調試: 原始數據形狀 - hazard_intensities: {hazard_intensities.shape}, observed_losses: {observed_losses.shape}")
+    
     data_splits = data_splitter.create_data_splits(
         hazard_intensities=hazard_intensities,
         observed_losses=observed_losses,
-        n_synthetic_samples=100,  # 保持效率，使用100個合成樣本
+        n_synthetic_samples=min(200, n_events_total),  # 增加樣本數，最多使用200個或全部事件
         train_val_frac=0.8,       # 80% 用於訓練+驗證
         val_frac=0.2,              # 20% 的訓練+驗證用於驗證
         n_strata=4                 # 4層分層採樣
@@ -709,6 +712,10 @@ if RobustDataSplitter and hazard_intensities is not None and observed_losses is 
     print(f"   訓練集: {train_data['hazard_intensities'].shape[1]} 事件")
     print(f"   驗證集: {val_data['hazard_intensities'].shape[1]} 事件")
     print(f"   測試集: {test_data['hazard_intensities'].shape[1]} 事件")
+    print(f"🔍 調試: 訓練集形狀詳細信息:")
+    print(f"   - hazard_intensities: {train_data['hazard_intensities'].shape}")
+    print(f"   - observed_losses: {train_data['observed_losses'].shape}")
+    print(f"   - exposure_values: {train_data['exposure_values'].shape}")
     
 else:
     print("❌ 錯誤: 數據分割模組不可用或數據缺失")
@@ -829,11 +836,33 @@ for i, config in enumerate(prior_likelihood_test_configs, 1):
             model_spec=model_spec
         )
         
+        # 數據維度驗證和修正
+        hazard_data = model_data['hazard_intensities']
+        loss_data = model_data['observed_losses']
+        exposure_data = model_data['exposure_values']
+        
+        print(f"🔍 階層模型輸入數據驗證:")
+        print(f"   - hazard_intensities形狀: {hazard_data.shape}")
+        print(f"   - observed_losses形狀: {loss_data.shape}")
+        print(f"   - exposure_values形狀: {exposure_data.shape}")
+        
+        # 確保observed_losses有正確的維度 (hospitals, events)
+        if len(loss_data.shape) == 1:
+            print("⚠️ observed_losses缺少事件維度，嘗試修正...")
+            # 如果只有一維，需要擴展到二維
+            if hazard_data.shape[1] > 1:  # 有多個事件
+                # 將1D損失擴展為2D (假設每個事件的損失相同)
+                loss_data = np.broadcast_to(loss_data.reshape(-1, 1), (loss_data.shape[0], hazard_data.shape[1]))
+                print(f"   修正後observed_losses形狀: {loss_data.shape}")
+            else:
+                print("❌ 無法修正維度：hazard_intensities也只有一個事件")
+                raise ValueError("數據維度不足，無法進行階層建模")
+        
         # 創建VulnerabilityData對象
         vulnerability_data = VulnerabilityData(
-            hazard_intensities=model_data['hazard_intensities'],
-            exposure_values=model_data['exposure_values'],
-            observed_losses=model_data['observed_losses'],
+            hazard_intensities=hazard_data,
+            exposure_values=exposure_data,
+            observed_losses=loss_data,
             hospital_coordinates=hospital_coords if 'hospital_coords' in locals() else None
         )
         
