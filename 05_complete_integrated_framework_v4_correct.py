@@ -231,13 +231,35 @@ try:
     if not hasattr(hazard_obj, 'intensity'):
         raise ValueError("Hazard對象缺少intensity數據")
     
-    # 計算每個事件的最大風速
+    # 調試信息：顯示hazard intensity的結構
+    intensity_shape = getattr(hazard_obj.intensity, 'shape', 'Unknown')
+    print(f"🔍 調試: hazard.intensity形狀 = {intensity_shape}, 類型 = {type(hazard_obj.intensity)}")
+    print(f"🔍 調試: n_events = {n_events}")
+    if hasattr(hazard_obj, 'event_id'):
+        print(f"🔍 調試: hazard.event_id長度 = {len(hazard_obj.event_id)}")
+    if hasattr(hazard_obj, 'centroids') and hasattr(hazard_obj.centroids, 'size'):
+        print(f"🔍 調試: centroids數量 = {hazard_obj.centroids.size}")
+    
+    # 計算每個事件的最大風速 (hazard intensity: [n_centroids, n_events])
     if hasattr(hazard_obj.intensity, 'max'):
+        # 沿著centroids軸(axis=0)計算最大值，得到每個事件的最大風速
         wind_speeds = hazard_obj.intensity.max(axis=0)
         if hasattr(wind_speeds, 'toarray'):
             wind_speeds = wind_speeds.toarray().flatten()
+        elif hasattr(wind_speeds, 'A1'):
+            wind_speeds = wind_speeds.A1  # scipy sparse matrix轉1D array
         else:
             wind_speeds = np.array(wind_speeds).flatten()
+        
+        # 如果維度仍然不對，嘗試轉置計算
+        if len(wind_speeds) != n_events:
+            wind_speeds = hazard_obj.intensity.max(axis=1)
+            if hasattr(wind_speeds, 'toarray'):
+                wind_speeds = wind_speeds.toarray().flatten()
+            elif hasattr(wind_speeds, 'A1'):
+                wind_speeds = wind_speeds.A1
+            else:
+                wind_speeds = np.array(wind_speeds).flatten()
     else:
         raise ValueError("無法從hazard intensity矩陣計算最大風速")
     
