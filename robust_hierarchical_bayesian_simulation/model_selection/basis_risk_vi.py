@@ -577,11 +577,11 @@ class BasisRiskAwareVI:
             
             # 🔧 計算當前基差風險用於記錄 (需要恢復原始尺度)
             with torch.no_grad():
-                # 訓練集基差風險 - 恢復到原始損失尺度
+                # 訓練集基差風險 - 已在標準化尺度計算，恢復到原始損失尺度
                 basis_risk_scaled = self._compute_basis_risk_batch_gpu(
                     X_tensor, y_tensor, theta_samples, epsilon, basis_risk_type
                 ).mean().item()
-                # 恢復到原始尺度 (百萬美元)
+                # 🔧 修復：基差風險已經是標準化尺度的，只需乘以標準差恢復尺度
                 current_basis_risk_train = basis_risk_scaled * self._y_scale
                 
                 # 驗證集基差風險（如果有）
@@ -887,6 +887,10 @@ class BasisRiskAwareVI:
         steinmann_thresholds = self._get_steinmann_products_tensor().to(dtype=torch.float32)  # [350, 4]
         steinmann_ratios = self._get_steinmann_ratios_tensor().to(dtype=torch.float32)        # [350, 4] 
         steinmann_max_payouts = self._get_steinmann_max_payouts().to(dtype=torch.float32)     # [350]
+        
+        # 🔧 重要修復：賠付也需要縮放到標準化尺度以匹配y_tensor
+        # steinmann_max_payouts原本是原始美元，需要標準化
+        steinmann_max_payouts = (steinmann_max_payouts - self._y_mean) / self._y_scale
         
         n_products = steinmann_thresholds.shape[0]  # 應該是350
         
@@ -1398,45 +1402,6 @@ class BasisRiskAwareVI:
             'best_model': all_results[0]
         }
     
-    def _compute_basis_risk_gpu(self, X_tensor, y_tensor, epsilon, basis_risk_type):
-        """在GPU上計算基差風險"""
-        # 添加epsilon contamination
-        if epsilon > 0:
-            noise = torch.randn_like(y_tensor) * epsilon * y_tensor.mean()
-            y_perturbed = y_tensor + noise
-        else:
-            y_perturbed = y_tensor
-        
-        # 基於風速特徵計算參數賠付
-        wind_speeds = X_tensor.squeeze()
-        
-        # 簡化的參數保險邏輯（基於風速閾值）
-        payouts = torch.zeros_like(y_perturbed, dtype=torch.float32)
-        
-        # 多層閾值賠付
-        thresholds = torch.tensor([25.0, 35.0, 45.0], device=self.device, dtype=torch.float32)
-        payout_ratios = torch.tensor([0.25, 0.5, 1.0], device=self.device, dtype=torch.float32)
-        max_payout = y_tensor.mean() * 2.0  # 動態最大賠付
-        
-        for i, threshold in enumerate(thresholds):
-            mask = (wind_speeds >= threshold).to(dtype=torch.float32)
-            # 避免布林索引，使用張量運算
-            payout_value = max_payout * payout_ratios[i]
-            payouts = torch.maximum(payouts, mask * payout_value)
-        
-        # 計算基差風險
-        if basis_risk_type == 'absolute':
-            basis_risk = torch.mean(torch.abs(y_perturbed - payouts))
-        elif basis_risk_type == 'asymmetric':
-            under_penalty = torch.mean(torch.relu(y_perturbed - payouts))
-            over_penalty = torch.mean(torch.relu(payouts - y_perturbed))
-            basis_risk = 2.0 * under_penalty + over_penalty
-        else:  # weighted
-            under = torch.relu(y_perturbed - payouts) * 2.0
-            over = torch.relu(payouts - y_perturbed) * 0.5
-            basis_risk = torch.mean(under + over)
-        
-        return basis_risk
     
     def _cpu_screening(self, X: np.ndarray, y: np.ndarray, 
                       X_val: np.ndarray = None, y_val: np.ndarray = None) -> Dict:
