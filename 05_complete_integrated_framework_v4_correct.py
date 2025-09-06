@@ -957,7 +957,7 @@ for model_idx, (model_name, model_result) in enumerate(hierarchical_model_result
                 # 創建標準ELBO模式的VI優化器
                 # 🔑 選項A: 2維向後兼容 (n_params=2)  
                 # 🔑 選項B: 350維完整產品選擇 (n_params=350)
-                USE_350_PRODUCT_SELECTION = False  # 🎯 暫時使用2維向後兼容模式測試
+                USE_350_PRODUCT_SELECTION = True  # 🎯 使用簡化的350維直接VI方案
                 
                 vi_optimizer_traditional = BasisRiskAwareVI(
                     n_features=1,  # 風速特徵

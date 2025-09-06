@@ -823,12 +823,13 @@ class BasisRiskAwareVI:
     
     def _compute_basis_risk_batch_gpu(self, X_tensor, y_tensor, theta_samples, epsilon, basis_risk_type):
         """
-        GPU上批次計算基差風險 - 方案A: 正確的產品選擇VI
+        GPU上批次計算基差風險 - 純粹的350維VI產品選擇對決
         
-        概念變更:
-        - θ不再是產品參數(slope, intercept)
-        - θ變成多個固定Steinmann產品的組合權重
-        - payout = Σ(weight_i * steinmann_product_i_payout)
+        簡化設計:
+        - θ直接是350個產品的logits  
+        - w = softmax(θ) 得到產品權重
+        - payout = Σ(w_i × smooth_payout_i) 
+        - 移除所有複雜投影，專注VI目標函數比較
         """
         batch_size = theta_samples.shape[0]
         n_params = theta_samples.shape[1]
@@ -856,80 +857,52 @@ class BasisRiskAwareVI:
         
         wind_speeds = X_flat.unsqueeze(0).expand(batch_size, -1)  # [batch_size, n_data]
         
-        # *** 核心創新：真正的350個Steinmann產品選擇VI ***
-        if n_params == 2:
-            # 向後兼容模式：2維θ映射到350維產品權重
-            # 使用神經網絡風格的權重生成
-            theta_expanded = torch.cat([
-                theta_samples,                              # [batch_size, 2]
-                theta_samples ** 2,                         # [batch_size, 2] 
-                torch.sin(theta_samples * 3.14159),         # [batch_size, 2]
-                torch.cos(theta_samples * 3.14159)          # [batch_size, 2]
-            ], dim=1)  # [batch_size, 8]
-            
-            # 線性投影到350維 (確保類型一致) - 🔧 修復：投影矩陣需要參與梯度更新
-            if not hasattr(self, '_theta_projection'):
-                self._theta_projection = torch.randn(8, 350, device=self.device, dtype=torch.float32, requires_grad=True) * 0.1
-            
-            # 🔧 確保所有張量都是float32類型
-            theta_expanded = theta_expanded.to(dtype=torch.float32)
-            raw_logits = torch.matmul(theta_expanded, self._theta_projection)  # [batch_size, 350]
-            product_weights = torch.softmax(raw_logits, dim=1)  # [batch_size, 350]
-            
-        elif n_params == 350:
-            # 完整模式：直接350維產品權重
-            product_weights = torch.softmax(theta_samples, dim=1)  # [batch_size, 350]
-            
-        else:
-            raise ValueError(f"n_params must be 2 (compatibility) or 350 (full), got {n_params}")
+        # 🎯 核心簡化：θ直接是350維產品logits
+        if n_params != 350:
+            raise ValueError(f"簡化方案要求 n_params=350 (pure VI duel), got {n_params}")
         
-        # 載入完整350個Steinmann產品定義 (確保類型一致)
+        # 直接softmax得到產品權重，無需複雜投影
+        product_weights = torch.softmax(theta_samples, dim=1)  # [batch_size, 350]
+        
+        # 載入固定的350個Steinmann產品定義
         steinmann_thresholds = self._get_steinmann_products_tensor().to(dtype=torch.float32)  # [350, 4]
         steinmann_ratios = self._get_steinmann_ratios_tensor().to(dtype=torch.float32)        # [350, 4] 
         steinmann_max_payouts = self._get_steinmann_max_payouts().to(dtype=torch.float32)     # [350]
         
-        # 🔧 重要修復：賠付也需要縮放到標準化尺度以匹配y_tensor
-        # steinmann_max_payouts原本是原始美元，需要標準化
+        # 縮放到標準化尺度以匹配y_tensor
         steinmann_max_payouts = (steinmann_max_payouts - self._y_mean) / self._y_scale
         
-        n_products = steinmann_thresholds.shape[0]  # 應該是350
+        n_products = steinmann_thresholds.shape[0]  # 350
         
-        # 計算組合賠付 - 完整350產品版本
+        # 🚀 高效向量化計算：批量計算所有產品賠付
         payouts = torch.zeros_like(y_perturbed, dtype=torch.float32)  # [batch_size, n_data]
         
-        for batch_idx in range(batch_size):
-            batch_weights = product_weights[batch_idx]  # [350]
-            batch_wind_speeds = wind_speeds[batch_idx]  # [n_data]
+        # 對每個產品向量化計算
+        for prod_idx in range(n_products):
+            # 獲取此產品的定義
+            thresholds = steinmann_thresholds[prod_idx]  # [4]  
+            ratios = steinmann_ratios[prod_idx]          # [4]
+            max_payout = steinmann_max_payouts[prod_idx] # scalar
             
-            # 加權組合350個產品的賠付 (確保類型一致)
-            weighted_payout = torch.zeros(n_data, device=self.device, dtype=torch.float32)
+            # 計算此產品的平滑賠付函數
+            product_payouts = torch.zeros_like(wind_speeds, dtype=torch.float32)  # [batch_size, n_data]
             
-            for prod_idx in range(n_products):
-                product_weight = batch_weights[prod_idx]
-                
-                # 獲取此產品的定義
-                thresholds = steinmann_thresholds[prod_idx]  # [4]
-                ratios = steinmann_ratios[prod_idx]          # [4]
-                max_payout = steinmann_max_payouts[prod_idx] # scalar
-                
-                # 計算此產品的固定階梯賠付 (Steinmann標準) 
-                product_payout = torch.zeros(n_data, device=self.device, dtype=torch.float32)
-                
-                for threshold_idx in range(4):  # 最多4個閾值
-                    threshold = float(thresholds[threshold_idx].item())  # 🔧 確保為float
-                    if threshold < 999:  # 有效閾值 (999表示無效)
-                        ratio = float(ratios[threshold_idx].item())  # 🔧 確保為float
-                        if ratio > 0:  # 有效賠付比例
-                            # 🔧 確保所有張量運算都是float32
-                            mask = (batch_wind_speeds >= threshold).to(dtype=torch.float32)  # 布林值轉float32
-                            payout_value = torch.tensor(max_payout.item(), device=self.device, dtype=torch.float32) * ratio
-                            # 階梯函數：取最高觸發的賠付 (避免布林mask導致Long類型)
-                            product_payout = torch.maximum(product_payout, mask * payout_value)
-                
-                # 加權累積到總賠付
-                weighted_payout += product_weight * product_payout
+            for threshold_idx in range(4):  # 最多4個閾值
+                base_threshold = float(thresholds[threshold_idx].item())
+                if base_threshold < 999:  # 有效閾值
+                    ratio = float(ratios[threshold_idx].item())
+                    if ratio > 0:  # 有效賠付比例
+                        # 🔧 平滑sigmoid激活 (保持可微性)
+                        temperature = 2.0
+                        smooth_activation = torch.sigmoid((wind_speeds - base_threshold) / temperature)
+                        payout_value = max_payout * ratio
+                        
+                        # 累積平滑賠付
+                        product_payouts = product_payouts + smooth_activation * payout_value
             
-            payouts[batch_idx] = weighted_payout
+            # 加權累積此產品到總賠付
+            product_weight = product_weights[:, prod_idx:prod_idx+1]  # [batch_size, 1]
+            payouts += product_weight * product_payouts
         
         # 計算基差風險
         if basis_risk_type == 'absolute':
