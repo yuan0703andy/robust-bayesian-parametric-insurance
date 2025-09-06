@@ -867,9 +867,9 @@ class BasisRiskAwareVI:
                 torch.cos(theta_samples * 3.14159)          # [batch_size, 2]
             ], dim=1)  # [batch_size, 8]
             
-            # 線性投影到350維 (確保類型一致)
+            # 線性投影到350維 (確保類型一致) - 🔧 修復：投影矩陣需要參與梯度更新
             if not hasattr(self, '_theta_projection'):
-                self._theta_projection = torch.randn(8, 350, device=self.device, dtype=torch.float32) * 0.1
+                self._theta_projection = torch.randn(8, 350, device=self.device, dtype=torch.float32, requires_grad=True) * 0.1
             
             # 🔧 確保所有張量都是float32類型
             theta_expanded = theta_expanded.to(dtype=torch.float32)
