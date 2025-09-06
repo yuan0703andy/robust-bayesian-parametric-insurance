@@ -867,10 +867,12 @@ class BasisRiskAwareVI:
                 torch.cos(theta_samples * 3.14159)          # [batch_size, 2]
             ], dim=1)  # [batch_size, 8]
             
-            # 線性投影到350維
+            # 線性投影到350維 (確保類型一致)
             if not hasattr(self, '_theta_projection'):
-                self._theta_projection = torch.randn(8, 350, device=self.device) * 0.1
+                self._theta_projection = torch.randn(8, 350, device=self.device, dtype=torch.float32) * 0.1
             
+            # 🔧 確保所有張量都是float32類型
+            theta_expanded = theta_expanded.to(dtype=torch.float32)
             raw_logits = torch.matmul(theta_expanded, self._theta_projection)  # [batch_size, 350]
             product_weights = torch.softmax(raw_logits, dim=1)  # [batch_size, 350]
             
@@ -881,10 +883,10 @@ class BasisRiskAwareVI:
         else:
             raise ValueError(f"n_params must be 2 (compatibility) or 350 (full), got {n_params}")
         
-        # 載入完整350個Steinmann產品定義
-        steinmann_thresholds = self._get_steinmann_products_tensor()  # [350, 4]
-        steinmann_ratios = self._get_steinmann_ratios_tensor()        # [350, 4] 
-        steinmann_max_payouts = self._get_steinmann_max_payouts()     # [350]
+        # 載入完整350個Steinmann產品定義 (確保類型一致)
+        steinmann_thresholds = self._get_steinmann_products_tensor().to(dtype=torch.float32)  # [350, 4]
+        steinmann_ratios = self._get_steinmann_ratios_tensor().to(dtype=torch.float32)        # [350, 4] 
+        steinmann_max_payouts = self._get_steinmann_max_payouts().to(dtype=torch.float32)     # [350]
         
         n_products = steinmann_thresholds.shape[0]  # 應該是350
         
@@ -895,8 +897,8 @@ class BasisRiskAwareVI:
             batch_weights = product_weights[batch_idx]  # [350]
             batch_wind_speeds = wind_speeds[batch_idx]  # [n_data]
             
-            # 加權組合350個產品的賠付
-            weighted_payout = torch.zeros(n_data, device=self.device)
+            # 加權組合350個產品的賠付 (確保類型一致)
+            weighted_payout = torch.zeros(n_data, device=self.device, dtype=torch.float32)
             
             for prod_idx in range(n_products):
                 product_weight = batch_weights[prod_idx]
@@ -906,16 +908,17 @@ class BasisRiskAwareVI:
                 ratios = steinmann_ratios[prod_idx]          # [4]
                 max_payout = steinmann_max_payouts[prod_idx] # scalar
                 
-                # 計算此產品的固定階梯賠付 (Steinmann標準)
-                product_payout = torch.zeros(n_data, device=self.device)
+                # 計算此產品的固定階梯賠付 (Steinmann標準) 
+                product_payout = torch.zeros(n_data, device=self.device, dtype=torch.float32)
                 
                 for threshold_idx in range(4):  # 最多4個閾值
-                    threshold = thresholds[threshold_idx]
+                    threshold = float(thresholds[threshold_idx].item())  # 🔧 確保為float
                     if threshold < 999:  # 有效閾值 (999表示無效)
-                        ratio = ratios[threshold_idx]
+                        ratio = float(ratios[threshold_idx].item())  # 🔧 確保為float
                         if ratio > 0:  # 有效賠付比例
+                            # 🔧 確保所有張量運算都是float32
                             mask = batch_wind_speeds >= threshold
-                            payout_value = max_payout * ratio
+                            payout_value = torch.tensor(max_payout.item(), device=self.device, dtype=torch.float32) * ratio
                             # 階梯函數：取最高觸發的賠付
                             product_payout = torch.where(mask, payout_value, product_payout)
                 

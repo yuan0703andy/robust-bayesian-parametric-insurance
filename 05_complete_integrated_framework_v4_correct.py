@@ -221,71 +221,80 @@ try:
     if not hasattr(exposure_obj, 'value') or len(exposure_obj.value) == 0:
         raise ValueError("Exposure對象缺少value數據")
     total_exposure = float(np.sum(exposure_obj.value))
-    
-    # 嚴格提取損失數據
-    if not hasattr(impact_obj, 'at_event') or len(impact_obj.at_event) == 0:
-        raise ValueError("Impact對象缺少at_event損失數據")
-    event_losses = np.array(impact_obj.at_event)
-    
-    # 嚴格提取風速數據
-    if not hasattr(hazard_obj, 'intensity'):
-        raise ValueError("Hazard對象缺少intensity數據")
-    
-    # 調試信息：顯示hazard intensity的結構
-    intensity_shape = getattr(hazard_obj.intensity, 'shape', 'Unknown')
-    print(f"🔍 調試: hazard.intensity形狀 = {intensity_shape}, 類型 = {type(hazard_obj.intensity)}")
-    print(f"🔍 調試: n_events = {n_events}")
-    if hasattr(hazard_obj, 'event_id'):
-        print(f"🔍 調試: hazard.event_id長度 = {len(hazard_obj.event_id)}")
-    if hasattr(hazard_obj, 'centroids') and hasattr(hazard_obj.centroids, 'size'):
-        print(f"🔍 調試: centroids數量 = {hazard_obj.centroids.size}")
-    
-    # 計算每個事件的最大風速 (hazard intensity: [n_centroids, n_events])
-    if hasattr(hazard_obj.intensity, 'max'):
-        # 沿著centroids軸(axis=0)計算最大值，得到每個事件的最大風速
-        wind_speeds = hazard_obj.intensity.max(axis=0)
-        if hasattr(wind_speeds, 'toarray'):
-            wind_speeds = wind_speeds.toarray().flatten()
-        elif hasattr(wind_speeds, 'A1'):
-            wind_speeds = wind_speeds.A1  # scipy sparse matrix轉1D array
-        else:
-            wind_speeds = np.array(wind_speeds).flatten()
         
-        # 如果維度仍然不對，嘗試轉置計算
-        if len(wind_speeds) != n_events:
-            wind_speeds = hazard_obj.intensity.max(axis=1)
+        # 嚴格提取損失數據
+        if not hasattr(impact_obj, 'at_event') or len(impact_obj.at_event) == 0:
+            raise ValueError("Impact對象缺少at_event損失數據")
+        event_losses = np.array(impact_obj.at_event)
+        
+        # 嚴格提取風速數據
+        if not hasattr(hazard_obj, 'intensity'):
+            raise ValueError("Hazard對象缺少intensity數據")
+        
+        # 調試信息：顯示hazard intensity的結構
+        intensity_shape = getattr(hazard_obj.intensity, 'shape', 'Unknown')
+        print(f"🔍 調試: hazard.intensity形狀 = {intensity_shape}, 類型 = {type(hazard_obj.intensity)}")
+        print(f"🔍 調試: n_events = {n_events}")
+        if hasattr(hazard_obj, 'event_id'):
+            print(f"🔍 調試: hazard.event_id長度 = {len(hazard_obj.event_id)}")
+        if hasattr(hazard_obj, 'centroids') and hasattr(hazard_obj.centroids, 'size'):
+            print(f"🔍 調試: centroids數量 = {hazard_obj.centroids.size}")
+        
+        # 計算每個事件的最大風速 (hazard intensity: [n_centroids, n_events])
+        if hasattr(hazard_obj.intensity, 'max'):
+            # 沿著centroids軸(axis=0)計算最大值，得到每個事件的最大風速
+            wind_speeds = hazard_obj.intensity.max(axis=0)
             if hasattr(wind_speeds, 'toarray'):
                 wind_speeds = wind_speeds.toarray().flatten()
             elif hasattr(wind_speeds, 'A1'):
-                wind_speeds = wind_speeds.A1
+                wind_speeds = wind_speeds.A1  # scipy sparse matrix轉1D array
             else:
                 wind_speeds = np.array(wind_speeds).flatten()
-    else:
-        raise ValueError("無法從hazard intensity矩陣計算最大風速")
-    
-    # 數據一致性檢查
-    if len(event_losses) != n_events or len(wind_speeds) != n_events:
-        raise ValueError(f"數據維度不一致: events={n_events}, losses={len(event_losses)}, winds={len(wind_speeds)}")
-    
-    # 數據有效性檢查
-    if total_exposure <= 0:
-        raise ValueError(f"總暴險值無效: {total_exposure}")
-    if np.any(event_losses < 0):
-        raise ValueError("發現負數損失值")
-    if np.any(wind_speeds < 0) or np.all(wind_speeds == 0):
-        raise ValueError("風速數據無效")
-    
-    print(f"✅ 真實CLIMADA數據驗證通過:")
-    print(f"   事件數量: {n_events}")
-    print(f"   總暴險: ${total_exposure/1e9:.1f}B")
-    print(f"   損失範圍: ${event_losses.min()/1e6:.1f}M - ${event_losses.max()/1e6:.1f}M")
-    print(f"   風速範圍: {wind_speeds.min():.1f} - {wind_speeds.max():.1f} m/s")
+            
+            # 如果維度仍然不對，嘗試轉置計算
+            if len(wind_speeds) != n_events:
+                wind_speeds = hazard_obj.intensity.max(axis=1)
+                if hasattr(wind_speeds, 'toarray'):
+                    wind_speeds = wind_speeds.toarray().flatten()
+                elif hasattr(wind_speeds, 'A1'):
+                    wind_speeds = wind_speeds.A1
+                else:
+                    wind_speeds = np.array(wind_speeds).flatten()
+        else:
+            raise ValueError("無法從hazard intensity矩陣計算最大風速")
+        
+        # 數據一致性檢查
+        if len(event_losses) != n_events or len(wind_speeds) != n_events:
+            raise ValueError(f"數據維度不一致: events={n_events}, losses={len(event_losses)}, winds={len(wind_speeds)}")
+        
+        # 數據有效性檢查
+        if total_exposure <= 0:
+            raise ValueError(f"總暴險值無效: {total_exposure}")
+        if np.any(event_losses < 0):
+            raise ValueError("發現負數損失值")
+        if np.any(wind_speeds < 0) or np.all(wind_speeds == 0):
+            raise ValueError("風速數據無效")
+        
+        print(f"✅ 真實CLIMADA數據驗證通過:")
+        print(f"   事件數量: {n_events}")
+        print(f"   總暴險: ${total_exposure/1e9:.1f}B")
+        print(f"   損失範圍: ${event_losses.min()/1e6:.1f}M - ${event_losses.max()/1e6:.1f}M")
+        print(f"   風速範圍: {wind_speeds.min():.1f} - {wind_speeds.max():.1f} m/s")
+        
+    # 設置真實數據給後續使用
+    hazard_intensities = wind_speeds
+    observed_losses = event_losses
     
 except Exception as e:
     print(f"❌ CLIMADA數據驗證失敗: {e}")
     print("   請確保運行 01_run_climada.py 生成完整的真實數據")
     print("   不接受任何簡化、模擬或備用數據方案")
     sys.exit(1)
+
+print(f"📊 最終數據確認:")
+print(f"   事件數量: {n_events}")
+print(f"   風速範圍: {hazard_intensities.min():.1f} - {hazard_intensities.max():.1f}")
+print(f"   損失範圍: ${observed_losses.min():.0f} - ${observed_losses.max():.0f}")
 
 # %%
 # =============================================================================
@@ -948,7 +957,7 @@ for model_idx, (model_name, model_result) in enumerate(hierarchical_model_result
                 # 創建標準ELBO模式的VI優化器
                 # 🔑 選項A: 2維向後兼容 (n_params=2)  
                 # 🔑 選項B: 350維完整產品選擇 (n_params=350)
-                USE_350_PRODUCT_SELECTION = True  # 🎯 設為True啟用完整350產品選擇
+                USE_350_PRODUCT_SELECTION = False  # 🎯 暫時使用2維向後兼容模式測試
                 
                 vi_optimizer_traditional = BasisRiskAwareVI(
                     n_features=1,  # 風速特徵
