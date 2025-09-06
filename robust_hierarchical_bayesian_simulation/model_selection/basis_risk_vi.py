@@ -925,7 +925,7 @@ class BasisRiskAwareVI:
         with torch.cuda.stream(stream1):
             payouts_gpu1 = self._compute_products_subset_gpu(
                 wind_gpu1, weights_gpu1,
-                steinmann_data['gpu1'], gpu0_products, gpu0_products + gpu1_products  
+                steinmann_data['gpu1'], gpu0_products, gpu0_products + gpu1_products
             )
         
         # 等待兩個流完成
@@ -975,7 +975,7 @@ class BasisRiskAwareVI:
         return {'gpu0': gpu0_data, 'gpu1': gpu1_data}
     
     def _compute_products_subset_gpu(self, wind_speeds, product_weights, steinmann_data, start_idx, end_idx):
-        """在指定GPU上計算產品子集的賠付"""
+        """恢復到固定產品定義 - 重新簡化為純產品選擇"""
         batch_size = wind_speeds.shape[0]
         n_data = wind_speeds.shape[1]
         n_products = end_idx - start_idx
@@ -1162,132 +1162,22 @@ class BasisRiskAwareVI:
         return torch.tensor(payouts, device=self.device, dtype=torch.float32)  # [350] tensor
     
     def _compute_crps_batch_gpu(self, X_tensor, y_tensor, theta_samples, epsilon):
-        """GPU上批次計算CRPS(y_observed, F_payout(θ)) - 核心創新實現
+        """統一的CRPS計算 - 使用相同的350產品基差風險邏輯
         
-        這個函數實現你的創新公式中的核心CRPS項：
-        ℒBR(φ) = -E_qφ(θ)[CRPS(y, F(θ))] - KL
-        
-        Args:
-            X_tensor: 風速特徵 [n_data]
-            y_tensor: 觀測損失 [n_data] 
-            theta_samples: 參數樣本 [batch_size, n_params]
-            epsilon: ε-contamination參數
-            
-        Returns:
-            CRPS scores [batch_size] - 每個θ樣本的CRPS
+        🔑 核心修復: 現在CRPS和基差風險使用完全相同的計算邏輯
+        避免"A考卷訓練，B考卷評分"的問題
         """
-        batch_size = theta_samples.shape[0]
+        # ✅ 直接使用基差風險計算函數獲取賠付
+        basis_risks = self._compute_basis_risk_batch_gpu(
+            X_tensor, y_tensor, theta_samples, epsilon, 'absolute'
+        )
         
-        # 處理維度問題
-        if X_tensor.dim() == 3:
-            X_flat = X_tensor.reshape(-1, X_tensor.size(-1)).squeeze(-1)
-        else:
-            X_flat = X_tensor.squeeze(-1) if X_tensor.dim() > 1 else X_tensor
-        
-        if y_tensor.dim() > 1:
-            y_flat = y_tensor.reshape(-1)
-        else:
-            y_flat = y_tensor
-            
-        n_data = X_flat.shape[0]
-        y_flat = y_flat[:n_data]  # 確保數據點匹配
-        
-        # 為每個θ樣本生成參數保險賠付分布 F(θ)
-        crps_scores = torch.zeros(batch_size, device=self.device)
-        
-        for batch_idx in range(batch_size):
-            theta = theta_samples[batch_idx]  # [n_params]
-            
-            # 1. 基於θ生成參數保險賠付分布樣本
-            payout_distribution_samples = self._generate_payout_distribution_gpu(
-                X_flat.unsqueeze(-1), theta, n_samples=50  # 每個數據點生成50個賠付樣本
-            )  # [n_data, n_samples]
-            
-            # 2. 添加ε-contamination到觀測值
-            if epsilon > 0:
-                noise = torch.randn_like(y_flat) * epsilon * y_flat.std()
-                y_contaminated = y_flat + noise
-            else:
-                y_contaminated = y_flat
-            
-            # 3. 計算CRPS(y_contaminated, payout_distribution)
-            crps_per_event = torch.zeros(n_data, device=self.device)
-            
-            for i in range(n_data):
-                # 對每個事件計算CRPS
-                y_true = y_contaminated[i]
-                payout_samples = payout_distribution_samples[i]  # [n_samples]
-                
-                # 使用ensemble CRPS公式
-                # CRPS = E|X - y| - 0.5 * E|X - X'|
-                term1 = torch.mean(torch.abs(payout_samples - y_true))
-                
-                # 計算 E|X - X'| 
-                n_samples = payout_samples.shape[0]
-                payout_expanded1 = payout_samples.unsqueeze(0).expand(n_samples, -1)
-                payout_expanded2 = payout_samples.unsqueeze(1).expand(-1, n_samples)
-                term2 = torch.mean(torch.abs(payout_expanded1 - payout_expanded2))
-                
-                crps_per_event[i] = term1 - 0.5 * term2
-            
-            # 平均所有事件的CRPS作為此θ樣本的總CRPS
-            crps_scores[batch_idx] = torch.mean(crps_per_event)
+        # 將基差風險轉換為CRPS分數
+        # 基差風險越小，CRPS越好（負值，因為ELBO要最大化）
+        crps_scores = -basis_risks  # 負基差風險作為CRPS
         
         return crps_scores
     
-    def _generate_payout_distribution_gpu(self, X_tensor, theta, n_samples=50):
-        """基於θ參數生成參數保險賠付分布樣本
-        
-        Args:
-            X_tensor: 風速特徵 [n_data]
-            theta: 模型參數 [n_params]
-            n_samples: 每個數據點的分布樣本數
-            
-        Returns:
-            賠付分布樣本 [n_data, n_samples]
-        """
-        n_data = X_tensor.shape[0]
-        wind_speeds = X_tensor.squeeze(-1) if len(X_tensor.shape) > 1 else X_tensor
-        
-        # 使用θ參數調整參數保險設計
-        theta_slope = theta[0] if len(theta) > 0 else 0.0
-        theta_intercept = theta[1] if len(theta) > 1 else 0.0
-        
-        # θ影響的動態閾值
-        base_thresholds = torch.tensor([25.0, 35.0, 45.0], device=self.device)
-        dynamic_thresholds = base_thresholds + theta_intercept * 5.0 + theta_slope * torch.arange(3, device=self.device).float()
-        
-        # θ影響的動態賠付比例
-        base_ratios = torch.tensor([0.25, 0.5, 1.0], device=self.device) 
-        dynamic_ratios = torch.sigmoid(base_ratios + theta_slope)
-        
-        # 基礎最大賠付（可以基於歷史數據估計）
-        base_max_payout = 5e6  # $5M基礎賠付
-        max_payout = base_max_payout * torch.exp(theta_intercept * 0.1)
-        
-        # 為每個數據點生成賠付分布樣本
-        payout_samples = torch.zeros(n_data, n_samples, device=self.device)
-        
-        for i in range(n_data):
-            wind_speed = wind_speeds[i]
-            
-            # 確定性賠付邏輯
-            deterministic_payout = 0.0
-            for j in range(3):
-                if wind_speed >= dynamic_thresholds[j]:
-                    deterministic_payout = max_payout * dynamic_ratios[j]
-            
-            # 添加隨機性：參數保險通常有一定的不確定性
-            payout_std = deterministic_payout * 0.1  # 10%的變異性
-            
-            if payout_std > 0:
-                # 使用torch.randn生成標準正態分佈，然後變換
-                standard_normal = torch.randn(n_samples, device=self.device)
-                payout_samples[i] = (deterministic_payout + payout_std * standard_normal).clamp(min=0)
-            else:
-                payout_samples[i] = torch.zeros(n_samples, device=self.device)
-        
-        return payout_samples
     
     def _train_single_model_cpu(self, X: np.ndarray, y: np.ndarray, epsilon: float, 
                                basis_risk_type: str, n_iterations: int, start_time: float,
