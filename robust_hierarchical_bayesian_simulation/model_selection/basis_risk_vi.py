@@ -891,7 +891,7 @@ class BasisRiskAwareVI:
         n_products = steinmann_thresholds.shape[0]  # 應該是350
         
         # 計算組合賠付 - 完整350產品版本
-        payouts = torch.zeros_like(y_perturbed)  # [batch_size, n_data]
+        payouts = torch.zeros_like(y_perturbed, dtype=torch.float32)  # [batch_size, n_data]
         
         for batch_idx in range(batch_size):
             batch_weights = product_weights[batch_idx]  # [350]
@@ -917,10 +917,10 @@ class BasisRiskAwareVI:
                         ratio = float(ratios[threshold_idx].item())  # 🔧 確保為float
                         if ratio > 0:  # 有效賠付比例
                             # 🔧 確保所有張量運算都是float32
-                            mask = batch_wind_speeds >= threshold
+                            mask = (batch_wind_speeds >= threshold).to(dtype=torch.float32)  # 布林值轉float32
                             payout_value = torch.tensor(max_payout.item(), device=self.device, dtype=torch.float32) * ratio
-                            # 階梯函數：取最高觸發的賠付
-                            product_payout = torch.where(mask, payout_value, product_payout)
+                            # 階梯函數：取最高觸發的賠付 (避免布林mask導致Long類型)
+                            product_payout = torch.maximum(product_payout, mask * payout_value)
                 
                 # 加權累積到總賠付
                 weighted_payout += product_weight * product_payout
@@ -958,7 +958,7 @@ class BasisRiskAwareVI:
         
         for thresh in single_thresholds:
             # 單閾值：[threshold, 999, 999, 999] - 只有1個有效閾值
-            thresholds_list.append(torch.tensor([thresh, 999, 999, 999], device=self.device))
+            thresholds_list.append(torch.tensor([thresh, 999, 999, 999], device=self.device, dtype=torch.float32))
         
         # ===== 20個雙閾值產品 =====
         dual_pairs = [
@@ -971,7 +971,7 @@ class BasisRiskAwareVI:
         
         for t1, t2 in dual_pairs:
             # 雙閾值：[t1, t2, 999, 999]
-            thresholds_list.append(torch.tensor([t1, t2, 999, 999], device=self.device))
+            thresholds_list.append(torch.tensor([t1, t2, 999, 999], device=self.device, dtype=torch.float32))
         
         # ===== 15個三閾值產品 =====
         triple_sets = [
@@ -984,7 +984,7 @@ class BasisRiskAwareVI:
         
         for t1, t2, t3 in triple_sets:
             # 三閾值：[t1, t2, t3, 999]
-            thresholds_list.append(torch.tensor([t1, t2, t3, 999], device=self.device))
+            thresholds_list.append(torch.tensor([t1, t2, t3, 999], device=self.device, dtype=torch.float32))
         
         # ===== 10個四閾值產品 =====
         quad_sets = [
@@ -997,7 +997,7 @@ class BasisRiskAwareVI:
         
         for t1, t2, t3, t4 in quad_sets:
             # 四閾值：[t1, t2, t3, t4]
-            thresholds_list.append(torch.tensor([t1, t2, t3, t4], device=self.device))
+            thresholds_list.append(torch.tensor([t1, t2, t3, t4], device=self.device, dtype=torch.float32))
         
         # ===== 每個產品×5個半徑 = 350個 =====
         radii = [15, 30, 50, 75, 100]  # km
@@ -1020,22 +1020,22 @@ class BasisRiskAwareVI:
         # ===== 25個單閾值產品的比例 =====
         for _ in range(25):
             # 單閾值：100%賠付 [1.0, 0, 0, 0]
-            ratios_list.append(torch.tensor([1.0, 0.0, 0.0, 0.0], device=self.device))
+            ratios_list.append(torch.tensor([1.0, 0.0, 0.0, 0.0], device=self.device, dtype=torch.float32))
         
         # ===== 20個雙閾值產品的比例 =====
         for _ in range(20):
             # 雙閾值：50%, 100% 賠付 [0.5, 1.0, 0, 0]
-            ratios_list.append(torch.tensor([0.5, 1.0, 0.0, 0.0], device=self.device))
+            ratios_list.append(torch.tensor([0.5, 1.0, 0.0, 0.0], device=self.device, dtype=torch.float32))
         
         # ===== 15個三閾值產品的比例 =====
         for _ in range(15):
             # 三閾值：25%, 50%, 100% 賠付 [0.25, 0.5, 1.0, 0]
-            ratios_list.append(torch.tensor([0.25, 0.5, 1.0, 0.0], device=self.device))
+            ratios_list.append(torch.tensor([0.25, 0.5, 1.0, 0.0], device=self.device, dtype=torch.float32))
         
         # ===== 10個四閾值產品的比例 =====
         for _ in range(10):
             # 四閾值：25%, 50%, 75%, 100% 賠付 [0.25, 0.5, 0.75, 1.0] - 完整Steinmann標準
-            ratios_list.append(torch.tensor([0.25, 0.5, 0.75, 1.0], device=self.device))
+            ratios_list.append(torch.tensor([0.25, 0.5, 0.75, 1.0], device=self.device, dtype=torch.float32))
         
         # ===== 每個基礎產品×5個半徑 = 350個 =====
         radii = [15, 30, 50, 75, 100]
@@ -1090,7 +1090,7 @@ class BasisRiskAwareVI:
                 total_multiplier = radius_multiplier * product_multiplier
                 payouts.append(base_payout * total_multiplier)
         
-        return torch.tensor(payouts, device=self.device)  # [350] tensor
+        return torch.tensor(payouts, device=self.device, dtype=torch.float32)  # [350] tensor
     
     def _compute_crps_batch_gpu(self, X_tensor, y_tensor, theta_samples, epsilon):
         """GPU上批次計算CRPS(y_observed, F_payout(θ)) - 核心創新實現
@@ -1411,16 +1411,18 @@ class BasisRiskAwareVI:
         wind_speeds = X_tensor.squeeze()
         
         # 簡化的參數保險邏輯（基於風速閾值）
-        payouts = torch.zeros_like(y_perturbed)
+        payouts = torch.zeros_like(y_perturbed, dtype=torch.float32)
         
         # 多層閾值賠付
-        thresholds = torch.tensor([25.0, 35.0, 45.0], device=self.device)
-        payout_ratios = torch.tensor([0.25, 0.5, 1.0], device=self.device)
+        thresholds = torch.tensor([25.0, 35.0, 45.0], device=self.device, dtype=torch.float32)
+        payout_ratios = torch.tensor([0.25, 0.5, 1.0], device=self.device, dtype=torch.float32)
         max_payout = y_tensor.mean() * 2.0  # 動態最大賠付
         
         for i, threshold in enumerate(thresholds):
-            mask = wind_speeds >= threshold
-            payouts[mask] = max_payout * payout_ratios[i]
+            mask = (wind_speeds >= threshold).to(dtype=torch.float32)
+            # 避免布林索引，使用張量運算
+            payout_value = max_payout * payout_ratios[i]
+            payouts = torch.maximum(payouts, mask * payout_value)
         
         # 計算基差風險
         if basis_risk_type == 'absolute':
