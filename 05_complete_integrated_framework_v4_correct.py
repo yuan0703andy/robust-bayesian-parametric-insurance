@@ -1140,7 +1140,7 @@ with open(report_path, 'w', encoding='utf-8') as f:
     # 兩步驟架構結果摘要
     f.write("兩步驟架構分析結果\n")
     f.write("-" * 40 + "\n")
-    f.write(f"架構: {integrated_results['methodology']}\n")
+    f.write(f"架構: {integrated_results.get('methodology', 'Two-Step Architecture')}\n")
     f.write(f"總分析時間: {two_step_results['summary']['total_time']:.1f}秒\n\n")
     
     # Step 1: 損失預測器結果
@@ -1198,7 +1198,7 @@ ranking_df.to_csv(ranking_csv_path, index=False)
 print("🎯 兩步驟架構分析完成!")
 print(f"📁 結果已儲存至：{main_results_path}")
 print(f"\n📊 分析摘要:")
-print(f"   架構: {integrated_results['methodology']}")
+print(f"   架構: {integrated_results.get('methodology', 'Two-Step Architecture')}")
 print(f"   Step 1 CRPS: {two_step_results['step_1_results']['final_crps']:.4f}")
 print(f"   Step 2 冠軍: ${two_step_results['summary']['best_basis_risk']/1e6:.2f}M")
 print(f"   總時間: {two_step_results['summary']['total_time']:.1f}秒")
