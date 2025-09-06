@@ -946,13 +946,20 @@ for model_idx, (model_name, model_result) in enumerate(hierarchical_model_result
                 from robust_hierarchical_bayesian_simulation.model_selection.basis_risk_vi import BasisRiskAwareVI
                 
                 # 創建標準ELBO模式的VI優化器
+                # 🔑 選項A: 2維向後兼容 (n_params=2)  
+                # 🔑 選項B: 350維完整產品選擇 (n_params=350)
+                USE_350_PRODUCT_SELECTION = True  # 🎯 設為True啟用完整350產品選擇
+                
                 vi_optimizer_traditional = BasisRiskAwareVI(
                     n_features=1,  # 風速特徵
                     epsilon_values=[model_result['config']['epsilon']],
                     basis_risk_types=['absolute'],
                     use_gpu=True,
-                    objective='traditional_elbo'  # 🔑 使用傳統ELBO
+                    objective='traditional_elbo',  # 🔑 使用傳統ELBO
+                    n_params=350 if USE_350_PRODUCT_SELECTION else 2  # 🔑 350維產品選擇 vs 2維兼容
                 )
+                
+                print(f"      🔧 VI配置: {'350維產品選擇模式' if USE_350_PRODUCT_SELECTION else '2維向後兼容模式'}")
                 
                 import time
                 start_time = time.time()
@@ -991,14 +998,17 @@ for model_idx, (model_name, model_result) in enumerate(hierarchical_model_result
                 # =============================================================
                 print(f"\n   📌 第三層: 貝葉斯 + CRPS-based VI創新")
                 
-                # 創建CRPS-based模式的VI優化器
+                # 創建CRPS-based模式的VI優化器 (使用相同的維度設置)
                 vi_optimizer_crps = BasisRiskAwareVI(
                     n_features=1,  # 風速特徵
                     epsilon_values=[model_result['config']['epsilon']],
                     basis_risk_types=['absolute'],
                     use_gpu=True,
-                    objective='crps_basis_risk'  # 🔑 使用創新CRPS-based ELBO
+                    objective='crps_basis_risk',  # 🔑 使用創新CRPS-based ELBO
+                    n_params=350 if USE_350_PRODUCT_SELECTION else 2  # 🔑 與第二層使用相同維度
                 )
+                
+                print(f"      🔧 CRPS-VI配置: {'350維產品選擇模式' if USE_350_PRODUCT_SELECTION else '2維向後兼容模式'}")
                 
                 start_time = time.time()
                 

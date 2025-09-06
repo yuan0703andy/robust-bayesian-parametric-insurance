@@ -323,7 +323,8 @@ class BasisRiskAwareVI:
                  epsilon_values: List[float] = None,
                  basis_risk_types: List[str] = None,
                  use_gpu: bool = True,
-                 objective: str = 'crps_basis_risk'):
+                 objective: str = 'crps_basis_risk',
+                 n_params: int = None):
         """
         初始化基差風險導向 VI
         
@@ -335,6 +336,7 @@ class BasisRiskAwareVI:
             objective: 目標函數類型
                 - 'traditional_elbo': 傳統ELBO (第二層比較)
                 - 'crps_basis_risk': CRPS-based ELBO創新 (第三層比較)
+            n_params: 參數維度 (None=自動計算, 2=向後兼容, 350=完整產品選擇)
         """
         if epsilon_values is None:
             epsilon_values = [0.0, 0.05, 0.10, 0.15, 0.20]
@@ -342,7 +344,12 @@ class BasisRiskAwareVI:
             basis_risk_types = ['absolute', 'asymmetric', 'weighted']
             
         self.n_features = n_features
-        self.n_params = n_features + 1  # 線性係數 + 噪音參數
+        
+        # 🔑 支援350維產品選擇VI
+        if n_params is None:
+            self.n_params = n_features + 1  # 傳統：線性係數 + 噪音參數
+        else:
+            self.n_params = n_params  # 自定義參數維度 (2 或 350)
         self.epsilon_values = epsilon_values
         self.basis_risk_types = basis_risk_types
         self.objective = objective
@@ -815,10 +822,18 @@ class BasisRiskAwareVI:
         return elbo
     
     def _compute_basis_risk_batch_gpu(self, X_tensor, y_tensor, theta_samples, epsilon, basis_risk_type):
-        """GPU上批次計算基差風險 - 修正版：θ參數真正影響計算"""
-        batch_size = theta_samples.shape[0]
+        """
+        GPU上批次計算基差風險 - 方案A: 正確的產品選擇VI
         
-        # 處理可能的維度問題
+        概念變更:
+        - θ不再是產品參數(slope, intercept)
+        - θ變成多個固定Steinmann產品的組合權重
+        - payout = Σ(weight_i * steinmann_product_i_payout)
+        """
+        batch_size = theta_samples.shape[0]
+        n_params = theta_samples.shape[1]
+        
+        # 處理輸入數據維度
         if X_tensor.dim() == 3:
             X_flat = X_tensor.reshape(-1, X_tensor.size(-1)).squeeze(-1)
         else:
@@ -830,7 +845,7 @@ class BasisRiskAwareVI:
             y_flat = y_tensor
             
         n_data = X_flat.shape[0]
-        y_flat = y_flat[:n_data]  # 確保數據點匹配
+        y_flat = y_flat[:n_data]
         
         # epsilon contamination
         if epsilon > 0:
@@ -839,58 +854,240 @@ class BasisRiskAwareVI:
         else:
             y_perturbed = y_flat.unsqueeze(0).expand(batch_size, -1)
         
-        # *** 關鍵修正：讓θ參數影響賠付計算 ***
         wind_speeds = X_flat.unsqueeze(0).expand(batch_size, -1)  # [batch_size, n_data]
         
-        # 使用θ參數調整閾值和賠付比例
-        # theta_samples: [batch_size, n_params], 其中n_params=2 (slope + intercept)
-        theta_slope = theta_samples[:, 0:1]      # [batch_size, 1] - 閾值斜率
-        theta_intercept = theta_samples[:, 1:2]  # [batch_size, 1] - 基礎閾值
+        # *** 核心創新：真正的350個Steinmann產品選擇VI ***
+        if n_params == 2:
+            # 向後兼容模式：2維θ映射到350維產品權重
+            # 使用神經網絡風格的權重生成
+            theta_expanded = torch.cat([
+                theta_samples,                              # [batch_size, 2]
+                theta_samples ** 2,                         # [batch_size, 2] 
+                torch.sin(theta_samples * 3.14159),         # [batch_size, 2]
+                torch.cos(theta_samples * 3.14159)          # [batch_size, 2]
+            ], dim=1)  # [batch_size, 8]
+            
+            # 線性投影到350維
+            if not hasattr(self, '_theta_projection'):
+                self._theta_projection = torch.randn(8, 350, device=self.device) * 0.1
+            
+            raw_logits = torch.matmul(theta_expanded, self._theta_projection)  # [batch_size, 350]
+            product_weights = torch.softmax(raw_logits, dim=1)  # [batch_size, 350]
+            
+        elif n_params == 350:
+            # 完整模式：直接350維產品權重
+            product_weights = torch.softmax(theta_samples, dim=1)  # [batch_size, 350]
+            
+        else:
+            raise ValueError(f"n_params must be 2 (compatibility) or 350 (full), got {n_params}")
         
-        # 動態閾值：受θ影響
-        base_thresholds = torch.tensor([25.0, 35.0, 45.0], device=self.device)
-        # 廣播到 [batch_size, 3]
-        dynamic_thresholds = (base_thresholds.unsqueeze(0) + 
-                            theta_intercept * 10.0 +  # intercept影響基礎閾值
-                            theta_slope * torch.arange(3, device=self.device).float())  # slope影響間隔
+        # 載入完整350個Steinmann產品定義
+        steinmann_thresholds = self._get_steinmann_products_tensor()  # [350, 4]
+        steinmann_ratios = self._get_steinmann_ratios_tensor()        # [350, 4] 
+        steinmann_max_payouts = self._get_steinmann_max_payouts()     # [350]
         
-        # 動態賠付比例：受θ影響  
-        base_ratios = torch.tensor([0.25, 0.5, 1.0], device=self.device)
-        dynamic_ratios = torch.sigmoid(base_ratios.unsqueeze(0) + theta_slope * 2.0)  # [batch_size, 3]
+        n_products = steinmann_thresholds.shape[0]  # 應該是350
         
-        # 動態最大賠付
-        max_payout_base = y_tensor.mean()
-        max_payout = max_payout_base * torch.exp(theta_intercept).squeeze(-1)  # [batch_size]
-        
-        # 計算賠付（現在受θ影響）
+        # 計算組合賠付 - 完整350產品版本
         payouts = torch.zeros_like(y_perturbed)  # [batch_size, n_data]
         
-        for i in range(3):
-            # 對每個批次樣本，使用不同的閾值和賠付比例
-            threshold_batch = dynamic_thresholds[:, i:i+1]  # [batch_size, 1]
-            ratio_batch = dynamic_ratios[:, i:i+1]          # [batch_size, 1]
-            max_payout_batch = max_payout[:, None]          # [batch_size, 1]
+        for batch_idx in range(batch_size):
+            batch_weights = product_weights[batch_idx]  # [350]
+            batch_wind_speeds = wind_speeds[batch_idx]  # [n_data]
             
-            mask = wind_speeds >= threshold_batch  # [batch_size, n_data]
-            payout_value = max_payout_batch * ratio_batch  # [batch_size, 1]
-            payouts = torch.where(mask, payout_value, payouts)
+            # 加權組合350個產品的賠付
+            weighted_payout = torch.zeros(n_data, device=self.device)
+            
+            for prod_idx in range(n_products):
+                product_weight = batch_weights[prod_idx]
+                
+                # 獲取此產品的定義
+                thresholds = steinmann_thresholds[prod_idx]  # [4]
+                ratios = steinmann_ratios[prod_idx]          # [4]
+                max_payout = steinmann_max_payouts[prod_idx] # scalar
+                
+                # 計算此產品的固定階梯賠付 (Steinmann標準)
+                product_payout = torch.zeros(n_data, device=self.device)
+                
+                for threshold_idx in range(4):  # 最多4個閾值
+                    threshold = thresholds[threshold_idx]
+                    if threshold < 999:  # 有效閾值 (999表示無效)
+                        ratio = ratios[threshold_idx]
+                        if ratio > 0:  # 有效賠付比例
+                            mask = batch_wind_speeds >= threshold
+                            payout_value = max_payout * ratio
+                            # 階梯函數：取最高觸發的賠付
+                            product_payout = torch.where(mask, payout_value, product_payout)
+                
+                # 加權累積到總賠付
+                weighted_payout += product_weight * product_payout
+            
+            payouts[batch_idx] = weighted_payout
         
         # 計算基差風險
         if basis_risk_type == 'absolute':
             basis_risk = torch.mean(torch.abs(y_perturbed - payouts), dim=1)
         elif basis_risk_type == 'asymmetric':
-            # Asymmetric: 懲罰under-payment更重 (2:1)
             under_penalty = torch.mean(torch.relu(y_perturbed - payouts), dim=1)
             over_penalty = torch.mean(torch.relu(payouts - y_perturbed), dim=1)
             basis_risk = 2.0 * under_penalty + over_penalty
-        else:  # weighted
-            # Weighted: 根據損失大小調整懲罰 (大損失懲罰更重)
+        else:
             diff = y_perturbed - payouts
             weights = torch.abs(y_perturbed) / torch.mean(torch.abs(y_perturbed), dim=1, keepdim=True)
             weighted_diff = diff * weights
             basis_risk = torch.mean(torch.abs(weighted_diff), dim=1)
         
         return basis_risk
+    
+    def _get_steinmann_products_tensor(self):
+        """獲取完整350個Steinmann產品的閾值定義 - Steinmann et al. (2023) 標準"""
+        thresholds_list = []
+        
+        # ===== 25個單閾值產品 =====
+        # 基於Saffir-Simpson分級: Cat1=33, Cat2=43, Cat3=50, Cat4=58, Cat5=70 m/s
+        single_thresholds = [
+            33, 35, 37, 39, 41,  # Cat1附近
+            43, 45, 47, 49,      # Cat2附近  
+            50, 52, 54, 56,      # Cat3附近
+            58, 60, 62, 64, 66,  # Cat4附近
+            70, 72, 74, 76, 78, 80, 85  # Cat5附近
+        ]
+        
+        for thresh in single_thresholds:
+            # 單閾值：[threshold, 999, 999, 999] - 只有1個有效閾值
+            thresholds_list.append(torch.tensor([thresh, 999, 999, 999], device=self.device))
+        
+        # ===== 20個雙閾值產品 =====
+        dual_pairs = [
+            (33, 50), (35, 52), (37, 54), (39, 56), (41, 58),  # Cat1→Cat3
+            (43, 58), (45, 60), (47, 62), (49, 64),            # Cat2→Cat4
+            (50, 70), (52, 72), (54, 74), (56, 76),            # Cat3→Cat5
+            (33, 43), (35, 45), (37, 47),                      # Cat1→Cat2
+            (58, 78), (60, 80), (62, 82), (64, 85)             # Cat4→Cat5+
+        ]
+        
+        for t1, t2 in dual_pairs:
+            # 雙閾值：[t1, t2, 999, 999]
+            thresholds_list.append(torch.tensor([t1, t2, 999, 999], device=self.device))
+        
+        # ===== 15個三閾值產品 =====
+        triple_sets = [
+            (33, 43, 58), (35, 45, 60), (37, 47, 62),         # 低→中→高
+            (33, 50, 70), (35, 52, 72), (37, 54, 74),         # 全范圍漸進
+            (43, 58, 78), (45, 60, 80), (47, 62, 82),         # 中→高→超高
+            (30, 45, 65), (32, 47, 67), (34, 49, 69),         # 密集覆蓋
+            (40, 55, 75), (42, 57, 77), (44, 59, 79)          # 高密度
+        ]
+        
+        for t1, t2, t3 in triple_sets:
+            # 三閾值：[t1, t2, t3, 999]
+            thresholds_list.append(torch.tensor([t1, t2, t3, 999], device=self.device))
+        
+        # ===== 10個四閾值產品 =====
+        quad_sets = [
+            (30, 40, 55, 75), (32, 42, 57, 77),               # 全覆蓋細分
+            (33, 43, 58, 78), (35, 45, 60, 80),               # Saffir-Simpson標準
+            (31, 44, 59, 76), (34, 46, 61, 79),               # 交錯覆蓋
+            (29, 41, 56, 74), (36, 48, 63, 81),               # 擴展范圍
+            (38, 50, 65, 83), (40, 52, 67, 85)                # 高端覆蓋
+        ]
+        
+        for t1, t2, t3, t4 in quad_sets:
+            # 四閾值：[t1, t2, t3, t4]
+            thresholds_list.append(torch.tensor([t1, t2, t3, t4], device=self.device))
+        
+        # ===== 每個產品×5個半徑 = 350個 =====
+        radii = [15, 30, 50, 75, 100]  # km
+        full_products = []
+        
+        for radius in radii:
+            for base_thresholds in thresholds_list:
+                # 每個產品在不同半徑下閾值可能略有調整
+                radius_factor = 1.0 + (radius - 50) * 0.001  # 半徑影響係數
+                adjusted_thresholds = base_thresholds.clone()
+                adjusted_thresholds[adjusted_thresholds < 999] *= radius_factor
+                full_products.append(adjusted_thresholds)
+        
+        return torch.stack(full_products)  # [350, 4] tensor
+    
+    def _get_steinmann_ratios_tensor(self):
+        """獲取完整350個產品的賠付比例 - Steinmann 2023標準25%遞增"""
+        ratios_list = []
+        
+        # ===== 25個單閾值產品的比例 =====
+        for _ in range(25):
+            # 單閾值：100%賠付 [1.0, 0, 0, 0]
+            ratios_list.append(torch.tensor([1.0, 0.0, 0.0, 0.0], device=self.device))
+        
+        # ===== 20個雙閾值產品的比例 =====
+        for _ in range(20):
+            # 雙閾值：50%, 100% 賠付 [0.5, 1.0, 0, 0]
+            ratios_list.append(torch.tensor([0.5, 1.0, 0.0, 0.0], device=self.device))
+        
+        # ===== 15個三閾值產品的比例 =====
+        for _ in range(15):
+            # 三閾值：25%, 50%, 100% 賠付 [0.25, 0.5, 1.0, 0]
+            ratios_list.append(torch.tensor([0.25, 0.5, 1.0, 0.0], device=self.device))
+        
+        # ===== 10個四閾值產品的比例 =====
+        for _ in range(10):
+            # 四閾值：25%, 50%, 75%, 100% 賠付 [0.25, 0.5, 0.75, 1.0] - 完整Steinmann標準
+            ratios_list.append(torch.tensor([0.25, 0.5, 0.75, 1.0], device=self.device))
+        
+        # ===== 每個基礎產品×5個半徑 = 350個 =====
+        radii = [15, 30, 50, 75, 100]
+        full_ratios = []
+        
+        for radius in radii:
+            for base_ratios in ratios_list:
+                # 半徑對賠付比例的微調
+                radius_adjustment = 1.0 + (radius - 50) * 0.0005  # 微小調整
+                adjusted_ratios = base_ratios.clone()
+                adjusted_ratios[adjusted_ratios > 0] *= radius_adjustment
+                adjusted_ratios = torch.clamp(adjusted_ratios, 0.0, 1.0)  # 保持在[0,1]範圍
+                full_ratios.append(adjusted_ratios)
+        
+        return torch.stack(full_ratios)  # [350, 4] tensor
+    
+    def _get_steinmann_max_payouts(self):
+        """獲取完整350個產品的最大賠付額度 - 基於實際風險暴露"""
+        # 基於實際數據的賠付額度設置
+        base_payout = float(self._y_mean) if hasattr(self, '_y_mean') else 20e6
+        payouts = []
+        
+        # ===== 產品類型對應不同賠付水平 =====
+        radii = [15, 30, 50, 75, 100]
+        base_products_count = 70  # 25+20+15+10
+        
+        for radius_idx, radius in enumerate(radii):
+            # 半徑影響基礎賠付水平
+            radius_multiplier = 0.3 + (radius / 100) * 0.7  # 0.3到1.0
+            
+            # 單閾值產品 (25個) - 較低賠付
+            for i in range(25):
+                product_multiplier = 0.5 + (i / 24) * 0.3  # 0.5到0.8
+                total_multiplier = radius_multiplier * product_multiplier
+                payouts.append(base_payout * total_multiplier)
+            
+            # 雙閾值產品 (20個) - 中等賠付
+            for i in range(20):
+                product_multiplier = 0.6 + (i / 19) * 0.4  # 0.6到1.0
+                total_multiplier = radius_multiplier * product_multiplier
+                payouts.append(base_payout * total_multiplier)
+            
+            # 三閾值產品 (15個) - 較高賠付
+            for i in range(15):
+                product_multiplier = 0.8 + (i / 14) * 0.5  # 0.8到1.3
+                total_multiplier = radius_multiplier * product_multiplier
+                payouts.append(base_payout * total_multiplier)
+            
+            # 四閾值產品 (10個) - 最高賠付
+            for i in range(10):
+                product_multiplier = 1.0 + (i / 9) * 0.8  # 1.0到1.8
+                total_multiplier = radius_multiplier * product_multiplier
+                payouts.append(base_payout * total_multiplier)
+        
+        return torch.tensor(payouts, device=self.device)  # [350] tensor
     
     def _compute_crps_batch_gpu(self, X_tensor, y_tensor, theta_samples, epsilon):
         """GPU上批次計算CRPS(y_observed, F_payout(θ)) - 核心創新實現
