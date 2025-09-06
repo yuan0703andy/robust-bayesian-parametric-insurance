@@ -964,6 +964,8 @@ for model_idx, (model_name, model_result) in enumerate(hierarchical_model_result
                     epsilon_values=[model_result['config']['epsilon']],
                     basis_risk_types=['absolute'],
                     use_gpu=True,
+                    device='auto',  # 自動選擇雙GPU模式
+                    learning_rate=0.01,
                     objective='traditional_elbo',  # 🔑 使用傳統ELBO
                     n_params=350 if USE_350_PRODUCT_SELECTION else 2  # 🔑 350維產品選擇 vs 2維兼容
                 )
@@ -1013,6 +1015,8 @@ for model_idx, (model_name, model_result) in enumerate(hierarchical_model_result
                     epsilon_values=[model_result['config']['epsilon']],
                     basis_risk_types=['absolute'],
                     use_gpu=True,
+                    device='auto',  # 自動選擇雙GPU模式
+                    learning_rate=0.01,
                     objective='crps_basis_risk',  # 🔑 使用創新CRPS-based ELBO
                     n_params=350 if USE_350_PRODUCT_SELECTION else 2  # 🔑 與第二層使用相同維度
                 )

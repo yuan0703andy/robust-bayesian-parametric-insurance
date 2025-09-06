@@ -323,6 +323,8 @@ class BasisRiskAwareVI:
                  epsilon_values: List[float] = None,
                  basis_risk_types: List[str] = None,
                  use_gpu: bool = True,
+                 device: str = 'auto',
+                 learning_rate: float = 0.01,
                  objective: str = 'crps_basis_risk',
                  n_params: int = None):
         """
@@ -354,15 +356,48 @@ class BasisRiskAwareVI:
         self.basis_risk_types = basis_risk_types
         self.objective = objective
         
-        # GPU配置
+        # 雙GPU配置 - 支持並行計算
         self.use_gpu = use_gpu and TORCH_AVAILABLE
+        self.learning_rate = learning_rate
+        
         if self.use_gpu:
-            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-            if self.device.type == 'cpu':
-                print("⚠️ GPU不可用，降級到CPU")
-                self.use_gpu = False
+            if torch.cuda.is_available():
+                gpu_count = torch.cuda.device_count()
+                if device == 'auto':
+                    if gpu_count >= 2:
+                        # 雙GPU模式
+                        self.device = torch.device('cuda:0')  # 主GPU
+                        self.device_secondary = torch.device('cuda:1')  # 副GPU
+                        self.dual_gpu = True
+                        print(f"🚀 雙GPU並行模式: GPU0 + GPU1")
+                    else:
+                        self.device = torch.device('cuda:0')
+                        self.device_secondary = None
+                        self.dual_gpu = False
+                        print(f"🔧 單GPU模式: GPU0")
+                else:
+                    self.device = torch.device(device)
+                    self.device_secondary = None
+                    self.dual_gpu = False
+                
+                # 設置環境變量避免CUDA kernel問題
+                import os
+                os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
+                os.environ['TORCH_USE_CUDA_DSA'] = '1'  # 啟用設備端斷言
+                
+                # 清理所有GPU記憶體
+                for i in range(gpu_count):
+                    torch.cuda.set_device(i)
+                    torch.cuda.empty_cache()
+                torch.cuda.set_device(self.device)
+                
+            else:
+                print("❌ 強制GPU模式但CUDA不可用")
+                raise RuntimeError("GPU required but CUDA not available")
         else:
             self.device = 'cpu' if not TORCH_AVAILABLE else torch.device('cpu')
+            self.device_secondary = None
+            self.dual_gpu = False
             
         print(f"🔧 BasisRiskAwareVI初始化: {'GPU' if self.use_gpu else 'CPU'}模式")
         if self.use_gpu and TORCH_AVAILABLE:
@@ -823,16 +858,17 @@ class BasisRiskAwareVI:
     
     def _compute_basis_risk_batch_gpu(self, X_tensor, y_tensor, theta_samples, epsilon, basis_risk_type):
         """
-        GPU上批次計算基差風險 - 純粹的350維VI產品選擇對決
+        雙GPU並行計算350維VI基差風險
         
-        簡化設計:
-        - θ直接是350個產品的logits  
-        - w = softmax(θ) 得到產品權重
-        - payout = Σ(w_i × smooth_payout_i) 
-        - 移除所有複雜投影，專注VI目標函數比較
+        GPU0: 處理前175個產品 (0-174)  
+        GPU1: 處理後175個產品 (175-349)
+        使用CUDA流並行執行，無回退機制
         """
         batch_size = theta_samples.shape[0]
         n_params = theta_samples.shape[1]
+        
+        if n_params != 350:
+            raise ValueError(f"雙GPU並行要求 n_params=350, got {n_params}")
         
         # 處理輸入數據維度
         if X_tensor.dim() == 3:
@@ -855,69 +891,125 @@ class BasisRiskAwareVI:
         else:
             y_perturbed = y_flat.unsqueeze(0).expand(batch_size, -1)
         
-        wind_speeds = X_flat.unsqueeze(0).expand(batch_size, -1)  # [batch_size, n_data]
+        wind_speeds = X_flat.unsqueeze(0).expand(batch_size, -1)
         
-        # 🎯 核心簡化：θ直接是350維產品logits
-        if n_params != 350:
-            raise ValueError(f"簡化方案要求 n_params=350 (pure VI duel), got {n_params}")
+        # 強制雙GPU並行分工
+        gpu0_products = 175
+        gpu1_products = 175
         
-        # 直接softmax得到產品權重，無需複雜投影
-        product_weights = torch.softmax(theta_samples, dim=1)  # [batch_size, 350]
+        # 分割產品權重和數據到兩個GPU
+        product_weights = torch.softmax(theta_samples, dim=1)
+        weights_gpu0 = product_weights[:, :gpu0_products].to(self.device)
+        weights_gpu1 = product_weights[:, gpu0_products:].to(self.device_secondary)
         
-        # 載入固定的350個Steinmann產品定義
-        steinmann_thresholds = self._get_steinmann_products_tensor().to(dtype=torch.float32)  # [350, 4]
-        steinmann_ratios = self._get_steinmann_ratios_tensor().to(dtype=torch.float32)        # [350, 4] 
-        steinmann_max_payouts = self._get_steinmann_max_payouts().to(dtype=torch.float32)     # [350]
+        # 數據複製到兩個GPU
+        wind_gpu0 = wind_speeds.to(self.device)
+        wind_gpu1 = wind_speeds.to(self.device_secondary)
+        y_gpu0 = y_perturbed.to(self.device)
+        y_gpu1 = y_perturbed.to(self.device_secondary)
         
-        # 縮放到標準化尺度以匹配y_tensor
-        steinmann_max_payouts = (steinmann_max_payouts - self._y_mean) / self._y_scale
+        # 載入Steinmann產品定義到兩個GPU
+        steinmann_data = self._load_steinmann_dual_gpu()
         
-        n_products = steinmann_thresholds.shape[0]  # 350
+        # 創建CUDA流實現真正並行
+        stream0 = torch.cuda.Stream(device=self.device)
+        stream1 = torch.cuda.Stream(device=self.device_secondary)
         
-        # 🚀 高效向量化計算：批量計算所有產品賠付
-        payouts = torch.zeros_like(y_perturbed, dtype=torch.float32)  # [batch_size, n_data]
+        # 並行計算兩部分產品賠付
+        with torch.cuda.stream(stream0):
+            payouts_gpu0 = self._compute_products_subset_gpu(
+                wind_gpu0, weights_gpu0, 
+                steinmann_data['gpu0'], 0, gpu0_products
+            )
         
-        # 對每個產品向量化計算
-        for prod_idx in range(n_products):
-            # 獲取此產品的定義
-            thresholds = steinmann_thresholds[prod_idx]  # [4]  
-            ratios = steinmann_ratios[prod_idx]          # [4]
-            max_payout = steinmann_max_payouts[prod_idx] # scalar
-            
-            # 計算此產品的平滑賠付函數
-            product_payouts = torch.zeros_like(wind_speeds, dtype=torch.float32)  # [batch_size, n_data]
-            
-            for threshold_idx in range(4):  # 最多4個閾值
-                base_threshold = float(thresholds[threshold_idx].item())
-                if base_threshold < 999:  # 有效閾值
-                    ratio = float(ratios[threshold_idx].item())
-                    if ratio > 0:  # 有效賠付比例
-                        # 🔧 平滑sigmoid激活 (保持可微性)
-                        temperature = 2.0
-                        smooth_activation = torch.sigmoid((wind_speeds - base_threshold) / temperature)
-                        payout_value = max_payout * ratio
-                        
-                        # 累積平滑賠付
-                        product_payouts = product_payouts + smooth_activation * payout_value
-            
-            # 加權累積此產品到總賠付
-            product_weight = product_weights[:, prod_idx:prod_idx+1]  # [batch_size, 1]
-            payouts += product_weight * product_payouts
+        with torch.cuda.stream(stream1):
+            payouts_gpu1 = self._compute_products_subset_gpu(
+                wind_gpu1, weights_gpu1,
+                steinmann_data['gpu1'], gpu0_products, gpu0_products + gpu1_products  
+            )
+        
+        # 等待兩個流完成
+        stream0.synchronize()
+        stream1.synchronize()
+        
+        # 合併結果到主GPU
+        total_payouts = payouts_gpu0 + payouts_gpu1.to(self.device)
         
         # 計算基差風險
         if basis_risk_type == 'absolute':
-            basis_risk = torch.mean(torch.abs(y_perturbed - payouts), dim=1)
+            basis_risk = torch.mean(torch.abs(y_gpu0 - total_payouts), dim=1)
         elif basis_risk_type == 'asymmetric':
-            under_penalty = torch.mean(torch.relu(y_perturbed - payouts), dim=1)
-            over_penalty = torch.mean(torch.relu(payouts - y_perturbed), dim=1)
+            under_penalty = torch.mean(torch.relu(y_gpu0 - total_payouts), dim=1)
+            over_penalty = torch.mean(torch.relu(total_payouts - y_gpu0), dim=1)
             basis_risk = 2.0 * under_penalty + over_penalty
         else:
-            diff = y_perturbed - payouts
-            weights = torch.abs(y_perturbed) / torch.mean(torch.abs(y_perturbed), dim=1, keepdim=True)
+            diff = y_gpu0 - total_payouts
+            weights = torch.abs(y_gpu0) / torch.mean(torch.abs(y_gpu0), dim=1, keepdim=True)
             weighted_diff = diff * weights
             basis_risk = torch.mean(torch.abs(weighted_diff), dim=1)
         
         return basis_risk
+    
+    def _load_steinmann_dual_gpu(self):
+        """載入350個Steinmann產品到雙GPU，返回分割的數據"""
+        steinmann_thresholds = self._get_steinmann_products_tensor().to(dtype=torch.float32)  # [350, 4]
+        steinmann_ratios = self._get_steinmann_ratios_tensor().to(dtype=torch.float32)        # [350, 4] 
+        steinmann_max_payouts = self._get_steinmann_max_payouts().to(dtype=torch.float32)     # [350]
+        
+        # 標準化
+        steinmann_max_payouts = (steinmann_max_payouts - self._y_mean) / self._y_scale
+        
+        # 分割到兩個GPU
+        gpu0_data = {
+            'thresholds': steinmann_thresholds[:175].to(self.device),
+            'ratios': steinmann_ratios[:175].to(self.device),
+            'max_payouts': steinmann_max_payouts[:175].to(self.device)
+        }
+        
+        gpu1_data = {
+            'thresholds': steinmann_thresholds[175:].to(self.device_secondary),
+            'ratios': steinmann_ratios[175:].to(self.device_secondary),
+            'max_payouts': steinmann_max_payouts[175:].to(self.device_secondary)
+        }
+        
+        return {'gpu0': gpu0_data, 'gpu1': gpu1_data}
+    
+    def _compute_products_subset_gpu(self, wind_speeds, product_weights, steinmann_data, start_idx, end_idx):
+        """在指定GPU上計算產品子集的賠付"""
+        batch_size = wind_speeds.shape[0]
+        n_data = wind_speeds.shape[1]
+        n_products = end_idx - start_idx
+        
+        payouts = torch.zeros(batch_size, n_data, device=wind_speeds.device, dtype=torch.float32)
+        
+        thresholds = steinmann_data['thresholds']  # [n_products, 4]
+        ratios = steinmann_data['ratios']          # [n_products, 4]
+        max_payouts = steinmann_data['max_payouts'] # [n_products]
+        
+        # 向量化計算所有產品
+        for prod_idx in range(n_products):
+            product_thresholds = thresholds[prod_idx]  # [4]
+            product_ratios = ratios[prod_idx]          # [4]
+            product_max_payout = max_payouts[prod_idx] # scalar
+            
+            # 計算此產品的平滑賠付
+            product_payouts = torch.zeros_like(wind_speeds, dtype=torch.float32)
+            
+            for threshold_idx in range(4):
+                base_threshold = float(product_thresholds[threshold_idx].item())
+                if base_threshold < 999:
+                    ratio = float(product_ratios[threshold_idx].item())
+                    if ratio > 0:
+                        temperature = 2.0
+                        smooth_activation = torch.sigmoid((wind_speeds - base_threshold) / temperature)
+                        payout_value = product_max_payout * ratio
+                        product_payouts += smooth_activation * payout_value
+            
+            # 加權累積
+            weight = product_weights[:, prod_idx:prod_idx+1]  # [batch_size, 1]
+            payouts += weight * product_payouts
+        
+        return payouts
     
     def _get_steinmann_products_tensor(self):
         """獲取完整350個Steinmann產品的閾值定義 - Steinmann et al. (2023) 標準"""
