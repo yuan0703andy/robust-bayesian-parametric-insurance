@@ -33,7 +33,7 @@ from typing import Dict, List, Tuple, Optional, Any
 from dataclasses import dataclass
 import traceback
 
-# 添加模块路径
+# 添加模組路徑
 project_root = Path(__file__).parent
 sys.path.append(str(project_root))
 
@@ -575,7 +575,7 @@ except Exception as e:
 
 # %%
 # =============================================================================
-# 阶段 4: 全新Sigmoid代理优化框架 🎯
+# 階段 4: 全新Sigmoid代理優化框架 🎯
 # =============================================================================
 print("\n🎯 階段 4: Sigmoid代理優化 - 兩階段VI框架")
 print("-" * 50)
@@ -590,14 +590,14 @@ sigmoid_best_config = None  # 預設值
 sigmoid_best_product = None  # 預設值
 sigmoid_best_products = []  # 預設值
 
-# 导入Sigmoid代理优化模块
+# 導入Sigmoid代理優化模組
 try:
     from robust_hierarchical_bayesian_simulation.model_selection.basis_risk_vi import BasisRiskAwareVI, SigmoidPayoutProxy
     from robust_hierarchical_bayesian_simulation.hierarchical_modeling.prior_specifications import (
         PriorScenario, LikelihoodFamily, VulnerabilityFunctionType
     )
     
-    # 🧠 尝试导入新的PyTorch HBM风险大脑模块
+    # 🧠 嘗試導入新的PyTorch HBM風險大腦模組
     PYTORCH_HBM_AVAILABLE = False
     try:
         from robust_hierarchical_bayesian_simulation.hierarchical_modeling.pytorch_core_model import (
@@ -613,52 +613,26 @@ try:
         print(f"⚠️ PyTorch HBM 模組不可用: {torch_error}")
         print("   將使用傳統 CRPS-VI 優化模式")
     
-    # 创建Prior/Likelihood配置 (与HBM两步法相同的配置)
-    prior_likelihood_configs = [
-        # 基线配置 (无污染)
-        {
-            'name': '基线-非信息先验+正态似然',
-            'prior': PriorScenario.NON_INFORMATIVE,
-            'likelihood': LikelihoodFamily.NORMAL,
-            'epsilon': 0.0
-        },
-        {
-            'name': '基线-弱信息先验+对数正态',
-            'prior': PriorScenario.WEAK_INFORMATIVE, 
-            'likelihood': LikelihoodFamily.LOGNORMAL,
-            'epsilon': 0.0
-        },
+    # 直接使用階段三定義的配置，避免重複定義
+    if 'prior_likelihood_test_configs' in globals():
+        print("✅ 使用階段三準備的Prior/Likelihood配置")
+        prior_likelihood_configs = prior_likelihood_test_configs.copy()
         
-        # 中等污染配置
-        {
-            'name': '中污染-悲观先验+学生t',
-            'prior': PriorScenario.PESSIMISTIC,
-            'likelihood': LikelihoodFamily.STUDENT_T,
-            'epsilon': 0.05
-        },
-        {
-            'name': '中污染-保守先验+伽马分布',
-            'prior': PriorScenario.CONSERVATIVE,
-            'likelihood': LikelihoodFamily.GAMMA, 
-            'epsilon': 0.05
-        },
-        
-        # 高污染极端配置
-        {
-            'name': '高污染-悲观先验+学生t',
-            'prior': PriorScenario.PESSIMISTIC,
-            'likelihood': LikelihoodFamily.STUDENT_T,
-            'epsilon': optimal_epsilon  # 使用阶段3的最优ε
-        },
-        {
-            'name': '高污染-保守先验+对数正态',
-            'prior': PriorScenario.CONSERVATIVE,
-            'likelihood': LikelihoodFamily.LOGNORMAL,
-            'epsilon': optimal_epsilon
-        }
-    ]
+        # 更新配置中的optimal_epsilon（來自階段二的ε-contamination分析）
+        for config in prior_likelihood_configs:
+            if config['epsilon'] == 0.15:  # 高污染配置使用最優ε
+                config['epsilon'] = optimal_epsilon
+                print(f"   更新 {config['name']}: ε={optimal_epsilon:.3f}")
+                
+    else:
+        # 備用方案：如果階段三配置不可用，使用簡化配置
+        print("⚠️ 階段三配置不可用，使用備用配置")
+        prior_likelihood_configs = [
+            {'name': '基線-弱信息先驗+對數正態', 'prior': PriorScenario.WEAK_INFORMATIVE, 'likelihood': LikelihoodFamily.LOGNORMAL, 'epsilon': 0.0},
+            {'name': '穩健-悲觀先驗+Student-t', 'prior': PriorScenario.PESSIMISTIC, 'likelihood': LikelihoodFamily.STUDENT_T, 'epsilon': optimal_epsilon}
+        ]
     
-    print(f"📋 配置准备完成: {len(prior_likelihood_configs)}个Prior/Likelihood组合")
+    print(f"📋 配置準備完成: {len(prior_likelihood_configs)}個Prior/Likelihood組合")
     
     # 🧠 建立 PyTorch HBM 風險大腦模型
     if PYTORCH_HBM_AVAILABLE:
@@ -697,10 +671,10 @@ try:
         pytorch_hbm_adapter = None
         print("⚠️ PyTorch HBM 不可用，將使用傳統優化模式")
     
-    # === 子阶段 4.1: 初始化Sigmoid代理VI引擎 ===
-    print(f"\n🎯 子阶段 4.1: 初始化Sigmoid代理VI引擎")
+    # === 子階段 4.1: 初始化Sigmoid代理VI引擎 ===
+    print(f"\n🎯 子階段 4.1: 初始化Sigmoid代理VI引擎")
     
-    # 准备PyTorch HBM输入数据 (2维：hazard_intensities + exposure_values)
+    # 準備PyTorch HBM輸入數據 (2維：hazard_intensities + exposure_values)
     # 從分割數據中提取訓練和驗證數據
     train_hazard = train_data['hazard_intensities'].max(axis=0)  # 每個事件的最大風速
     val_hazard = val_data['hazard_intensities'].max(axis=0)
@@ -708,19 +682,19 @@ try:
     y_train = train_data['observed_losses'].max(axis=0)  # 每個事件的最大損失
     y_val = val_data['observed_losses'].max(axis=0)
     
-    # 为PyTorch HBM准备曝險值数据
+    # 為PyTorch HBM準備曝險值數據
     # 使用平均曝險值作為特徵
     avg_exposure = np.mean(exposure_values)
     train_exposure = np.full(len(train_hazard), avg_exposure)
     val_exposure = np.full(len(val_hazard), avg_exposure)
     
-    # 组合为2维特征：[hazard_intensities, exposure_values]
+    # 組合為2維特徵：[hazard_intensities, exposure_values]
     X_train = np.column_stack([train_hazard, train_exposure])
     X_val = np.column_stack([val_hazard, val_exposure])
     
-    print(f"   训练数据: {X_train.shape[0]}个事件")
-    print(f"   验证数据: {X_val.shape[0]}个事件") 
-    print(f"   输入维度: {X_train.shape[1]}个特征 (hazard + exposure)")
+    print(f"   訓練數據: {X_train.shape[0]}個事件")
+    print(f"   驗證數據: {X_val.shape[0]}個事件") 
+    print(f"   輸入維度: {X_train.shape[1]}個特徵 (hazard + exposure)")
     print(f"   平均曝险值: ${train_exposure[0]/1e6:.1f}M")
     
     # 🎯 建立 PyTorch HBM + Sigmoid 代理優化 VI 引擎
@@ -784,19 +758,19 @@ try:
     print("   💡 結合平滑 Sigmoid 函數作為階梯函數的代理")
     print("   💡 提供連續梯度訊號，實現端到端 VI 優化")
     
-    # 确保处于训练模式
+    # 確保處於訓練模式
     sigmoid_vi_engine.set_optimization_mode(training_mode=True)
     
     sigmoid_training_results = []
     
-    print(f"🔄 开始训练阶段优化...")
+    print(f"🔄 開始訓練階段優化...")
     
     for i, config in enumerate(prior_likelihood_configs):
         print(f"\n   配置 {i+1}/{len(prior_likelihood_configs)}: {config['name']}")
         print(f"   ε = {config['epsilon']:.3f}")
         
         try:
-            # 执行Sigmoid代理VI优化
+            # 執行Sigmoid代理VI優化
             start_time = time.time()
             
             result = sigmoid_vi_engine.run_comprehensive_screening(
@@ -808,7 +782,7 @@ try:
             
             training_time = time.time() - start_time
             
-            # 记录训练结果
+            # 記錄訓練結果
             training_result = {
                 'config_name': config['name'],
                 'prior': config['prior'],
@@ -830,7 +804,7 @@ try:
             print(f"      验证CRPS: {training_result['val_basis_risk']/1e6:.1f}M")
             
         except Exception as e:
-            print(f"   ❌ 配置优化失败: {str(e)}")
+            print(f"   ❌ 配置優化失敗: {str(e)}")
             # 记录失败结果
             failed_result = {
                 'config_name': config['name'],
@@ -848,56 +822,56 @@ try:
     if valid_results:
         sigmoid_best_config = min(valid_results, key=lambda x: x['val_basis_risk'])
         
-        print(f"\n🏆 Sigmoid训练阶段最佳配置:")
+        print(f"\n🏆 Sigmoid訓練階段最佳配置:")
         print(f"   配置: {sigmoid_best_config['config_name']}")
         print(f"   验证CRPS: {sigmoid_best_config['val_basis_risk']/1e6:.1f}M")
         print(f"   训练CRPS: {sigmoid_best_config['final_basis_risk']/1e6:.1f}M")
         print(f"   ELBO: {sigmoid_best_config['final_elbo']:.3f}")
         print(f"   ε污染: {sigmoid_best_config['epsilon']:.3f}")
         
-        # 保存最佳θ*参数
+        # 保存最佳θ*參數
         best_theta_trained = sigmoid_best_config['best_theta']
-        print(f"   最佳θ*维度: {len(best_theta_trained)}")
+        print(f"   最佳θ*維度: {len(best_theta_trained)}")
     else:
-        print("❌ 所有训练配置都失败了！")
+        print("❌ 所有訓練配置都失敗了！")
         best_theta_trained = np.random.randn(350) * 0.1
-        sigmoid_best_config = {'config_name': '默认配置', 'val_basis_risk': float('inf')}
+        sigmoid_best_config = {'config_name': '預設配置', 'val_basis_risk': float('inf')}
     
-    # === 子阶段 4.3: 评估阶段 - 真实阶梯函数评估 ===
-    print(f"\n📊 子阶段 4.3: 评估阶段 - 真实阶梯函数评估")
-    print("   💡 切换到原始Steinmann阶梯函数")
-    print("   💡 使用训练好的θ*评估350个真实产品")
+    # === 子階段 4.3: 評估階段 - 真實階梯函數評估 ===
+    print(f"\n📊 子階段 4.3: 評估階段 - 真實階梯函數評估")
+    print("   💡 切換到原始Steinmann階梯函數")
+    print("   💡 使用訓練好的θ*評估350個真實產品")
     
-    # 🔄 关键：切换到评估模式
+    # 🔄 關鍵：切換到評估模式
     sigmoid_vi_engine.set_optimization_mode(training_mode=False)
     
-    # 准备评估数据
+    # 準備評估數據
     test_hazard = test_data['hazard_intensities'].max(axis=0)
     y_test = test_data['observed_losses'].max(axis=0)
     X_test = test_hazard.reshape(-1, 1)
     
-    print(f"   测试数据: {len(y_test)}个事件")
-    print(f"   使用θ*参数: {len(best_theta_trained)}维")
+    print(f"   測試數據: {len(y_test)}個事件")
+    print(f"   使用θ*參數: {len(best_theta_trained)}維")
     
-    # 🎯 使用真实阶梯函数评估350个产品
-    print(f"\n🔄 开始评估350个Steinmann产品...")
+    # 🎯 使用真實階梯函數評估350個產品
+    print(f"\n🔄 開始評估350個Steinmann產品...")
     
     sigmoid_evaluation_results = []
     
-    # 模拟损失分布生成 (简化版HBM)
-    print("   🧠 生成测试损失分布...")
+    # 模擬損失分佈生成 (簡化版HBM)
+    print("   🧠 生成測試損失分佈...")
     n_samples_per_event = 50
     
-    # 基于最佳θ*生成损失预测 
+    # 基於最佳θ*生成損失預測 
     test_loss_distributions = []
     for i in range(len(X_test)):
         wind_speed = X_test[i, 0]
         
-        # 简化的损失预测模型：基于风速和θ*参数
+        # 簡化的損失預測模型：基於風速和θ*參數
         base_loss = (wind_speed - 30) ** 2.2 * abs(best_theta_trained[0]) * 1e4
         loss_std = base_loss * abs(best_theta_trained[1]) if len(best_theta_trained) > 1 else base_loss * 0.3
         
-        # 生成损失样本分布
+        # 生成損失樣本分佈
         event_losses = np.random.lognormal(
             np.log(max(base_loss, 1e3)),
             min(abs(loss_std / base_loss), 2.0),
@@ -907,20 +881,20 @@ try:
     
     test_loss_distributions = np.array(test_loss_distributions)  # [n_events, n_samples]
     
-    print(f"   ✅ 损失分布生成完成: {test_loss_distributions.shape}")
+    print(f"   ✅ 損失分佈生成完成: {test_loss_distributions.shape}")
     
-    # 逐个评估350个产品的真实阶梯性能
-    for product_idx in range(min(350, 50)):  # 先测试前50个产品
+    # 逐個評估350個產品的真實階梯性能
+    for product_idx in range(min(350, 50)):  # 先測試前50個產品
         if product_idx % 10 == 0:
-            print(f"   评估产品 {product_idx}/350...")
+            print(f"   評估產品 {product_idx}/350...")
         
         try:
-            # 为当前产品创建阶梯函数代理
+            # 為當前產品創建階梯函數代理
             product_proxy = sigmoid_vi_engine.get_steinmann_payout_proxy(product_idx)
             if product_proxy is None:
                 continue
                 
-            # 确保代理处于评估模式 (阶梯函数)
+            # 確保代理處於評估模式 (階梯函數)
             product_proxy.set_mode(training_mode=False)
             
             # 计算真实阶梯赔付
@@ -936,7 +910,7 @@ try:
                 prediction_std=product_payouts.std(axis=1)   # 使用赔付标准差
             )
             
-            # 获取产品配置信息
+            # 獲取產品配置資訊
             product_config = product_proxy.get_configuration_summary()
             
             eval_result = {
@@ -952,35 +926,35 @@ try:
             sigmoid_evaluation_results.append(eval_result)
             
         except Exception as e:
-            print(f"      ⚠️ 产品{product_idx}评估失败: {str(e)}")
+            print(f"      ⚠️ 產品{product_idx}評估失敗: {str(e)}")
             continue
     
-    # 按CRPS排序，选出最佳产品
+    # 按CRPS排序，選出最佳產品
     if sigmoid_evaluation_results:
         sigmoid_best_products = sorted(sigmoid_evaluation_results, key=lambda x: x['crps'])[:10]
         sigmoid_best_product = sigmoid_best_products[0]
         
-        print(f"\n🏆 Sigmoid代理优化最终结果:")
-        print(f"   最佳产品ID: {sigmoid_best_product['product_id']}")
-        print(f"   最终CRPS: {sigmoid_best_product['crps']/1e6:.2f}M")
-        print(f"   产品配置:")
+        print(f"\n🏆 Sigmoid代理優化最終結果:")
+        print(f"   最佳產品ID: {sigmoid_best_product['product_id']}")
+        print(f"   最終CRPS: {sigmoid_best_product['crps']/1e6:.2f}M")
+        print(f"   產品配置:")
         print(f"     阈值: {sigmoid_best_product['thresholds']}")
         print(f"     比例: {sigmoid_best_product['ratios']}")
         print(f"     最大赔付: ${sigmoid_best_product['max_payout']/1e6:.1f}M")
         print(f"     平均赔付: ${sigmoid_best_product['avg_payout']/1e6:.2f}M")
         
-        print(f"\n📊 Top 5 产品排名:")
+        print(f"\n📊 Top 5 產品排名:")
         for i, product in enumerate(sigmoid_best_products[:5]):
-            print(f"   {i+1}. 产品{product['product_id']}: CRPS={product['crps']/1e6:.2f}M")
+            print(f"   {i+1}. 產品{product['product_id']}: CRPS={product['crps']/1e6:.2f}M")
             
     else:
-        print("❌ 评估阶段失败：无法评估任何产品")
+        print("❌ 評估階段失敗：無法評估任何產品")
         sigmoid_best_product = None
         sigmoid_best_products = []
 
 except ImportError as e:
-    print(f"❌ 无法导入Sigmoid代理优化模块: {e}")
-    print("   请检查 robust_hierarchical_bayesian_simulation.model_selection.basis_risk_vi 模块")
+    print(f"❌ 無法導入Sigmoid代理優化模組: {e}")
+    print("   請檢查 robust_hierarchical_bayesian_simulation.model_selection.basis_risk_vi 模組")
     sigmoid_training_results = []
     sigmoid_evaluation_results = []
     sigmoid_best_config = None
@@ -988,12 +962,12 @@ except ImportError as e:
 
 # %%
 # =============================================================================
-# 阶段 5: 结果汇总与比较分析 
+# 階段 5: 結果匯總與比較分析 
 # =============================================================================
-print("\n📊 阶段 5: 结果汇总与比较分析")
+print("\n📊 階段 5: 結果匯總與比較分析")
 print("-" * 50)
 
-# 汇总所有结果
+# 匯總所有結果
 framework_results = {
     'data_validation': {
         'climada_events': len(impact_data.event_id),
@@ -1033,17 +1007,17 @@ if sigmoid_best_config:
 if sigmoid_best_product:
     print(f"   ✅ 最终评估: 产品{sigmoid_best_product['product_id']} CRPS={sigmoid_best_product['crps']/1e6:.2f}M")
 
-print(f"\n🎯 Sigmoid代理优化核心优势:")
-print(f"   • 训练阶段：Sigmoid代理函数提供连续梯度信号")
-print(f"   • 评估阶段：真实阶梯函数确保产品实用性")  
-print(f"   • 端到端：完全可微分的CRPS-VI优化")
-print(f"   • 参数传递：θ变化正确反映到基差风险计算")
+print(f"\n🎯 Sigmoid代理優化核心優勢:")
+print(f"   • 訓練階段：Sigmoid代理函數提供連續梯度訊號")
+print(f"   • 評估階段：真實階梯函數確保產品實用性")  
+print(f"   • 端到端：完全可微分的CRPS-VI優化")
+print(f"   • 參數傳送：θ變化正確反映到基差風險計算")
 
-# 保存结果
+# 保存結果
 output_dir = Path("results/sigmoid_proxy_framework")
 output_dir.mkdir(parents=True, exist_ok=True)
 
-# 保存完整结果
+# 保存完整結果
 results_file = output_dir / "sigmoid_proxy_results.pkl"
 with open(results_file, 'wb') as f:
     pickle.dump(framework_results, f)
