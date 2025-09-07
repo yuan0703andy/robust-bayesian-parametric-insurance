@@ -665,6 +665,13 @@ class DifferentiableHierarchicalBayesianModel(nn.Module):
             hazard_excess_batch = []
             normalized_excess_batch = []
             
+            # 如果傳入的是區域層風險，且沒有提供區域分配，提示使用者
+            if hazard_intensities.shape[0] == self.n_regions and region_assignments is None:
+                raise RuntimeError(
+                    "hazard_intensities 為區域層 (n_regions x n_events)，但未提供 region_assignments。\n"
+                    "請在訓練/評估時傳入 spatial_data 以提供 region_assignments，或改用醫院層 (n_hospitals x n_events) 風險矩陣。"
+                )
+
             for b in range(batch_size):
                 # 每個樣本可能有不同的閾值
                 v_thresh_b = v_threshold[b] if v_threshold.dim() > 0 else v_threshold
@@ -2331,9 +2338,9 @@ def stage3_run_model_matrix(generator: ToyDataGenerator,
         print(f"🏋️ 開始訓練 ({n_epochs} epochs)...")
         best_test_elbo = float('-inf')
         for epoch in range(n_epochs):
-            _ = trainer.train_epoch(train_hazards, exposure_tensor, train_losses, n_samples=8)
+            _ = trainer.train_epoch(train_hazards, exposure_tensor, train_losses, n_samples=8, spatial_data=spatial_data)
             if (epoch + 1) % 10 == 0:
-                test_losses_dict = trainer.evaluate(test_hazards, exposure_tensor, test_losses, n_samples=15)
+                test_losses_dict = trainer.evaluate(test_hazards, exposure_tensor, test_losses, n_samples=15, spatial_data=spatial_data)
                 print(f"   Epoch {epoch+1:2d}: Test ELBO={test_losses_dict['elbo']:.3f}")
                 best_test_elbo = max(best_test_elbo, test_losses_dict['elbo'])
         final_test = trainer.evaluate(test_hazards, exposure_tensor, test_losses, n_samples=30)
