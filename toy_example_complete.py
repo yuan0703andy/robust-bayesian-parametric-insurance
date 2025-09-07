@@ -631,9 +631,9 @@ class DifferentiableHierarchicalBayesianModel(nn.Module):
             return vulnerability_params
     
         def _compute_loss_predictions(self, hazard_intensities: torch.Tensor,
-                                    exposure_values: torch.Tensor,
-                                    vulnerability_params: torch.Tensor,
-                                    params: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+                                        exposure_values: torch.Tensor,
+                                        vulnerability_params: torch.Tensor,
+                                        params: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
             """
             Level 1: 計算損失預測分佈參數
             
@@ -711,7 +711,8 @@ class DifferentiableHierarchicalBayesianModel(nn.Module):
                 'mu_log': mu_log,         # 對數正態分佈的位置參數
                 'sigma_log': sigma_log,   # 對數正態分佈的尺度參數
                 'mu_loss': mu_loss,       # 原始損失期望 (用於分析)
-                'vulnerability': vulnerability  # 脆弱度值 (用於診斷)
+                'vulnerability': vulnerability,  # 脆弱度值 (用於診斷)
+                'sigma_obs': params.get('sigma_obs', torch.exp(sigma_log))  # 傳遞觀測誤差（供NORMAL/Student-t使用）
             }
 
 print("✅ 四層階層貝氏模型定義完成")
@@ -830,6 +831,7 @@ class UnifiedEndToEndVIModel(nn.Module):
         self.prior_scenario = prior_scenario       # 先驗情境
         self.likelihood_family = likelihood_family # 似然函數族
         self.verbose = verbose
+        # 純CRPS模式（不加入likelihood項），符合 ℒ_BR 定義
         
         # 獲取具體的先驗參數
         prior_params = PriorLikelihoodProcessor.get_prior_parameters(prior_scenario, n_hbm_params)
@@ -879,7 +881,7 @@ class UnifiedEndToEndVIModel(nn.Module):
         # 4. 賠付分佈 F(θ)
         payout_dist_params = self.payout_function(loss_dist_params)
         
-        # 5. CRPS 基差風險
+        # 5. CRPS 基差風險（前向引擎）
         crps_scores = self._compute_crps_batch(observed_losses, payout_dist_params, n_pred_samples=50)
         
         # 6. KL(q||p_ε)
@@ -887,7 +889,7 @@ class UnifiedEndToEndVIModel(nn.Module):
         
         # 7. ELBO 與最終損失
         crps_term = torch.mean(crps_scores)
-        elbo = -crps_term - kl_div
+        elbo = - crps_term - kl_div
         total_loss = -elbo
         
         return total_loss, elbo, crps_term, kl_div
@@ -923,74 +925,51 @@ class UnifiedEndToEndVIModel(nn.Module):
                         payout_dist_params: Dict[str, torch.Tensor],
                         n_pred_samples: int = 50) -> torch.Tensor:
         """
-        批次計算CRPS分數 - 數學正確的向量化實現
+        批次計算CRPS分數（可微分）
+        - 使用重參數化採樣保證梯度流
+        - 不在CRPS層引入污染；污染僅在likelihood層處理
         
         CRPS(F, y) = E[|X - y|] - 0.5 * E[|X - X'|]
-        其中 X, X' ~ F 是預測分佈的獨立樣本
         """
-        """
-        從payout_dist_params中提取賠付分佈並採樣
-        payout_dist_params應該包含LogNormal分佈的參數
-        """
+        # 準備參數與設備（使用LogNormal重參數化）
+        mu_log = payout_dist_params['mu_payout_log']
+        sigma_log = payout_dist_params['sigma_payout_log']
+        device = mu_log.device
         
-        # 處理賠付分佈參數
-        if 'dist' in payout_dist_params:
-            # 如果有預構建的分佈對象
-            payout_dist = payout_dist_params['dist']
-            X_samples = payout_dist.sample((n_pred_samples,))
-        else:
-            # 從對數正態參數構建分佈
-            mu_payout_log = payout_dist_params['mu_payout_log']
-            sigma_payout_log = payout_dist_params['sigma_payout_log']
-            
-            # 創建LogNormal分佈並採樣
-            payout_dist = LogNormal(mu_payout_log, sigma_payout_log)
-            X_samples = payout_dist.sample((n_pred_samples,))
+        # 形狀: 可能為 (batch, H, E) 或 (H, E)（理論上前者）
+        has_batch = (mu_log.dim() == 3)
+        if not has_batch:
+            mu_log = mu_log.unsqueeze(0)
+            sigma_log = sigma_log.unsqueeze(0)
+        batch_size, n_hospitals, n_events = mu_log.shape
         
-        # X_samples: (n_pred_samples, [batch_size], hospitals, events)
-        # observed_losses: (hospitals, events)
+        # 產生樣本（重參數化）：X = exp(μ + σ·ε)
+        eps = torch.randn(n_pred_samples, batch_size, n_hospitals, n_events, device=device)
+        X_samples = torch.exp(mu_log.unsqueeze(0) + sigma_log.unsqueeze(0) * eps)
         
-        # 確保維度匹配
-        if X_samples.dim() == 4:  # 有batch維度
-            # 對每個batch元素計算CRPS並平均
-            batch_size = X_samples.shape[1] 
+        # 與觀測維度對齊
+        # observed_losses: (H, E)
+        obs = observed_losses
+        if has_batch:
+            # 計算每個batch的CRPS，最後取平均
             crps_scores = []
-            
             for b in range(batch_size):
-                X_batch = X_samples[:, b, :, :]  # (n_pred_samples, hospitals, events)
-                
-                # 計算 E[|X - y|]
-                diff_obs = torch.abs(X_batch - observed_losses.unsqueeze(0))
-                term1 = torch.mean(diff_obs, dim=0)
-                
-                # 計算 E[|X - X'|]
-                X_expanded_1 = X_batch.unsqueeze(1)
-                X_expanded_2 = X_batch.unsqueeze(0) 
-                diff_samples = torch.abs(X_expanded_1 - X_expanded_2)
-                term2 = torch.mean(diff_samples, dim=(0, 1))
-                
-                # CRPS = E[|X - y|] - 0.5 * E[|X - X'|]
-                crps_per_location_event = term1 - 0.5 * term2
-                avg_crps = torch.mean(crps_per_location_event)
-                crps_scores.append(avg_crps)
-                
+                X_b = X_samples[:, b, :, :]  # (S, H, E)
+                term1 = torch.mean(torch.abs(X_b - obs.unsqueeze(0)), dim=0)
+                diff = X_b.unsqueeze(0) - X_b.unsqueeze(1)  # (S, S, H, E)
+                term2 = 0.5 * torch.mean(torch.abs(diff), dim=(0, 1))
+                crps_scores.append(torch.mean(term1 - term2))
             return torch.stack(crps_scores)
         else:
-            # 沒有batch維度，直接計算
-            # X_samples: (n_pred_samples, hospitals, events)
-            diff_obs = torch.abs(X_samples - observed_losses.unsqueeze(0))
-            term1 = torch.mean(diff_obs, dim=0)
-            
-            X_expanded_1 = X_samples.unsqueeze(1)
-            X_expanded_2 = X_samples.unsqueeze(0)
-            diff_samples = torch.abs(X_expanded_1 - X_expanded_2)
-            term2 = torch.mean(diff_samples, dim=(0, 1))
-            
-            crps_per_location_event = term1 - 0.5 * term2
-            avg_crps = torch.mean(crps_per_location_event)
-            
-            return torch.tensor([avg_crps])  # 返回tensor保持一致性
-    
+            X = X_samples.squeeze(1)  # (S, H, E)
+            term1 = torch.mean(torch.abs(X - obs.unsqueeze(0)), dim=0)
+            diff = X.unsqueeze(0) - X.unsqueeze(1)
+            term2 = 0.5 * torch.mean(torch.abs(diff), dim=(0, 1))
+            return torch.tensor([torch.mean(term1 - term2)], device=device)
+        
+        # 不會到達此段落（上面已返回），保留以防未來擴展
+        # return torch.tensor([0.0], device=device)
+
     def _compute_kl_divergence_with_prior(self, theta_samples: torch.Tensor) -> torch.Tensor:
         """
         計算KL散度 KL(q_φ(θ) || p_ε(θ))，使用指定的先驗情境
@@ -1045,21 +1024,7 @@ class UnifiedEndToEndVIModel(nn.Module):
         
         return kl
     
-    def _compute_heavy_tail_likelihood(self, observed_losses: torch.Tensor,
-                                    loss_dist_params: Dict[str, torch.Tensor]) -> torch.Tensor:
-        """計算重尾似然（用於似然污染）"""
-        # 使用Student-t分佈作為重尾污染
-        mu_loss = loss_dist_params['mu_loss']
-        sigma_obs = loss_dist_params.get('sigma_obs', torch.tensor(1e6)).unsqueeze(-1).unsqueeze(-1)
-        df = 2.0  # 更重的尾部
-        
-        # 擴展sigma以匹配維度  
-        sigma_expanded = sigma_obs.expand_as(mu_loss)
-        
-        dist = StudentT(df, mu_loss, sigma_expanded)
-        log_prob = dist.log_prob(observed_losses.unsqueeze(0)).sum(dim=(1, 2))
-        
-        return log_prob.mean()
+    # 預留：若需加入似然相關的評估函數，可在此擴展（不影響VI目標）
     
     # 移除重複的KL散度計算，統一使用_compute_kl_divergence_with_prior
 
