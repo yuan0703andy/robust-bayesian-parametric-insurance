@@ -21,6 +21,12 @@ Date: 2025-09-07
 # 導入必要的库
 import numpy as np
 import pandas as pd
+import time
+import sys
+import os
+from typing import Dict, List, Tuple, Optional, Union, Any
+from dataclasses import dataclass
+from enum import Enum
 
 try:
     import torch
@@ -1465,7 +1471,8 @@ def test_dual_gpu_performance():
             # 模擬數據
             hazard_intensities = torch.rand(n_hospitals, n_events) * 60 + 20  # 20-80 m/s
             exposure_values = torch.rand(n_hospitals) * 5e7 + 1e7  # 10M-60M
-            observed_losses = torch.gamma(2, 5e6, (n_hospitals, n_events))
+            gamma_dist = torch.distributions.Gamma(2.0, 1.0/5e6)
+            observed_losses = gamma_dist.sample((n_hospitals, n_events))
             distance_matrix = torch.rand(n_hospitals, n_hospitals) * 100  # 0-100km
             
             # 產品配置
