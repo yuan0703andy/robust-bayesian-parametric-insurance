@@ -1405,214 +1405,6 @@ class ParallelCRPSComputer:
     
     print("✅ GPU並行CRPS計算器定義完成")
 
-# %%
-# ============================================================================
-# 9. 雙GPU性能基準測試與驗證
-# ============================================================================
-
-def test_dual_gpu_performance():
-    """
-    測試雙GPU並行化的性能提升
-    包含訓練時間比較和CRPS計算加速測試
-    """
-    
-    print("🚀" + "="*70)
-    print("🚀 雙GPU性能基準測試與驗證")
-    print("🚀" + "="*70)
-    
-    # GPU檢測報告
-    print(f"\n📊 GPU配置報告:")
-    print(f"   CUDA可用: {torch.cuda.is_available()}")
-    
-    if torch.cuda.is_available():
-        gpu_count = torch.cuda.device_count()
-        print(f"   檢測到GPU數量: {gpu_count}")
-        print(f"   配置的GPU設備: {GPU_DEVICES}")
-        print(f"   多GPU模式: {'啟用' if USE_MULTI_GPU else '停用'}")
-        
-        for i in range(gpu_count):
-            props = torch.cuda.get_device_properties(i)
-            print(f"   GPU {i}: {props.name} ({props.total_memory / 1e9:.1f}GB)")
-    else:
-        print("   將使用CPU模式進行測試")
-    
-    print("\n" + "-"*70)
-    
-    # ==========================================
-    # 1. CRPS計算性能測試
-    # ==========================================
-    
-    print("\n🔧 第一項測試: GPU並行CRPS計算性能")
-    
-    try:
-        crps_computer = ParallelCRPSComputer(use_multi_gpu=USE_MULTI_GPU)
-            
-        # 基準測試
-        speedup_results = crps_computer.benchmark_gpu_speedup(
-            n_events=500, n_pred_samples=100, n_trials=3
-        )
-        
-        print("\n📈 CRPS性能提升總結:")
-        print(f"   單GPU加速比: {speedup_results['single_gpu_speedup']:.2f}x")
-        print(f"   多GPU加速比: {speedup_results['multi_gpu_speedup']:.2f}x")
-        print(f"   多GPU效率: {speedup_results['gpu_efficiency']:.2f}")
-            
-    except Exception as e:
-        print(f"⚠️  CRPS性能測試出現錯誤: {e}")
-    
-    # ==========================================
-    # 2. 端到端訓練性能測試
-    # ==========================================
-    
-    print(f"\n🧠 第二項測試: 端到端訓練GPU加速")
-    
-    try:
-        # 生成測試數據
-        n_hospitals = 20
-        n_events = 50
-        n_regions = 4
-        
-        print(f"   生成測試數據: {n_hospitals}家醫院, {n_events}個事件")
-        
-        # 模擬數據
-        hazard_intensities = torch.rand(n_hospitals, n_events) * 60 + 20  # 20-80 m/s
-        exposure_values = torch.rand(n_hospitals) * 5e7 + 1e7  # 10M-60M
-        gamma_dist = torch.distributions.Gamma(2.0, 1.0/5e6)
-        observed_losses = gamma_dist.sample((n_hospitals, n_events))
-        distance_matrix = torch.rand(n_hospitals, n_hospitals) * 100  # 0-100km
-        
-        # 產品配置（修正為與 DifferentiablePayoutFunction 相容的鍵）
-        test_product_config = {
-            'name': 'Benchmark Single Threshold',
-            'thresholds': [30e6, 999e6, 999e6, 999e6],  # 單一觸發門檻
-            'ratios': [1.0, 0.0, 0.0, 0.0],             # 100% 賠付
-            'max_payout': 10e6,
-            'steepness': 0.1
-        }
-        
-        # 創建測試模型
-        test_model = UnifiedEndToEndVIModel(
-            n_hospitals=n_hospitals,
-            n_regions=n_regions, 
-            n_events=n_events,
-            distance_matrix=distance_matrix.numpy(),
-            product_config=test_product_config,
-            n_hbm_params=7
-        )
-        
-        print("   模型創建完成")
-        
-        # 測試不同GPU配置的訓練速度
-        configurations = [
-            ("CPU模式", False),
-            ("GPU模式", USE_MULTI_GPU and torch.cuda.is_available())
-        ]
-        
-        performance_results = {}
-        
-        for config_name, enable_gpu in configurations:
-            if config_name == "GPU模式" and not torch.cuda.is_available():
-                print(f"   跳過{config_name}: GPU不可用")
-                continue
-                
-            print(f"\n   測試配置: {config_name}")
-            
-            try:
-                # 創建訓練器
-                trainer = EndToEndTrainer(
-                    test_model, 
-                    learning_rate=0.01,
-                    enable_multi_gpu=enable_gpu
-                )
-                
-                # 執行少量epoch測試
-                n_test_epochs = 3
-                epoch_times = []
-                
-                for epoch in range(n_test_epochs):
-                    start_time = time.time()
-                    
-                    loss_dict = trainer.train_epoch(
-                        hazard_intensities, exposure_values, 
-                        observed_losses.mean(dim=1),  # 平均損失
-                        n_samples=5  # 減少樣本數以加快測試
-                    )
-                    
-                    epoch_time = time.time() - start_time
-                    epoch_times.append(epoch_time)
-                    
-                    print(f"     Epoch {epoch+1}: {epoch_time:.3f}秒, Loss: {loss_dict['total_loss']:.3f}")
-                
-                avg_epoch_time = np.mean(epoch_times)
-                performance_results[config_name] = {
-                    'avg_epoch_time': avg_epoch_time,
-                    'total_time': sum(epoch_times)
-                }
-                
-                # 獲取性能統計
-                perf_stats = trainer.get_performance_stats()
-                print(f"     平均epoch時間: {avg_epoch_time:.3f}秒")
-                if 'gpu_memory_mb' in perf_stats:
-                    print(f"     GPU記憶體使用: {perf_stats['gpu_memory_mb']['current']}MB")
-                
-            except Exception as e:
-                print(f"     ❌ {config_name}測試失敗: {e}")
-        
-        # 性能比較
-        if len(performance_results) >= 2:
-            cpu_time = performance_results.get("CPU模式", {}).get('avg_epoch_time', 0)
-            gpu_time = performance_results.get("GPU模式", {}).get('avg_epoch_time', 0)
-            
-            if cpu_time > 0 and gpu_time > 0:
-                training_speedup = cpu_time / gpu_time
-                print(f"\n🚀 訓練加速比: {training_speedup:.2f}x")
-                
-                if training_speedup > 1.5:
-                    print("   ✅ 顯著的GPU加速效果！")
-                elif training_speedup > 1.1:
-                    print("   ⚠️  中等GPU加速效果")
-                else:
-                    print("   ❌ GPU加速效果不明顯")
-                    
-    except Exception as e:
-        print(f"⚠️  端到端訓練測試出現錯誤: {e}")
-    
-    # ==========================================
-    # 3. 記憶體使用分析
-    # ==========================================
-    
-    print(f"\n💾 第三項測試: GPU記憶體使用分析")
-    
-    if torch.cuda.is_available():
-        try:
-            print("   GPU記憶體狀態:")
-            for i in GPU_DEVICES:
-                total_memory = torch.cuda.get_device_properties(i).total_memory / 1e9
-                allocated = torch.cuda.memory_allocated(i) / 1e9
-                cached = torch.cuda.memory_reserved(i) / 1e9
-                
-                print(f"     GPU {i}: {allocated:.2f}GB / {total_memory:.2f}GB 已用 ({cached:.2f}GB 緩存)")
-                
-                # 記憶體使用率
-                usage_rate = allocated / total_memory * 100
-                if usage_rate > 80:
-                    print(f"       ⚠️  記憶體使用率較高: {usage_rate:.1f}%")
-                elif usage_rate > 60:
-                    print(f"       📊 記憶體使用正常: {usage_rate:.1f}%")
-                else:
-                    print(f"       ✅ 記憶體使用良好: {usage_rate:.1f}%")
-                    
-        except Exception as e:
-            print(f"   ⚠️  記憶體分析錯誤: {e}")
-    else:
-        print("   CPU模式: 跳過GPU記憶體分析")
-    
-    print("\n🏁" + "="*70)
-    print("🏁 雙GPU性能測試完成")
-    print("🏁" + "="*70)
-
-# 執行性能測試（可選）
-# 提示：統一在文末主入口調用 main()，如需單獨性能測試請從外部調用 test_dual_gpu_performance()
 
 # %%
 # ============================================================================
@@ -2399,6 +2191,9 @@ class RobustnessStressTester:
                 n_hbm_params=9  # 包含epsilon參數
             )
             
+            # 移動模型到正確的設備
+            model.to_multi_gpu()
+            
             # 訓練器
             trainer = EndToEndTrainer(model, learning_rate=0.01)
             
@@ -2718,6 +2513,11 @@ def stage3_run_model_matrix(generator: ToyDataGenerator,
             prior_scenario=model_config['prior_scenario'],
             likelihood_family=model_config['likelihood_family']
         )
+        
+        # 移動模型到正確的設備
+        model.to_multi_gpu()
+        print(f"✅ 模型已移動到設備: {device}")
+        
         trainer = EndToEndTrainer(model, learning_rate=0.01)
         print(f"🏋️ 開始訓練 ({n_epochs} epochs)...")
         best_test_elbo = float('-inf')
