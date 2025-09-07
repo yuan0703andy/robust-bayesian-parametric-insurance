@@ -316,10 +316,28 @@ class ToyDataGenerator:
         return distances
     
     def _assign_regions(self, coords: np.ndarray) -> np.ndarray:
-        """基於座標分配區域（簡化K-means）"""
-        from sklearn.cluster import KMeans
-        kmeans = KMeans(n_clusters=self.n_regions, random_state=42)
-        return kmeans.fit_predict(coords)
+        """基於座標分配區域（修正版）- 確保返回長度等於座標數"""
+        n_coords = len(coords)
+        print(f"   [_assign_regions] 輸入座標數: {n_coords}, 目標區域數: {self.n_regions}")
+        try:
+            from sklearn.cluster import KMeans
+            actual_n_regions = min(self.n_regions, n_coords)
+            if actual_n_regions < self.n_regions:
+                print(f"   ⚠️ 座標數 {n_coords} < 區域數 {self.n_regions}, 調整為 {actual_n_regions} 個區域")
+            kmeans = KMeans(n_clusters=actual_n_regions, random_state=42, n_init=10)
+            assignments = kmeans.fit_predict(coords)
+            print(f"   ✅ K-means 完成: 返回 {len(assignments)} 個分配")
+        except Exception as e:
+            print(f"   ⚠️ K-means 失敗 ({e})，使用循環分配")
+            assignments = np.array([i % self.n_regions for i in range(n_coords)])
+        assert len(assignments) == n_coords, f"分配長度錯誤: {len(assignments)} != {n_coords}"
+        print(f"   ✅ 區域分配: {n_coords}家醫院 → {len(np.unique(assignments))}個區域")
+        try:
+            counts = np.bincount(assignments)
+            print(f"   每個區域的醫院數: {counts.tolist()}")
+        except Exception:
+            pass
+        return assignments
     
     def _compute_spatial_correlation(self, distance_matrix: np.ndarray, 
                                    radius: float) -> float:
@@ -1180,28 +1198,10 @@ class UnifiedEndToEndVIModel(nn.Module):
 
     # 多GPU並行支持方法
     def to_multi_gpu(self):
-        """將模型配置為多GPU並行"""
-        if USE_MULTI_GPU and len(GPU_DEVICES) > 1:
-            print(f"🚀 配置模型使用 {len(GPU_DEVICES)} 個GPU: {GPU_DEVICES}")
-            
-            # 使用DataParallel包裝子模組
-            if hasattr(self, 'hbm'):
-                self.hbm = nn.DataParallel(self.hbm, device_ids=GPU_DEVICES)
-                print("✅ HBM模型已啟用DataParallel")
-            
-            if hasattr(self, 'payout_function'):  
-                self.payout_function = nn.DataParallel(self.payout_function, device_ids=GPU_DEVICES)
-                print("✅ PayoutFunction已啟用DataParallel")
-            
-            # 移動整個模型到主GPU
-            self.to(device)
-            print(f"✅ 模型已移動到設備: {device}")
-            
-            return self
-        else:
-            print("⚠️ 單GPU或CPU模式，跳過多GPU配置")
-            self.to(device)
-            return self
+        """跳過DataParallel，僅移動到單一設備（暫時止血修復）。"""
+        print("⚠️ 跳過 DataParallel：目前輸入的第0維代表醫院數(H)，非batch，避免被DP切片。")
+        self.to(device)
+        return self
     
     def parallel_mcmc_sampling(self, n_total_samples: int, chunk_size: int = None) -> torch.Tensor:
         """
@@ -1595,9 +1595,12 @@ class EndToEndTrainer:
     """端到端訓練器 - GPU-Accelerated Version"""
         
     def __init__(self, model: UnifiedEndToEndVIModel, learning_rate: float = 0.001,
-                    enable_multi_gpu: bool = USE_MULTI_GPU, verbose: bool = False):
+                    enable_multi_gpu: bool = False, verbose: bool = False):
         self.original_model = model
-        self.enable_multi_gpu = enable_multi_gpu and USE_MULTI_GPU
+        # 暫時停用多卡，避免DataParallel沿H維切片導致維度不一致
+        if enable_multi_gpu:
+            print("⚠️ 忽略 enable_multi_gpu=True：暫時關閉 DataParallel 以避免 H 維被切片。")
+        self.enable_multi_gpu = False
         self.verbose = verbose
         
         # GPU配置和模型設置
