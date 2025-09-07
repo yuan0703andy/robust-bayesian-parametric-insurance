@@ -616,16 +616,16 @@ class DifferentiableHierarchicalBayesianModel(nn.Module):
             if region_assignments is None:
                 # 使用簡單的空間分佈來分配區域 (基於醫院索引)
                 # 這是一個fallback，更好的做法是從ToyDataGenerator獲取真實分配
-                region_assignments = torch.zeros(self.n_hospitals, dtype=torch.long)
+                region_assignments = torch.zeros(self.n_hospitals, dtype=torch.long, device=region_effects.device)
                 if self.verbose:
                     print("⚠️ 使用預設區域分配 (所有醫院在區域0) - 建議提供真實區域分配")
             else:
                 # 確保區域分配在有效範圍內
-                region_assignments = torch.clamp(region_assignments, 0, self.n_regions - 1)
+                region_assignments = torch.clamp(region_assignments.to(region_effects.device), 0, self.n_regions - 1)
                 if self.verbose:
                     print(f"✅ 使用真實區域分配 - {len(torch.unique(region_assignments))}個不同區域")
             
-            vulnerability_params = torch.zeros(batch_size, self.n_hospitals)
+            vulnerability_params = torch.zeros(batch_size, self.n_hospitals, device=region_effects.device)
             
             # 計算層次結構: β_i = α_{r(i)} + δ_i + γ_i
             for b in range(batch_size):
