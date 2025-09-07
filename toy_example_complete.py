@@ -198,7 +198,7 @@ class ToyDataGenerator:
         
         # 3. 暴露價值（醫院資產價值，單位：美元）
         # 醫院級資產：中位 ~ 2.5e8，離散度稍大（更貼近大型綜合醫院/醫學中心）
-        exposure_values = np.random.lognormal(mean=np.log(250e6), sigma=0.6, size=self.n_hospitals)
+        exposure_values = np.random.lognormal(mean=np.log(10e6), sigma=0.4, size=self.n_hospitals)
 
         # 4. 觀測損失（使用真實的Emanuel脆弱度函數生成）
         observed_losses = self._generate_realistic_losses(
@@ -847,7 +847,7 @@ class DifferentiablePayoutFunction(nn.Module):
             mu_payout_log = torch.log(payout_clamped)
             
             # 賠付的不確定性相對較小
-            sigma_payout_log = torch.full_like(mu_payout_log, 0.2)
+            sigma_payout_log = torch.full_like(mu_payout_log, 0.6)
             
             return {
                 'mu_payout_log': mu_payout_log,
@@ -1587,21 +1587,21 @@ class ModelConfiguration:
                 'thresholds': [5e6, 15e6, 30e6, 60e6],   
                 'ratios':     [0.25,  0.5,   0.75,  1.0],     # 25%、50%、75%、100%
                 'max_payout': 50e6,                            # 上限 300 萬
-                'steepness':  0.1                             # 平滑些，避免過硬的階梯
+                'steepness':  5                             # 平滑些，避免過硬的階梯
             },
             {
                 'name': 'Dual Threshold Product', 
                 'thresholds': [30e6, 60e6, 999e6, 999e6],   # 兩個閾值
                 'ratios': [0.5, 1.0, 0.0, 0.0],             # 50%, 100%賠付
                 'max_payout': 20e6,
-                'steepness': 0.1
+                'steepness': 5
             },
             {
                 'name': 'Multi-Level Product',
                 'thresholds': [20e6, 40e6, 60e6, 80e6],     # 四個閾值 
                 'ratios': [0.25, 0.5, 0.75, 1.0],           # 25%, 50%, 75%, 100%賠付
                 'max_payout': 20e6,
-                'steepness': 0.1
+                'steepness': 5
             }
         ]
 
@@ -1925,7 +1925,7 @@ class RobustnessStressTester:
         for event_idx in contaminate_events:
             # 隨機選擇一些醫院受到極端影響
             affected_hospitals = np.random.choice(n_hospitals, 
-                                                max(1, n_hospitals // 3), 
+                                                max(2, n_hospitals // 2), 
                                                 replace=False)
             
             # 將這些醫院的損失放大
@@ -2042,26 +2042,49 @@ class RobustnessStressTester:
         """測試單個情境下的所有模型"""
         scenario_results = {}
         
+        # ========== 關鍵修改：壓力測試時也污染驗證集 ==========
+        if scenario_name == "stress":
+            # 對驗證集也進行污染
+            val_losses_contaminated = self.create_contaminated_data(
+                val_hazards, val_losses, seed=1000+fold  # 不同的seed
+            )
+            val_losses_for_testing = val_losses_contaminated
+            print(f"   ⚠️ 壓力測試：驗證集也已污染")
+        else:
+            val_losses_for_testing = val_losses
+            
         # 使用固定的保險產品配置
         product_config = {
             'name': 'Standard Multi-Level (scaled)',
-            'thresholds': [0.2e6, 0.6e6, 1.0e6, 1.5e6],  # 20萬~150萬
-            'ratios':     [0.25,  0.5,   0.75,  1.0],
-            'max_payout': 3e6,    # 比損失上緣略高的上限
-            'steepness':  0.2     # 讓階段變化更平滑
+            # 與 Stage3 同步：醫院量級門檻 + 寬平滑帶，避免梯度消失
+            'thresholds': [0.5e6, 1e6, 2e6, 4e6],
+            'ratios':     [0.25, 0.5, 0.75, 1.0],
+            'max_payout': 50e6,
+            'steepness':  5.0
         }
         
         for model_config in test_models:
-            print(f"     Testing {model_config['name']}...")
-            
-            # 創建模型 - 修改參數維度以包含污染參數
+            # 2. 創建不同的模型配置（如果epsilon真的要影響模型）
+            # 選項A：如果epsilon影響數據預處理
+            if model_config['epsilon_prior'] > 0:
+                # 對訓練數據進行額外的穩健化處理
+                train_losses_robust = apply_robust_preprocessing(
+                    train_losses, epsilon=model_config['epsilon_prior']
+                )
+            else:
+                train_losses_robust = train_losses
+                
+            # 選項B：如果epsilon影響模型架構
             model = UnifiedEndToEndVIModel(
                 n_hospitals=train_hazards.shape[0],
                 n_regions=spatial_data.n_regions,
-                n_events=train_hazards.shape[1], 
+                n_events=train_hazards.shape[1],
                 distance_matrix=spatial_data.distance_matrix,
                 product_config=product_config,
-                n_hbm_params=9  # 包含epsilon參數
+                n_hbm_params=9,
+                # 這些參數可能用於其他目的（不是ELBO）
+                robust_sampling=model_config.get('robust_sampling', False),
+                outlier_detection=model_config.get('outlier_detection', False)
             )
             
             # 移動模型到正確的設備
@@ -2071,12 +2094,12 @@ class RobustnessStressTester:
             trainer = EndToEndTrainer(model, learning_rate=0.001)
             
             # 快速訓練 (壓力測試用)
-            n_epochs = 20
+            n_epochs = 200
             
             train_hazards_tensor = torch.tensor(train_hazards, dtype=torch.float32)
             train_losses_tensor = torch.tensor(train_losses, dtype=torch.float32)
             val_hazards_tensor = torch.tensor(val_hazards, dtype=torch.float32)
-            val_losses_tensor = torch.tensor(val_losses, dtype=torch.float32)
+            val_losses_tensor = torch.tensor(val_losses_for_testing, dtype=torch.float32)
             exposure_tensor = torch.tensor(exposure_values, dtype=torch.float32)
             
             best_val_crps = float('inf')
@@ -2372,6 +2395,23 @@ def stage3_run_model_matrix(generator: ToyDataGenerator,
     print(f"📊 測試矩陣: {len(model_configs)}種模型配置 × {len(product_configs)}種保險產品")
     print(f"   總計: {len(model_configs) * len(product_configs)}個測試組合")
     results = {}
+    # === 監測門檻啟動率，避免全部卡在門檻左側導致無梯度 ===
+    try:
+        _probe_prod = (product_configs or [])[0]
+        if _probe_prod:
+            ths = np.array(_probe_prod['thresholds'], dtype=float)
+            train_np = split['train_losses'].cpu().numpy()
+            test_np  = split['test_losses'].cpu().numpy()
+            cov_tr = (train_np[..., None] > ths).mean(axis=(0,1))
+            cov_te = (test_np[...,  None] > ths).mean(axis=(0,1))
+            msg_tr = " ".join([f"T{t/1e6:.0f}M={p*100:.1f}%" for t,p in zip(ths,cov_tr)])
+            msg_te = " ".join([f"T{t/1e6:.0f}M={p*100:.1f}%" for t,p in zip(ths,cov_te)])
+            print(f"   ➤ 門檻啟動率(Train): {msg_tr}")
+            print(f"   ➤ 門檻啟動率(Test) : {msg_te}")
+    except Exception as _e:
+        if VERBOSE:
+            print(f"[warn] 門檻啟動率監測失敗: {_e}")
+    # ============================================================
     train_hazards = split['train_hazards']
     train_losses = split['train_losses']
     test_hazards = split['test_hazards']
@@ -2462,7 +2502,7 @@ if _in_notebook() and NB_AUTORUN:
 
 def stage5_stress_test(climada_data: SimulatedCLIMADAData,
                        spatial_data: SimulatedSpatialData,
-                       contamination_ratio: float = 0.05,
+                       contamination_ratio: float = 0.15,
                        extreme_multiplier: float = 8.0,
                        n_folds: int = 3) -> Dict:
     """階段5：壓力測試（Notebook友好）。"""
