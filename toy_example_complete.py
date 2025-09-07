@@ -28,16 +28,11 @@ from typing import Dict, List, Tuple, Optional, Union, Any
 from dataclasses import dataclass
 from enum import Enum
 
-try:
-    import torch
-    import torch.nn as nn
-    import torch.optim as optim
-    from torch.distributions import Normal, LogNormal, StudentT
-    TORCH_AVAILABLE = True
-    print("✅ PyTorch已成功導入")
-except ImportError:
-    print("⚠️ PyTorch未安裝，請使用: pip install torch")
-    TORCH_AVAILABLE = False
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.distributions import Normal, LogNormal, StudentT
+print("✅ PyTorch已成功導入")
 
 import matplotlib.pyplot as plt
 try:
@@ -54,38 +49,33 @@ warnings.filterwarnings('ignore')
 
 # 設定隨機種子確保可重現性
 np.random.seed(42)
-if TORCH_AVAILABLE:
-    torch.manual_seed(42)
+torch.manual_seed(42)
+
+# GPU配置檢測
+if torch.cuda.is_available():
+    gpu_count = torch.cuda.device_count()
+    print(f"🚀 檢測到 {gpu_count} 個GPU:")
+    for i in range(gpu_count):
+        gpu_name = torch.cuda.get_device_name(i)
+        gpu_memory = torch.cuda.get_device_properties(i).total_memory / 1e9
+        print(f"   GPU {i}: {gpu_name} ({gpu_memory:.1f} GB)")
     
-    # GPU配置檢測
-    if torch.cuda.is_available():
-        gpu_count = torch.cuda.device_count()
-        print(f"🚀 檢測到 {gpu_count} 個GPU:")
-        for i in range(gpu_count):
-            gpu_name = torch.cuda.get_device_name(i)
-            gpu_memory = torch.cuda.get_device_properties(i).total_memory / 1e9
-            print(f"   GPU {i}: {gpu_name} ({gpu_memory:.1f} GB)")
-        
-        # 設置默認設備
-        device = torch.device("cuda:0")
-        torch.cuda.set_device(0)
-        
-        # 為雙GPU訓練設置
-        if gpu_count >= 2:
-            print("✅ 啟用雙GPU並行訓練模式")
-            USE_MULTI_GPU = True
-            GPU_DEVICES = [0, 1]  # 使用GPU 0和1
-        else:
-            print("⚠️ 僅檢測到單GPU，使用單GPU模式")
-            USE_MULTI_GPU = False
-            GPU_DEVICES = [0]
+    # 設置默認設備
+    device = torch.device("cuda:0")
+    torch.cuda.set_device(0)
+    
+    # 為雙GPU訓練設置
+    if gpu_count >= 2:
+        print("✅ 啟用雙GPU並行訓練模式")
+        USE_MULTI_GPU = True
+        GPU_DEVICES = [0, 1]  # 使用GPU 0和1
     else:
-        print("⚠️ 未檢測到GPU，使用CPU模式")
-        device = torch.device("cpu")
+        print("⚠️ 僅檢測到單GPU，使用單GPU模式")
         USE_MULTI_GPU = False
-        GPU_DEVICES = []
+        GPU_DEVICES = [0]
 else:
-    device = "cpu"
+    print("⚠️ 未檢測到GPU，使用CPU模式")
+    device = torch.device("cpu")
     USE_MULTI_GPU = False
     GPU_DEVICES = []
     
@@ -334,26 +324,59 @@ print("✅ 數據生成器定義完成")
 # ============================================================================
 
 # 檢查PyTorch可用性
-if not TORCH_AVAILABLE:
-    print("⚠️ 跳過PyTorch模型定義 - PyTorch未安裝")
-    # 定義空的佔位符類別以避免NameError
-    class DifferentiableHierarchicalBayesianModel:
-        pass
-    class DifferentiablePayoutFunction:
-        pass
-    class UnifiedEndToEndVIModel:
-        pass
-    class EndToEndTrainer:
-        pass
-    class RobustnessStressTester:
-        pass
-    class PriorLikelihoodProcessor:
-        pass
-else:
-    print("🧠 開始定義四層階層貝氏模型...")
+print("🧠 開始定義四層階層貝氏模型...")
 
-if TORCH_AVAILABLE:
-    class DifferentiableHierarchicalBayesianModel(nn.Module):
+class PriorLikelihoodProcessor:
+        """Prior/Likelihood處理器 - 將配置轉換為實際的數學實現"""
+        
+        @staticmethod
+        def get_prior_parameters(prior_scenario: 'PriorScenario', n_params: int = 9) -> Dict[str, Any]:
+            """
+            根據先驗情境獲取先驗參數 - 改進版本支持更靈活的a, b, v₀學習
+            
+            擴展參數空間:
+            - theta[0-3]: 層次效應參數 (log σ_α, log σ_β, log σ_δ, log ρ_spatial)
+            - theta[4]: log(vulnerability_a) - Emanuel函數的風險係數  
+            - theta[5]: log(vulnerability_b) - Emanuel函數的指數
+            - theta[6]: log(sigma_obs) - 觀測誤差
+            - theta[7]: log(v_threshold) - 可學習的閾值風速v₀
+            - theta[8]: 額外污染參數或其他擴展
+            
+            Returns:
+                Dict with 'mu_prior' and 'sigma_prior' for N(μ, σ²I)
+            """
+            # Emanuel 2011的歷史參考值: a=0.0039, b=2.04, v₀=25.7 m/s
+            emanuel_a_log = np.log(0.0039)  # ≈ -5.54
+            emanuel_b_log = np.log(2.04)    # ≈ 0.71
+            emanuel_v0_log = np.log(25.7)   # ≈ 3.25
+            
+            # 簡化的先驗配置
+            if hasattr(prior_scenario, 'value'):
+                scenario_name = prior_scenario.value
+            else:
+                scenario_name = str(prior_scenario)
+                
+            # 基於情境的先驗參數
+            if 'NON_INFORMATIVE' in scenario_name.upper():
+                # 非信息先驗: 極大方差
+                mu_prior = torch.zeros(n_params)
+                sigma_prior = torch.ones(n_params) * 3.0
+            elif 'WEAK_INFORMATIVE' in scenario_name.upper():
+                # 弱信息先驗: 以Emanuel值為中心
+                mu_values = [0.0, 0.0, 0.0, 1.0, emanuel_a_log, emanuel_b_log, np.log(1e6), emanuel_v0_log, 0.0]
+                sigma_values = [2.0, 2.0, 2.0, 1.0, 1.5, 1.0, 2.0, 1.0, 1.5]
+                mu_prior = torch.tensor(mu_values[:n_params])
+                sigma_prior = torch.tensor(sigma_values[:n_params])
+            else:
+                # 默認配置
+                mu_prior = torch.zeros(n_params)
+                sigma_prior = torch.ones(n_params) * 2.0
+                
+            return {
+                'mu_prior': mu_prior,
+                'sigma_prior': sigma_prior
+            }
+class DifferentiableHierarchicalBayesianModel(nn.Module):
         """可微分的4層階層貝氏模型 - 「風險大腦」"""
         
         def __init__(self, n_hospitals: int, n_regions: int, n_events: int,
@@ -726,16 +749,14 @@ if TORCH_AVAILABLE:
                 'vulnerability': vulnerability  # 脆弱度值 (用於診斷)
             }
 
-if TORCH_AVAILABLE:
-    print("✅ 四層階層貝氏模型定義完成")
+print("✅ 四層階層貝氏模型定義完成")
 
 # %%
 # ============================================================================
 # 4. 可微分保險賠付函數（Steinmann產品 + Sigmoid逼近）
 # ============================================================================
 
-if TORCH_AVAILABLE:
-    class DifferentiablePayoutFunction(nn.Module):
+class DifferentiablePayoutFunction(nn.Module):
         """可微分的保險賠付函數 - 「合約引擎」"""
         
         def __init__(self, product_config: Dict):
@@ -813,16 +834,14 @@ if TORCH_AVAILABLE:
             
             return final_payout
 
-if TORCH_AVAILABLE:
-    print("✅ 可微分保險賠付函數定義完成")
+print("✅ 可微分保險賠付函數定義完成")
 
 # %%
 # ============================================================================
 # 5. 統一的端到端VI模型（「總指揮」）
 # ============================================================================
 
-if TORCH_AVAILABLE:
-    class UnifiedEndToEndVIModel(nn.Module):
+class UnifiedEndToEndVIModel(nn.Module):
         """
         統一的端到端變分推斷模型 - 「總指揮」
         
@@ -1190,16 +1209,14 @@ if TORCH_AVAILABLE:
         else:
             return self._sample_theta(n_total_samples)
 
-if TORCH_AVAILABLE:
-    print("✅ 統一端到端VI模型定義完成 (支持雙GPU)")
+print("✅ 統一端到端VI模型定義完成 (支持雙GPU)")
 
 # %%
 # ============================================================================
 # 8. GPU加速的CRPS計算模組
 # ============================================================================
 
-if TORCH_AVAILABLE:
-    class ParallelCRPSComputer:
+class ParallelCRPSComputer:
         """GPU並行CRPS計算器 - 支持雙GPU加速"""
         
         def __init__(self, use_multi_gpu: bool = USE_MULTI_GPU):
@@ -1408,10 +1425,6 @@ def test_dual_gpu_performance():
     print("🚀 雙GPU性能基準測試與驗證")
     print("🚀" + "="*70)
     
-    if not TORCH_AVAILABLE:
-        print("❌ PyTorch不可用，跳過GPU測試")
-        return
-    
     # GPU檢測報告
     print(f"\n📊 GPU配置報告:")
     print(f"   CUDA可用: {torch.cuda.is_available()}")
@@ -1436,9 +1449,8 @@ def test_dual_gpu_performance():
     
     print("\n🔧 第一項測試: GPU並行CRPS計算性能")
     
-    if TORCH_AVAILABLE:
-        try:
-            crps_computer = ParallelCRPSComputer(use_multi_gpu=USE_MULTI_GPU)
+    try:
+        crps_computer = ParallelCRPSComputer(use_multi_gpu=USE_MULTI_GPU)
             
             # 基準測試
             speedup_results = crps_computer.benchmark_gpu_speedup(
@@ -1459,8 +1471,7 @@ def test_dual_gpu_performance():
     
     print(f"\n🧠 第二項測試: 端到端訓練GPU加速")
     
-    if TORCH_AVAILABLE:
-        try:
+    try:
             # 生成測試數據
             n_hospitals = 20
             n_events = 50
@@ -1604,7 +1615,7 @@ def test_dual_gpu_performance():
     print("🏁" + "="*70)
 
 # 執行性能測試（可選）
-if __name__ == "__main__" and TORCH_AVAILABLE:
+if __name__ == "__main__":
     try:
         test_dual_gpu_performance()
     except Exception as e:
@@ -1639,8 +1650,7 @@ class PriorLikelihoodProcessor:
         emanuel_b_log = np.log(2.04)    # ≈ 0.71
         emanuel_v0_log = np.log(25.7)   # ≈ 3.25
         
-        if TORCH_AVAILABLE:
-            if prior_scenario == PriorScenario.NON_INFORMATIVE:
+        if prior_scenario == PriorScenario.NON_INFORMATIVE:
                 # 非信息先驗: 極大方差，讓數據主導學習
                 mu_prior = torch.zeros(n_params)
                 # 對a, b, v₀使用更大的方差來提高學習靈活性
@@ -1748,49 +1758,51 @@ class PriorLikelihoodProcessor:
     
     @staticmethod
     def compute_likelihood_logprob(observed_losses: torch.Tensor, 
-                                   predicted_params: Dict[str, torch.Tensor],
-                                   likelihood_family: LikelihoodFamily) -> torch.Tensor:
-        """
-        根據似然族計算log likelihood
-        
-        Args:
-            observed_losses: (n_hospitals, n_events) 觀測損失
-            predicted_params: 模型預測的分佈參數
-            likelihood_family: 似然函數族
+                                       predicted_params: Dict[str, torch.Tensor],
+                                       likelihood_family: LikelihoodFamily) -> torch.Tensor:
+            """
+            根據似然族計算log likelihood
             
-        Returns:
-            log_likelihood: 標量張量
-        """
-        if likelihood_family == LikelihoodFamily.NORMAL:
-            # 正態似然: Loss ~ N(μ, σ²)
-            mu_loss = predicted_params['mu_loss']  # (batch, hospitals, events)
-            sigma_obs = predicted_params.get('sigma_obs', torch.tensor(1e6)).unsqueeze(-1).unsqueeze(-1)
-            
-            # 計算log probability
-            dist = Normal(mu_loss, sigma_obs.expand_as(mu_loss))
-            log_prob = dist.log_prob(observed_losses.unsqueeze(0)).sum(dim=(1, 2))  # sum over hospitals and events
-            
-        elif likelihood_family == LikelihoodFamily.LOGNORMAL:
-            # 對數正態似然: Loss ~ LogNormal(μ_log, σ_log²)
-            mu_log = predicted_params['mu_log']  # (batch, hospitals, events)
-            sigma_log = predicted_params['sigma_log']
-            
-            dist = LogNormal(mu_log, sigma_log)
-            log_prob = dist.log_prob(observed_losses.unsqueeze(0) + 1e3).sum(dim=(1, 2))  # +1e3 避免log(0)
-            
-        elif likelihood_family == LikelihoodFamily.STUDENT_T:
-            # Student-t似然: 重尾分佈，對異常值更穩健
-            mu_loss = predicted_params['mu_loss']  # (batch, hospitals, events)
-            sigma_obs = predicted_params.get('sigma_obs', torch.tensor(1e6)).unsqueeze(-1).unsqueeze(-1)
-            df = 3.0  # 自由度，較小值產生更重的尾部
-            
-            dist = StudentT(df, mu_loss, sigma_obs.expand_as(mu_loss))
-            log_prob = dist.log_prob(observed_losses.unsqueeze(0)).sum(dim=(1, 2))
-            
-        else:
-            raise ValueError(f"未知的似然族: {likelihood_family}")
-            
-        return log_prob.mean()  # 平均over batch dimension
+            Args:
+                observed_losses: (n_hospitals, n_events) 觀測損失
+                predicted_params: 模型預測的分佈參數
+                likelihood_family: 似然函數族
+                
+            Returns:
+                log_likelihood: 標量張量
+            """
+            if likelihood_family == LikelihoodFamily.NORMAL:
+                # 正態似然: Loss ~ N(μ, σ²)
+                mu_loss = predicted_params['mu_loss']  # (batch, hospitals, events)
+                sigma_obs = predicted_params.get('sigma_obs', torch.tensor(1e6)).unsqueeze(-1).unsqueeze(-1)
+                
+                # 計算log probability
+                dist = Normal(mu_loss, sigma_obs.expand_as(mu_loss))
+                log_prob = dist.log_prob(observed_losses.unsqueeze(0)).sum(dim=(1, 2))  # sum over hospitals and events
+                
+            elif likelihood_family == LikelihoodFamily.LOGNORMAL:
+                # 對數正態似然: Loss ~ LogNormal(μ_log, σ_log²)
+                mu_log = predicted_params['mu_log']  # (batch, hospitals, events)
+                sigma_log = predicted_params['sigma_log']
+                
+                dist = LogNormal(mu_log, sigma_log)
+                log_prob = dist.log_prob(observed_losses.unsqueeze(0) + 1e3).sum(dim=(1, 2))  # +1e3 避免log(0)
+                
+            elif likelihood_family == LikelihoodFamily.STUDENT_T:
+                # Student-t似然: 重尾分佈，對異常值更穩健
+                mu_loss = predicted_params['mu_loss']  # (batch, hospitals, events)
+                sigma_obs = predicted_params.get('sigma_obs', torch.tensor(1e6)).unsqueeze(-1).unsqueeze(-1)
+                df = 3.0  # 自由度，較小值產生更重的尾部
+                
+                dist = StudentT(df, mu_loss, sigma_obs.expand_as(mu_loss))
+                log_prob = dist.log_prob(observed_losses.unsqueeze(0)).sum(dim=(1, 2))
+                
+            else:
+                raise ValueError(f"未知的似然族: {likelihood_family}")
+                
+            return log_prob.mean()  # 平均over batch dimension
+    
+    print("✅ Prior/Likelihood處理器定義完成")
 
 class ModelConfiguration:
     """模型配置類 - 全面的Prior/Likelihood組合測試框架"""
@@ -1941,15 +1953,15 @@ class ModelConfiguration:
         ]
 
 class EndToEndTrainer:
-    """端到端訓練器 - GPU-Accelerated Version"""
-    
-    def __init__(self, model: UnifiedEndToEndVIModel, learning_rate: float = 0.001,
-                 enable_multi_gpu: bool = USE_MULTI_GPU):
+        """端到端訓練器 - GPU-Accelerated Version"""
+        
+        def __init__(self, model: UnifiedEndToEndVIModel, learning_rate: float = 0.001,
+                     enable_multi_gpu: bool = USE_MULTI_GPU):
         self.original_model = model
         self.enable_multi_gpu = enable_multi_gpu and USE_MULTI_GPU
         
         # GPU配置和模型設置
-        if TORCH_AVAILABLE and torch.cuda.is_available():
+        if torch.cuda.is_available():
             # 移動模型到主GPU
             self.model = model.to(f'cuda:{GPU_DEVICES[0]}')
             
@@ -2148,8 +2160,7 @@ class EndToEndTrainer:
         
         return stats
 
-if TORCH_AVAILABLE:
-    print("✅ 端到端訓練器定義完成")
+print("✅ 端到端訓練器定義完成")
 
 # %%
 # ============================================================================
@@ -2573,11 +2584,7 @@ print("✅ 壓力測試模組定義完成")
 def main():
     """主要執行邏輯"""
     # 檢查依賴
-    if not TORCH_AVAILABLE:
-        print("❌ 無法執行主要邏輯：PyTorch未安裝")
-        print("請安裝PyTorch: pip install torch")
-        return None
-        
+    # 開始執行主要邏輯
     print("🚀 開始完整的端到端CRPS-VI玩具範例")
     print("="*80)
     return run_complete_analysis()
@@ -2919,9 +2926,7 @@ def demonstrate_prior_likelihood_combinations():
     print("🧪 演示Prior/Likelihood組合系統")
     print("="*80)
     
-    if not TORCH_AVAILABLE:
-        print("❌ PyTorch未安裝，無法演示")
-        return
+    # 開始演示
     
     # 獲取所有配置
     configs = ModelConfiguration.get_comprehensive_test_configs()
