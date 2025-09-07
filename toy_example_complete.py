@@ -1209,7 +1209,6 @@ class UnifiedEndToEndVIModel(nn.Module):
     # 多GPU並行支持方法
     def to_multi_gpu(self):
         """跳過DataParallel，僅移動到單一設備（暫時止血修復）。"""
-        print("⚠️ 跳過 DataParallel：目前輸入的第0維代表醫院數(H)，非batch，避免被DP切片。")
         self.to(device)
         return self
     
@@ -1581,10 +1580,10 @@ class ModelConfiguration:
             {
                 # 將第一個產品改為與資料量級匹配的多階梯版本（與 Stage3 的預設 product_configs[0] 相容）
                 'name': 'Standard Multi-Level (scaled)',
-                'thresholds': [0.2e6, 0.6e6, 1.0e6, 1.5e6],   # 20萬、60萬、100萬、150萬
+                'thresholds': [5e6, 15e6, 30e6, 60e6],   
                 'ratios':     [0.25,  0.5,   0.75,  1.0],     # 25%、50%、75%、100%
-                'max_payout': 3e6,                            # 上限 300 萬
-                'steepness':  0.2                             # 平滑些，避免過硬的階梯
+                'max_payout': 50e6,                            # 上限 300 萬
+                'steepness':  0.1                             # 平滑些，避免過硬的階梯
             },
             {
                 'name': 'Dual Threshold Product', 
@@ -2067,7 +2066,7 @@ class RobustnessStressTester:
             model.to_multi_gpu()
             
             # 訓練器
-            trainer = EndToEndTrainer(model, learning_rate=0.01)
+            trainer = EndToEndTrainer(model, learning_rate=0.001)
             
             # 快速訓練 (壓力測試用)
             n_epochs = 20
