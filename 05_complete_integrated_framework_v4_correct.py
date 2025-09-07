@@ -854,17 +854,17 @@ print(f"✅ 階段3完成 - 定義了{len(prior_likelihood_test_configs)}種Prio
 # 階段4: 基差風險導向變分推斷與模型比較
 # =============================================================================
 
-print("\n階段4: 三層比較架構 - 傳統vs貝葉斯+標準ELBOvs貝葉斯+CRPS創新")
+print("\n階段4: 三層比較架構 - 傳統vs貝葉斯+標準ELBO vs HBM兩步法")
 print("   🏗️ 實現完整的三層比較框架:")
 print("      第一層: 傳統方法 (RMSE, 無推斷)")
 print("      第二層: 貝葉斯 + 標準ELBO-VI")
-print("      第三層: 貝葉斯 + CRPS-based VI (創新)")
+print("      第三層: HBM兩步法 (先優化G(θ)再評估F_k(θ*))")
 print(f"   📊 將對 {len(prior_likelihood_test_configs)} 種模型配置進行完整比較")
 
 # 三層比較結果存儲
 layer_1_results = {}  # 傳統方法結果
 layer_2_results = {}  # 標準ELBO-VI結果  
-layer_3_results = {}  # CRPS-VI創新結果
+layer_3_results = {}  # HBM兩步法結果
 three_layer_comparison = {}
 
 print("\n🔬 開始對6種Prior/Likelihood組合進行三層比較分析...")
@@ -1005,48 +1005,64 @@ for model_idx, (model_name, model_result) in enumerate(hierarchical_model_result
                     layer_2_results[model_name] = {'error': str(e)}
                 
                 # =============================================================
-                # 第三層：貝葉斯 + CRPS-based VI創新 (前瞻優化)
+                # 第三層：HBM兩步法 (先優化G(θ)再評估F_k(θ*))
                 # =============================================================
-                print(f"\n   📌 第三層: 貝葉斯 + CRPS-based VI創新")
+                print(f"\n   📌 第三層: HBM兩步法")
                 
-                # 創建CRPS-based模式的VI優化器 (使用相同的維度設置)
-                vi_optimizer_crps = BasisRiskAwareVI(
+                # 創建HBM兩步法的VI優化器
+                vi_optimizer_hbm = BasisRiskAwareVI(
                     n_features=1,  # 風速特徵
                     epsilon_values=[model_result['config']['epsilon']],
                     basis_risk_types=['absolute'],
                     use_gpu=True,
                     device='auto',  # 自動選擇雙GPU模式
                     learning_rate=0.01,
-                    objective='crps_basis_risk',  # 🔑 使用創新CRPS-based ELBO
-                    n_params=350 if USE_350_PRODUCT_SELECTION else 2  # 🔑 與第二層使用相同維度
+                    objective='hbm_two_step',  # 🔑 使用HBM兩步法
+                    hierarchical_model=hierarchical_model,  # 🔑 提供HBM模型實例
+                    n_params=5  # HBM參數維度
                 )
                 
-                print(f"      🔧 CRPS-VI配置: {'350維產品選擇模式' if USE_350_PRODUCT_SELECTION else '2維向後兼容模式'}")
+                print(f"      🔧 HBM兩步法配置: 直接接入階段3的層次貝葉斯模型")
                 
                 start_time = time.time()
                 
-                print(f"      🚀 執行創新CRPS-based VI推斷...")
+                print(f"      🚀 執行HBM兩步法優化...")
                 try:
-                    vi_results_crps = vi_optimizer_crps.run_comprehensive_screening(X_data, y_data)
-                    crps_elbo_time = time.time() - start_time
+                    # 準備階段3的Prior/Likelihood配置（單個配置）
+                    current_config = [{
+                        'name': model_name,
+                        'prior': model_result['config']['prior'],
+                        'likelihood': model_result['config']['likelihood'],
+                        'epsilon': model_result['config']['epsilon']
+                    }]
                     
-                    best_model_crps = vi_results_crps['best_model']
+                    # 執行HBM兩步法
+                    hbm_results = vi_optimizer_hbm.run_hbm_two_step_optimization(
+                        X_data, y_data, current_config
+                    )
+                    hbm_time = time.time() - start_time
+                    
+                    # 提取結果
+                    step1_result = hbm_results['step1_results'][0]
+                    step2_result = hbm_results['step2_results']
                     
                     layer_3_result = {
-                        'method': 'Bayesian + CRPS-based ELBO-VI (Innovation)',
-                        'elbo': best_model_crps['elbo'],
-                        'basis_risk': best_model_crps['final_basis_risk'],
-                        'inference_time': crps_elbo_time,
-                        'best_theta': best_model_crps['best_theta'],
-                        'converged': best_model_crps.get('converged', True),
-                        'crps_optimized': True  # 標記這是CRPS優化的
+                        'method': 'HBM Two-Step Method',
+                        'step1_crps': step1_result['final_basis_risk'],  # Step1: CRPS(y, G(θ))
+                        'step2_crps': step2_result['best_product']['crps'],  # Step2: CRPS(y, F_k(θ*))
+                        'best_product_id': step2_result['best_product']['product_id'],
+                        'best_theta': step1_result['best_theta'],
+                        'inference_time': hbm_time,
+                        'converged': step1_result.get('converged', True),
+                        'n_products_evaluated': len(step2_result['all_products'])
                     }
                     
                     layer_3_results[model_name] = layer_3_result
-                    print(f"      ✅ CRPS-VI創新: ELBO={best_model_crps['elbo']:.3f}, 時間={crps_elbo_time:.1f}s")
+                    print(f"      ✅ HBM兩步法: Step1 CRPS={step1_result['final_basis_risk']/1e6:.1f}M, Step2 CRPS={step2_result['best_product']['crps']/1e6:.1f}M")
+                    print(f"      📊 最佳產品ID: {step2_result['best_product']['product_id']}, 時間={hbm_time:.1f}s")
                     
                 except Exception as e:
-                    print(f"      ❌ CRPS-VI創新失敗: {e}")
+                    print(f"      ❌ HBM兩步法失敗: {e}")
                     layer_3_results[model_name] = {'error': str(e)}
                 
                 # =============================================================
@@ -1081,7 +1097,7 @@ for model_idx, (model_name, model_result) in enumerate(hierarchical_model_result
 
 print(f"\n🏆 三層比較架構分析結果:")
 print("=" * 100)
-print("第一層: 傳統RMSE方法 | 第二層: 貝葉斯+標準ELBO-VI | 第三層: 貝葉斯+CRPS-VI創新")
+print("第一層: 傳統RMSE方法 | 第二層: 貝葉斯+標準ELBO-VI | 第三層: HBM兩步法")
 print("=" * 100)
 
 # 創建比較表格
@@ -1110,13 +1126,14 @@ for model_name, comparison_result in three_layer_comparison.items():
             'L2_ELBO': f"{layer_2.get('elbo', 0):.3f}" if 'error' not in layer_2 else 'Error',
             'L2_Time': f"{layer_2.get('inference_time', 0):.1f}s" if 'error' not in layer_2 else 'Error',
             
-            # 第三層: CRPS-VI創新
-            'L3_ELBO': f"{layer_3.get('elbo', 0):.3f}" if 'error' not in layer_3 else 'Error',
+            # 第三層: HBM兩步法
+            'L3_Step1': f"{layer_3.get('step1_crps', 0)/1e6:.1f}M" if 'error' not in layer_3 else 'Error',
+            'L3_Step2': f"{layer_3.get('step2_crps', 0)/1e6:.1f}M" if 'error' not in layer_3 else 'Error',
+            'L3_Product': f"{layer_3.get('best_product_id', 'N/A')}" if 'error' not in layer_3 else 'Error',
             'L3_Time': f"{layer_3.get('inference_time', 0):.1f}s" if 'error' not in layer_3 else 'Error',
             
             # 比較指標
-            'ELBO改善': f"{layer_3.get('elbo', 0) - layer_2.get('elbo', 0):.3f}" if ('error' not in layer_2 and 'error' not in layer_3) else 'N/A',
-            'BR降低': f"{(layer_2.get('basis_risk', float('inf')) - layer_3.get('basis_risk', float('inf')))/1e6:.1f}M" if ('error' not in layer_2 and 'error' not in layer_3) else 'N/A'
+            'Step2改善': f"{(layer_2.get('basis_risk', float('inf')) - layer_3.get('step2_crps', float('inf')))/1e6:.1f}M" if ('error' not in layer_2 and 'error' not in layer_3) else 'N/A'
         }
         
         comparison_table_data.append(row)
@@ -1159,20 +1176,32 @@ vi_analysis_results = three_layer_comparison  # 兼容性
 # 選擇最佳模型進入後續階段
 valid_comparisons = {k: v for k, v in three_layer_comparison.items() if 'error' not in v}
 if valid_comparisons:
-    # 基於CRPS-VI創新的ELBO分數選擇最佳模型
-    best_model_name = max(valid_comparisons.keys(), 
-                         key=lambda k: valid_comparisons[k].get('layer_3', {}).get('elbo', float('-inf')))
+    # 基於HBM兩步法的Step2 CRPS分數選擇最佳模型
+    best_model_name = min(valid_comparisons.keys(), 
+                         key=lambda k: valid_comparisons[k].get('layer_3', {}).get('step2_crps', float('inf')))
     
     best_vi_model_name = best_model_name
     best_vi_model = hierarchical_model_results[best_model_name]
     
     print(f"\n✅ 選擇三層比較表現最佳的模型進入後續階段: {best_model_name}")
-    print(f"   🏆 基於第三層 (CRPS-VI創新) 的ELBO分數選擇")
+    print(f"   🏆 基於第三層 (HBM兩步法) 的Step2 CRPS分數選擇")
 else:
     # 備選方案：使用第一個可用模型
     best_vi_model_name = list(hierarchical_model_results.keys())[0]
     best_vi_model = hierarchical_model_results[best_vi_model_name]
     print(f"\n⚠️ 使用備選模型進入後續階段: {best_vi_model_name}")
+
+# 為後續階段準備VI排序結果
+vi_sorted = []
+for model_name, comparison_result in three_layer_comparison.items():
+    if 'error' not in comparison_result:
+        layer_3 = comparison_result.get('layer_3', {})
+        if 'error' not in layer_3:
+            # 使用Step2 CRPS作為排序指標（越小越好）
+            vi_sorted.append((model_name, layer_3.get('step2_crps', float('inf'))))
+
+# 按Step2 CRPS排序（越小越好）
+vi_sorted = sorted(vi_sorted, key=lambda x: x[1])
 
 print(f"\n✅ 階段4完成: 三層比較架構分析")
 print("=" * 80)
@@ -2067,7 +2096,7 @@ print(f"\n🎉 6種Prior/Likelihood組合的完整比較分析已完成！")
 print(f"=" * 80)
 print(f"📈 各階段最佳模型總結:")
 print(f"   階段3 (基差風險): {min(basis_risk_by_model, key=basis_risk_by_model.get) if len(basis_risk_by_model) > 0 else 'N/A'}")
-print(f"   階段4 (VI表現): {vi_sorted[0][0] if len(vi_sorted) > 0 else 'N/A'}")
+print(f"   階段4 (HBM兩步法): {vi_sorted[0][0] if len(vi_sorted) > 0 else 'N/A'}")
 print(f"   階段5 (超參數優化): {hyperparam_sorted[0][0] if len(hyperparam_sorted) > 0 else 'N/A'}")
 print(f"   階段6 (Tail修正): {mcmc_sorted[0][0] if len(mcmc_sorted) > 0 else 'N/A'}")
 print(f"   階段7 (後驗精確度): {posterior_sorted[0][0] if len(posterior_sorted) > 0 else 'N/A'}")
