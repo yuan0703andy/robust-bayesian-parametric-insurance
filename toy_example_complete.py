@@ -48,6 +48,9 @@ from enum import Enum
 import warnings
 warnings.filterwarnings('ignore')
 
+# 全局控制輸出詳盡程度（Stage 3 等大矩陣運行時可關閉冗長輸出）
+VERBOSE = False
+
 # 設定隨機種子確保可重現性
 np.random.seed(42)
 torch.manual_seed(42)
@@ -817,7 +820,8 @@ class UnifiedEndToEndVIModel(nn.Module):
                     n_hbm_params: int = 7, epsilon_prior: float = 0.0, 
                     epsilon_likelihood: float = 0.0,
                     prior_scenario: PriorScenario = PriorScenario.NON_INFORMATIVE,
-                    likelihood_family: LikelihoodFamily = LikelihoodFamily.LOGNORMAL):
+                    likelihood_family: LikelihoodFamily = LikelihoodFamily.LOGNORMAL,
+                    verbose: bool = False):
         super().__init__()
         
         self.n_hbm_params = n_hbm_params
@@ -825,6 +829,7 @@ class UnifiedEndToEndVIModel(nn.Module):
         self.epsilon_likelihood = epsilon_likelihood  # 似然污染係數
         self.prior_scenario = prior_scenario       # 先驗情境
         self.likelihood_family = likelihood_family # 似然函數族
+        self.verbose = verbose
         
         # 獲取具體的先驗參數
         prior_params = PriorLikelihoodProcessor.get_prior_parameters(prior_scenario, n_hbm_params)
@@ -839,55 +844,61 @@ class UnifiedEndToEndVIModel(nn.Module):
         
         # 子模組
         self.hbm = DifferentiableHierarchicalBayesianModel(
-            n_hospitals, n_regions, n_events, distance_matrix
+            n_hospitals, n_regions, n_events, distance_matrix, verbose=verbose
         )
-        self.payout_function = DifferentiablePayoutFunction(product_config)
+        self.payout_function = DifferentiablePayoutFunction(product_config, verbose=verbose)
         
-        print(f"🧠 統一VI模型初始化: {n_hbm_params}個HBM參數")
-        print(f"   先驗情境: {prior_scenario.value}")
-        print(f"   似然族: {likelihood_family.value}")
-        print(f"   ε-contamination: Prior={epsilon_prior:.3f}, Likelihood={epsilon_likelihood:.3f}")
-        if epsilon_prior > 0 or epsilon_likelihood > 0:
-            print(f"   🛡️  啟用Robust貝氏模式")
+        if self.verbose:
+            print(f"🧠 統一VI模型初始化: {n_hbm_params}個HBM參數")
+            print(f"   先驗情境: {prior_scenario.value}")
+            print(f"   似然族: {likelihood_family.value}")
+            print(f"   ε-contamination: Prior={epsilon_prior:.3f}, Likelihood={epsilon_likelihood:.3f}")
+            if epsilon_prior > 0 or epsilon_likelihood > 0:
+                print(f"   🛡️  啟用Robust貝氏模式")
     
     def forward(self, hazard_intensities: torch.Tensor,
                 exposure_values: torch.Tensor,
+                observed_losses: torch.Tensor,
                 n_samples: int = 10,
-                spatial_data: 'SimulatedSpatialData' = None) -> Dict[str, torch.Tensor]:
+                spatial_data: 'SimulatedSpatialData' = None) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
-        端到端前向傳播 - 改進版本支持真實區域分配
-        
-        Args:
-            spatial_data: 模擬空間數據，包含region_assignments
+        前向傳播計算 Basis-Risk-Aware ELBO，返回張量以便 DataParallel 聚合。
+        返回順序: (total_loss, elbo, crps_term, kl_div)
         """
-        
         # 1. VI採樣 θ ~ q_φ(θ)
         theta_samples = self._sample_theta(n_samples)
         
-        # 2. 提取區域分配（如果提供）
+        # 2. 提取區域分配（如果提供），並確保放在正確設備
         region_assignments = None
         if spatial_data is not None and hasattr(spatial_data, 'region_assignments'):
-            region_assignments = torch.tensor(spatial_data.region_assignments, dtype=torch.long)
+            region_assignments = torch.tensor(spatial_data.region_assignments, dtype=torch.long, device=hazard_intensities.device)
         
-        # 3. 風險大腦: 損失預測 G(θ) - 使用真實區域分配
+        # 3. 損失分佈 G(θ)
         loss_dist_params = self.hbm(hazard_intensities, exposure_values, theta_samples, region_assignments)
         
-        # 4. 合約引擎: 賠付預測 F(θ)  
+        # 4. 賠付分佈 F(θ)
         payout_dist_params = self.payout_function(loss_dist_params)
         
-        return {
-            'theta_samples': theta_samples,
-            'loss_dist_params': loss_dist_params,
-            'payout_dist_params': payout_dist_params,
-            'region_assignments_used': region_assignments
-        }
+        # 5. CRPS 基差風險
+        crps_scores = self._compute_crps_batch(observed_losses, payout_dist_params, n_pred_samples=50)
+        
+        # 6. KL(q||p_ε)
+        kl_div = self._compute_kl_divergence_with_prior(theta_samples)
+        
+        # 7. ELBO 與最終損失
+        crps_term = torch.mean(crps_scores)
+        elbo = -crps_term - kl_div
+        total_loss = -elbo
+        
+        return total_loss, elbo, crps_term, kl_div
     
     def _sample_theta(self, n_samples: int) -> torch.Tensor:
         """使用重參數化技巧採樣HBM參數"""
         sigma_theta = torch.exp(self.log_sigma_theta)
         
         # 重參數化: θ = μ + σ * ε, ε ~ N(0,1)
-        epsilon = torch.randn(n_samples, self.n_hbm_params)
+        device = self.mu_theta.device
+        epsilon = torch.randn(n_samples, self.n_hbm_params, device=device)
         theta_samples = self.mu_theta.unsqueeze(0) + sigma_theta.unsqueeze(0) * epsilon
         
         return theta_samples
@@ -897,56 +908,15 @@ class UnifiedEndToEndVIModel(nn.Module):
                         observed_losses: torch.Tensor,
                         n_samples: int = 10,
                         spatial_data: 'SimulatedSpatialData' = None) -> Dict[str, torch.Tensor]:
-        """
-        計算Basis-Risk-Aware ELBO - 直接優化基差風險
-        
-        核心創新: Basis-Risk-Aware VI
-        ELBO = -E_q[CRPS(F_payout, L_observed)] - KL(q_φ(θ) || p_ε(θ))
-        
-        其中:
-        - F_payout: 保險賠付分佈 (模型預測)
-        - L_observed: 觀測損失分佈 (真實數據)
-        - CRPS衡量預測賠付與實際損失的基差風險
-        """
-        
-        # 1. VI採樣 θ ~ q_φ(θ)
-        theta_samples = self._sample_theta(n_samples)
-        
-        # 2. 提取區域分配（如果提供）
-        region_assignments = None
-        if spatial_data is not None and hasattr(spatial_data, 'region_assignments'):
-            region_assignments = torch.tensor(spatial_data.region_assignments, dtype=torch.long)
-        
-        # 3. 計算損失分佈 G(θ)
-        loss_dist_params = self.hbm(hazard_intensities, exposure_values, theta_samples, region_assignments)
-        
-        # 4. 計算賠付分佈 F(θ) 
-        payout_dist_params = self.payout_function(loss_dist_params)
-        
-        # 5. 計算CRPS基差風險 - 核心損失函數
-        crps_scores = self._compute_crps_batch(
-            observed_losses, payout_dist_params, n_pred_samples=50
+        """兼容性包裝：調用 forward 並輸出字典格式。"""
+        total_loss, elbo, crps_term, kl_div = self.forward(
+            hazard_intensities, exposure_values, observed_losses, n_samples, spatial_data
         )
-        
-        # 6. 計算KL散度 KL(q_φ(θ) || p_ε(θ))
-        kl_div = self._compute_kl_divergence_with_prior(theta_samples)
-        
-        # 7. Basis-Risk-Aware ELBO
-        # 最小化CRPS = 最小化基差風險
-        crps_term = torch.mean(crps_scores)
-        elbo = -crps_term - kl_div  # 負號: 最小化CRPS等效最大化ELBO
-        
-        # 8. 最終損失 (用於優化器)
-        total_loss = -elbo  # 最小化負ELBO
-        
         return {
             'total_loss': total_loss,
             'elbo': elbo,
-            'crps_term': crps_term,      # 基差風險項
-            'kl_term': kl_div,           # 正則化項
-            'theta_samples': theta_samples,
-            'loss_dist_params': loss_dist_params,
-            'payout_dist_params': payout_dist_params
+            'crps_term': crps_term,
+            'kl_term': kl_div
         }
     
     def _compute_crps_batch(self, observed_losses: torch.Tensor,
@@ -1912,9 +1882,10 @@ class EndToEndTrainer:
     """端到端訓練器 - GPU-Accelerated Version"""
         
     def __init__(self, model: UnifiedEndToEndVIModel, learning_rate: float = 0.001,
-                    enable_multi_gpu: bool = USE_MULTI_GPU):
+                    enable_multi_gpu: bool = USE_MULTI_GPU, verbose: bool = False):
         self.original_model = model
         self.enable_multi_gpu = enable_multi_gpu and USE_MULTI_GPU
+        self.verbose = verbose
         
         # GPU配置和模型設置
         if torch.cuda.is_available():
@@ -1923,16 +1894,19 @@ class EndToEndTrainer:
             
             # 配置多GPU DataParallel
             if self.enable_multi_gpu and len(GPU_DEVICES) >= 2:
-                print(f"🚀 配置DataParallel: 使用GPU {GPU_DEVICES}")
+                if self.verbose:
+                    print(f"🚀 配置DataParallel: 使用GPU {GPU_DEVICES}")
                 self.model = nn.DataParallel(self.model, device_ids=GPU_DEVICES)
                 self.device = f'cuda:{GPU_DEVICES[0]}'
             else:
                 self.device = f'cuda:{GPU_DEVICES[0]}'
-                print(f"🔧 單GPU模式: 使用GPU {GPU_DEVICES[0]}")
+                if self.verbose:
+                    print(f"🔧 單GPU模式: 使用GPU {GPU_DEVICES[0]}")
         else:
             self.model = model
             self.device = 'cpu'
-            print("💻 CPU模式: GPU不可用")
+            if self.verbose:
+                print("💻 CPU模式: GPU不可用")
         
         self.optimizer = optim.Adam(self.model.parameters(), lr=learning_rate)
         self.loss_history = []
@@ -1962,19 +1936,26 @@ class EndToEndTrainer:
             torch.cuda.synchronize()
             memory_before = [torch.cuda.memory_allocated(i) / 1e6 for i in GPU_DEVICES]
         
-        # 計算損失
+        # 計算損失（DP使用forward可並行）
         if self.enable_multi_gpu:
-            loss_dict = self._multi_gpu_forward(
+            outputs = self.model(
                 hazard_intensities, exposure_values, observed_losses, n_samples, spatial_data
             )
+            # DataParallel 將返回張量堆疊（num_devices,)
+            total_loss, elbo, crps_term, kl_div = outputs
+            total_loss_scalar = total_loss.mean()
+            elbo_scalar = elbo.mean()
+            crps_scalar = crps_term.mean()
+            kl_scalar = kl_div.mean()
         else:
             base_model = self.model.module if hasattr(self.model, 'module') else self.model
-            loss_dict = base_model.compute_elbo_loss(
+            total_loss, elbo, crps_term, kl_div = base_model(
                 hazard_intensities, exposure_values, observed_losses, n_samples, spatial_data
             )
+            total_loss_scalar, elbo_scalar, crps_scalar, kl_scalar = total_loss, elbo, crps_term, kl_div
         
         # 反向傳播 
-        loss_dict['total_loss'].backward()
+        total_loss_scalar.backward()
         
         # 梯度裁剪
         torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
@@ -1996,7 +1977,12 @@ class EndToEndTrainer:
             })
         
         # 記錄損失
-        losses = {k: v.item() if hasattr(v, 'item') else v for k, v in loss_dict.items()}
+        losses = {
+            'total_loss': total_loss_scalar.item(),
+            'elbo': elbo_scalar.item(),
+            'crps_term': crps_scalar.item(),
+            'kl_term': kl_scalar.item()
+        }
         losses['epoch_time'] = epoch_time
         self.loss_history.append(losses)
         
@@ -2013,12 +1999,17 @@ class EndToEndTrainer:
         batch_size = hazard_intensities.shape[0]
         chunk_size = batch_size // len(GPU_DEVICES)
         
-        # 注意：自定義方法 compute_elbo_loss 不會被 DataParallel 自動分發。
-        # 這裡取出底層模型直接計算，以確保方法存在並可用。
-        base_model = self.model.module if hasattr(self.model, 'module') else self.model
-        return base_model.compute_elbo_loss(
+        # 使用 DataParallel 的 forward 進行並行計算，並聚合結果
+        outputs = self.model(
             hazard_intensities, exposure_values, observed_losses, n_samples, spatial_data
         )
+        total_loss, elbo, crps_term, kl_div = outputs
+        return {
+            'total_loss': total_loss.mean(),
+            'elbo': elbo.mean(),
+            'crps_term': crps_term.mean(),
+            'kl_term': kl_div.mean()
+        }
     
     def parallel_mcmc_sampling(self, n_total_samples: int, 
                               chunk_size: int = None) -> torch.Tensor:
@@ -2089,14 +2080,27 @@ class EndToEndTrainer:
         
         with torch.no_grad():
             if self.enable_multi_gpu:
-                loss_dict = self._multi_gpu_forward(
+                outputs = self.model(
                     hazard_intensities, exposure_values, observed_losses, n_samples, spatial_data
                 )
+                total_loss, elbo, crps_term, kl_div = outputs
+                loss_dict = {
+                    'total_loss': total_loss.mean(),
+                    'elbo': elbo.mean(),
+                    'crps_term': crps_term.mean(),
+                    'kl_term': kl_div.mean()
+                }
             else:
                 base_model = self.model.module if hasattr(self.model, 'module') else self.model
-                loss_dict = base_model.compute_elbo_loss(
+                total_loss, elbo, crps_term, kl_div = base_model(
                     hazard_intensities, exposure_values, observed_losses, n_samples, spatial_data
                 )
+                loss_dict = {
+                    'total_loss': total_loss,
+                    'elbo': elbo,
+                    'crps_term': crps_term,
+                    'kl_term': kl_div
+                }
         
         return {k: v.item() if hasattr(v, 'item') else v for k, v in loss_dict.items()}
     
@@ -2629,7 +2633,8 @@ def run_complete_analysis():
         
         # 檢查並創建必要的變量
         if 'generator' not in locals() and 'generator' not in globals():
-            print("⚠️  generator未定義，創建默認數據生成器...")
+            if VERBOSE:
+                print("⚠️  generator未定義，創建默認數據生成器...")
             generator = ToyDataGenerator(n_hospitals=15, n_events=30, n_regions=3)
             
             # 生成基礎數據
