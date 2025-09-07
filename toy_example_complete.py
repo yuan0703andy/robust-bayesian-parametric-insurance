@@ -498,8 +498,9 @@ class DifferentiableHierarchicalBayesianModel(nn.Module):
                 'sigma_gamma': F.softplus(theta_samples[:, 1]),      # 個體效應標準差  
                 'sigma_delta': F.softplus(theta_samples[:, 2]),      # 空間效應標準差
                 'rho_spatial': torch.clamp(F.softplus(theta_samples[:, 3]), min=1e-3),      # 空間相關範圍（加下限）
-                'vulnerability_a': F.softplus(theta_samples[:, 4]),  # Emanuel參數a
-                'vulnerability_b': F.softplus(theta_samples[:, 5]),  # Emanuel參數b
+                # 控制 Emanuel 參數範圍避免爆炸
+                'vulnerability_a': torch.clamp(F.softplus(theta_samples[:, 4]), max=1.0),  # a ≤ 1.0
+                'vulnerability_b': torch.clamp(F.softplus(theta_samples[:, 5]), max=5.0),  # b ≤ 5.0
                 'sigma_obs_base': F.softplus(theta_samples[:, 6])    # 基礎觀測誤差
             }
             
@@ -721,6 +722,8 @@ class DifferentiableHierarchicalBayesianModel(nn.Module):
                 )
             # β_i = α_{r(i)} + δ_i + γ_i
             vulnerability_params = region_effects_mapped + spatial_effects + individual_effects
+            # 數值保護：限制線性項幅度，避免 exp(β) 溢位
+            vulnerability_params = torch.clamp(vulnerability_params, min=-10.0, max=10.0)
             return vulnerability_params
     
         def _compute_loss_predictions(self, hazard_intensities: torch.Tensor,
