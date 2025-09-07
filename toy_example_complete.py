@@ -842,51 +842,51 @@ print("✅ 可微分保險賠付函數定義完成")
 # ============================================================================
 
 class UnifiedEndToEndVIModel(nn.Module):
-        """
-        統一的端到端變分推斷模型 - 「總指揮」
+    """
+    統一的端到端變分推斷模型 - 「總指揮」
+    
+    集成ε-contamination robust方法:
+    - Prior contamination: p_ε(θ) = (1-ε_p) * p₀(θ) + ε_p * q_p(θ)  
+    - Likelihood contamination: L_ε(θ) = (1-ε_l) * L₀(θ) + ε_l * q_l(θ)
+    """
+    
+    def __init__(self, n_hospitals: int, n_regions: int, n_events: int,
+                    distance_matrix: np.ndarray, product_config: Dict,
+                    n_hbm_params: int = 7, epsilon_prior: float = 0.0, 
+                    epsilon_likelihood: float = 0.0,
+                    prior_scenario: PriorScenario = PriorScenario.NON_INFORMATIVE,
+                    likelihood_family: LikelihoodFamily = LikelihoodFamily.LOGNORMAL):
+        super().__init__()
         
-        集成ε-contamination robust方法:
-        - Prior contamination: p_ε(θ) = (1-ε_p) * p₀(θ) + ε_p * q_p(θ)  
-        - Likelihood contamination: L_ε(θ) = (1-ε_l) * L₀(θ) + ε_l * q_l(θ)
-        """
+        self.n_hbm_params = n_hbm_params
+        self.epsilon_prior = epsilon_prior         # 先驗污染係數 
+        self.epsilon_likelihood = epsilon_likelihood  # 似然污染係數
+        self.prior_scenario = prior_scenario       # 先驗情境
+        self.likelihood_family = likelihood_family # 似然函數族
         
-        def __init__(self, n_hospitals: int, n_regions: int, n_events: int,
-                     distance_matrix: np.ndarray, product_config: Dict,
-                     n_hbm_params: int = 7, epsilon_prior: float = 0.0, 
-                     epsilon_likelihood: float = 0.0,
-                     prior_scenario: PriorScenario = PriorScenario.NON_INFORMATIVE,
-                     likelihood_family: LikelihoodFamily = LikelihoodFamily.LOGNORMAL):
-            super().__init__()
-            
-            self.n_hbm_params = n_hbm_params
-            self.epsilon_prior = epsilon_prior         # 先驗污染係數 
-            self.epsilon_likelihood = epsilon_likelihood  # 似然污染係數
-            self.prior_scenario = prior_scenario       # 先驗情境
-            self.likelihood_family = likelihood_family # 似然函數族
-            
-            # 獲取具體的先驗參數
-            prior_params = PriorLikelihoodProcessor.get_prior_parameters(prior_scenario, n_hbm_params)
-            
-            # 變分參數 φ = (μ_θ, log_σ_θ) - 使用適應性初始化
-            self.mu_theta = nn.Parameter(prior_params['mu_prior'].clone() * 0.1)  # 基於先驗初始化
-            self.log_sigma_theta = nn.Parameter(torch.log(prior_params['sigma_prior'] * 0.1))  # log(σ)形式
-            
-            # 註冊先驗參數為buffer（不可訓練）
-            self.register_buffer('prior_mu', prior_params['mu_prior'])
-            self.register_buffer('prior_sigma', prior_params['sigma_prior'])
-            
-            # 子模組
-            self.hbm = DifferentiableHierarchicalBayesianModel(
-                n_hospitals, n_regions, n_events, distance_matrix
-            )
-            self.payout_function = DifferentiablePayoutFunction(product_config)
-            
-            print(f"🧠 統一VI模型初始化: {n_hbm_params}個HBM參數")
-            print(f"   先驗情境: {prior_scenario.value}")
-            print(f"   似然族: {likelihood_family.value}")
-            print(f"   ε-contamination: Prior={epsilon_prior:.3f}, Likelihood={epsilon_likelihood:.3f}")
-            if epsilon_prior > 0 or epsilon_likelihood > 0:
-                print(f"   🛡️  啟用Robust貝氏模式")
+        # 獲取具體的先驗參數
+        prior_params = PriorLikelihoodProcessor.get_prior_parameters(prior_scenario, n_hbm_params)
+        
+        # 變分參數 φ = (μ_θ, log_σ_θ) - 使用適應性初始化
+        self.mu_theta = nn.Parameter(prior_params['mu_prior'].clone() * 0.1)  # 基於先驗初始化
+        self.log_sigma_theta = nn.Parameter(torch.log(prior_params['sigma_prior'] * 0.1))  # log(σ)形式
+        
+        # 註冊先驗參數為buffer（不可訓練）
+        self.register_buffer('prior_mu', prior_params['mu_prior'])
+        self.register_buffer('prior_sigma', prior_params['sigma_prior'])
+        
+        # 子模組
+        self.hbm = DifferentiableHierarchicalBayesianModel(
+            n_hospitals, n_regions, n_events, distance_matrix
+        )
+        self.payout_function = DifferentiablePayoutFunction(product_config)
+        
+        print(f"🧠 統一VI模型初始化: {n_hbm_params}個HBM參數")
+        print(f"   先驗情境: {prior_scenario.value}")
+        print(f"   似然族: {likelihood_family.value}")
+        print(f"   ε-contamination: Prior={epsilon_prior:.3f}, Likelihood={epsilon_likelihood:.3f}")
+        if epsilon_prior > 0 or epsilon_likelihood > 0:
+            print(f"   🛡️  啟用Robust貝氏模式")
     
     def forward(self, hazard_intensities: torch.Tensor,
                 exposure_values: torch.Tensor,
@@ -929,12 +929,12 @@ class UnifiedEndToEndVIModel(nn.Module):
         theta_samples = self.mu_theta.unsqueeze(0) + sigma_theta.unsqueeze(0) * epsilon
         
         return theta_samples
-    
+
     def compute_elbo_loss(self, hazard_intensities: torch.Tensor,
-                         exposure_values: torch.Tensor, 
-                         observed_losses: torch.Tensor,
-                         n_samples: int = 10,
-                         spatial_data: 'SimulatedSpatialData' = None) -> Dict[str, torch.Tensor]:
+                        exposure_values: torch.Tensor, 
+                        observed_losses: torch.Tensor,
+                        n_samples: int = 10,
+                        spatial_data: 'SimulatedSpatialData' = None) -> Dict[str, torch.Tensor]:
         """
         計算Basis-Risk-Aware ELBO - 直接優化基差風險
         
@@ -988,8 +988,8 @@ class UnifiedEndToEndVIModel(nn.Module):
         }
     
     def _compute_crps_batch(self, observed_losses: torch.Tensor,
-                           payout_dist_params: Dict[str, torch.Tensor],
-                           n_pred_samples: int = 50) -> torch.Tensor:
+                        payout_dist_params: Dict[str, torch.Tensor],
+                        n_pred_samples: int = 50) -> torch.Tensor:
         """
         批次計算CRPS分數 - 數學正確的向量化實現
         
@@ -1114,7 +1114,7 @@ class UnifiedEndToEndVIModel(nn.Module):
         return kl
     
     def _compute_heavy_tail_likelihood(self, observed_losses: torch.Tensor,
-                                     loss_dist_params: Dict[str, torch.Tensor]) -> torch.Tensor:
+                                    loss_dist_params: Dict[str, torch.Tensor]) -> torch.Tensor:
         """計算重尾似然（用於似然污染）"""
         # 使用Student-t分佈作為重尾污染
         mu_loss = loss_dist_params['mu_loss']
@@ -1194,13 +1194,13 @@ class UnifiedEndToEndVIModel(nn.Module):
                     # 重參數化採樣
                     epsilon = torch.randn(gpu_samples, self.n_hbm_params, device=f"cuda:{gpu_id}")
                     theta_samples_gpu = (mu_theta_gpu.unsqueeze(0) + 
-                                       sigma_theta_gpu.unsqueeze(0) * epsilon)
+                                    sigma_theta_gpu.unsqueeze(0) * epsilon)
                     
                     samples_per_gpu.append(theta_samples_gpu.to(device))  # 移動到主設備
                     remaining_samples -= gpu_samples
                     
                     print(f"   GPU {gpu_id}: 採樣 {gpu_samples} 個樣本")
-        
+    
         # 合併所有GPU的結果
         if samples_per_gpu:
             all_samples = torch.cat(samples_per_gpu, dim=0)
@@ -1217,196 +1217,196 @@ print("✅ 統一端到端VI模型定義完成 (支持雙GPU)")
 # ============================================================================
 
 class ParallelCRPSComputer:
-        """GPU並行CRPS計算器 - 支持雙GPU加速"""
+    """GPU並行CRPS計算器 - 支持雙GPU加速"""
+    
+    def __init__(self, use_multi_gpu: bool = USE_MULTI_GPU):
+        self.use_multi_gpu = use_multi_gpu and torch.cuda.is_available()
+        self.gpu_devices = GPU_DEVICES if torch.cuda.is_available() else [0]
+        self.primary_device = f'cuda:{self.gpu_devices[0]}' if torch.cuda.is_available() else 'cpu'
         
-        def __init__(self, use_multi_gpu: bool = USE_MULTI_GPU):
-            self.use_multi_gpu = use_multi_gpu and torch.cuda.is_available()
-            self.gpu_devices = GPU_DEVICES if torch.cuda.is_available() else [0]
-            self.primary_device = f'cuda:{self.gpu_devices[0]}' if torch.cuda.is_available() else 'cpu'
+        print(f"🔧 CRPS計算器初始化:")
+        print(f"   多GPU模式: {'啟用' if self.use_multi_gpu else '停用'}")
+        print(f"   使用設備: {self.gpu_devices if torch.cuda.is_available() else 'CPU'}")
+        
+    def compute_crps_parallel(self, observed_losses: torch.Tensor,
+                            payout_dist_params: Dict[str, torch.Tensor],
+                            n_pred_samples: int = 100) -> torch.Tensor:
+        """
+        GPU並行CRPS計算 - 數學正確且高效的實現
+        
+        CRPS(F, y) = E[|X - y|] - 0.5 * E[|X - X'|]
+        其中 X, X' ~ F 是預測分佈的獨立樣本
+        
+        Args:
+            observed_losses: (n_events,) 觀測損失
+            payout_dist_params: 賠付分佈參數字典
+            n_pred_samples: 預測樣本數量
             
-            print(f"🔧 CRPS計算器初始化:")
-            print(f"   多GPU模式: {'啟用' if self.use_multi_gpu else '停用'}")
-            print(f"   使用設備: {self.gpu_devices if torch.cuda.is_available() else 'CPU'}")
-            
-        def compute_crps_parallel(self, observed_losses: torch.Tensor,
+        Returns:
+            crps_scores: (n_events,) 每個事件的CRPS分數
+        """
+        
+        if not self.use_multi_gpu or len(self.gpu_devices) < 2:
+            # 單GPU或CPU模式
+            return self._compute_crps_single_gpu(observed_losses, payout_dist_params, n_pred_samples)
+        else:
+            # 多GPU並行模式
+            return self._compute_crps_multi_gpu(observed_losses, payout_dist_params, n_pred_samples)
+    
+    def _compute_crps_single_gpu(self, observed_losses: torch.Tensor,
                                 payout_dist_params: Dict[str, torch.Tensor],
-                                n_pred_samples: int = 100) -> torch.Tensor:
-            """
-            GPU並行CRPS計算 - 數學正確且高效的實現
-            
-            CRPS(F, y) = E[|X - y|] - 0.5 * E[|X - X'|]
-            其中 X, X' ~ F 是預測分佈的獨立樣本
-            
-            Args:
-                observed_losses: (n_events,) 觀測損失
-                payout_dist_params: 賠付分佈參數字典
-                n_pred_samples: 預測樣本數量
-                
-            Returns:
-                crps_scores: (n_events,) 每個事件的CRPS分數
-            """
-            
-            if not self.use_multi_gpu or len(self.gpu_devices) < 2:
-                # 單GPU或CPU模式
-                return self._compute_crps_single_gpu(observed_losses, payout_dist_params, n_pred_samples)
-            else:
-                # 多GPU並行模式
-                return self._compute_crps_multi_gpu(observed_losses, payout_dist_params, n_pred_samples)
+                                n_pred_samples: int) -> torch.Tensor:
+        """單GPU CRPS計算"""
         
-        def _compute_crps_single_gpu(self, observed_losses: torch.Tensor,
-                                   payout_dist_params: Dict[str, torch.Tensor],
-                                   n_pred_samples: int) -> torch.Tensor:
-            """單GPU CRPS計算"""
-            
-            # 移動數據到GPU
-            observed_losses = observed_losses.to(self.primary_device)
-            
-            # 從分佈參數中採樣預測值
-            if 'dist' in payout_dist_params:
-                # 使用預構建的分佈
-                payout_dist = payout_dist_params['dist']
-                X_samples = payout_dist.sample((n_pred_samples,)).to(self.primary_device)
-            else:
-                # 從LogNormal參數構建分佈並採樣
-                mu_log = payout_dist_params['mu_payout_log'].to(self.primary_device)
-                sigma_log = payout_dist_params['sigma_payout_log'].to(self.primary_device)
-                
-                # LogNormal分佈採樣
-                normal_samples = torch.randn(n_pred_samples, len(observed_losses), device=self.primary_device)
-                X_samples = torch.exp(mu_log.unsqueeze(0) + sigma_log.unsqueeze(0) * normal_samples)
-            
-            # 計算CRPS: E[|X - y|] - 0.5 * E[|X - X'|]
-            # X_samples: (n_pred_samples, n_events)
-            # observed_losses: (n_events,)
-            
-            # Term 1: E[|X - y|]
-            abs_diff_obs = torch.abs(X_samples - observed_losses.unsqueeze(0))  # (n_pred_samples, n_events)
-            term1 = torch.mean(abs_diff_obs, dim=0)  # (n_events,)
-            
-            # Term 2: 0.5 * E[|X - X'|]
-            # 使用向量化計算避免雙重循環
-            X_expanded_1 = X_samples.unsqueeze(0)  # (1, n_pred_samples, n_events)
-            X_expanded_2 = X_samples.unsqueeze(1)  # (n_pred_samples, 1, n_events)
-            abs_diff_pred = torch.abs(X_expanded_1 - X_expanded_2)  # (n_pred_samples, n_pred_samples, n_events)
-            term2 = 0.5 * torch.mean(abs_diff_pred, dim=(0, 1))  # (n_events,)
-            
-            crps_scores = term1 - term2
-            
-            return crps_scores
+        # 移動數據到GPU
+        observed_losses = observed_losses.to(self.primary_device)
         
-        def _compute_crps_multi_gpu(self, observed_losses: torch.Tensor,
-                                  payout_dist_params: Dict[str, torch.Tensor],
-                                  n_pred_samples: int) -> torch.Tensor:
-            """多GPU並行CRPS計算"""
+        # 從分佈參數中採樣預測值
+        if 'dist' in payout_dist_params:
+            # 使用預構建的分佈
+            payout_dist = payout_dist_params['dist']
+            X_samples = payout_dist.sample((n_pred_samples,)).to(self.primary_device)
+        else:
+            # 從LogNormal參數構建分佈並採樣
+            mu_log = payout_dist_params['mu_payout_log'].to(self.primary_device)
+            sigma_log = payout_dist_params['sigma_payout_log'].to(self.primary_device)
             
-            n_events = len(observed_losses)
-            n_gpus = len(self.gpu_devices)
+            # LogNormal分佈採樣
+            normal_samples = torch.randn(n_pred_samples, len(observed_losses), device=self.primary_device)
+            X_samples = torch.exp(mu_log.unsqueeze(0) + sigma_log.unsqueeze(0) * normal_samples)
+        
+        # 計算CRPS: E[|X - y|] - 0.5 * E[|X - X'|]
+        # X_samples: (n_pred_samples, n_events)
+        # observed_losses: (n_events,)
+        
+        # Term 1: E[|X - y|]
+        abs_diff_obs = torch.abs(X_samples - observed_losses.unsqueeze(0))  # (n_pred_samples, n_events)
+        term1 = torch.mean(abs_diff_obs, dim=0)  # (n_events,)
+        
+        # Term 2: 0.5 * E[|X - X'|]
+        # 使用向量化計算避免雙重循環
+        X_expanded_1 = X_samples.unsqueeze(0)  # (1, n_pred_samples, n_events)
+        X_expanded_2 = X_samples.unsqueeze(1)  # (n_pred_samples, 1, n_events)
+        abs_diff_pred = torch.abs(X_expanded_1 - X_expanded_2)  # (n_pred_samples, n_pred_samples, n_events)
+        term2 = 0.5 * torch.mean(abs_diff_pred, dim=(0, 1))  # (n_events,)
+        
+        crps_scores = term1 - term2
+        
+        return crps_scores
+    
+    def _compute_crps_multi_gpu(self, observed_losses: torch.Tensor,
+                                payout_dist_params: Dict[str, torch.Tensor],
+                                n_pred_samples: int) -> torch.Tensor:
+        """多GPU並行CRPS計算"""
+        
+        n_events = len(observed_losses)
+        n_gpus = len(self.gpu_devices)
+        
+        # 將事件分配到不同GPU
+        events_per_gpu = n_events // n_gpus
+        crps_chunks = []
+        
+        print(f"🔄 多GPU CRPS計算: {n_events}個事件分散到{n_gpus}個GPU")
+        
+        for i, gpu_id in enumerate(self.gpu_devices):
+            # 計算此GPU處理的事件範圍
+            start_idx = i * events_per_gpu
+            if i == n_gpus - 1:
+                end_idx = n_events  # 最後一個GPU處理剩餘事件
+            else:
+                end_idx = (i + 1) * events_per_gpu
             
-            # 將事件分配到不同GPU
-            events_per_gpu = n_events // n_gpus
-            crps_chunks = []
-            
-            print(f"🔄 多GPU CRPS計算: {n_events}個事件分散到{n_gpus}個GPU")
-            
-            for i, gpu_id in enumerate(self.gpu_devices):
-                # 計算此GPU處理的事件範圍
-                start_idx = i * events_per_gpu
-                if i == n_gpus - 1:
-                    end_idx = n_events  # 最後一個GPU處理剩餘事件
+            # 在此GPU上進行CRPS計算
+            with torch.cuda.device(gpu_id):
+                device_name = f'cuda:{gpu_id}'
+                
+                # 移動數據到此GPU
+                obs_losses_gpu = observed_losses[start_idx:end_idx].to(device_name)
+                
+                # 提取此GPU對應的分佈參數
+                if 'dist' in payout_dist_params:
+                    # TODO: 處理分佈對象的GPU分割
+                    raise NotImplementedError("Multi-GPU with distribution objects not yet implemented")
                 else:
-                    end_idx = (i + 1) * events_per_gpu
+                    mu_log_gpu = payout_dist_params['mu_payout_log'][start_idx:end_idx].to(device_name)
+                    sigma_log_gpu = payout_dist_params['sigma_payout_log'][start_idx:end_idx].to(device_name)
+                    
+                    payout_params_gpu = {
+                        'mu_payout_log': mu_log_gpu,
+                        'sigma_payout_log': sigma_log_gpu
+                    }
                 
-                # 在此GPU上進行CRPS計算
-                with torch.cuda.device(gpu_id):
-                    device_name = f'cuda:{gpu_id}'
-                    
-                    # 移動數據到此GPU
-                    obs_losses_gpu = observed_losses[start_idx:end_idx].to(device_name)
-                    
-                    # 提取此GPU對應的分佈參數
-                    if 'dist' in payout_dist_params:
-                        # TODO: 處理分佈對象的GPU分割
-                        raise NotImplementedError("Multi-GPU with distribution objects not yet implemented")
-                    else:
-                        mu_log_gpu = payout_dist_params['mu_payout_log'][start_idx:end_idx].to(device_name)
-                        sigma_log_gpu = payout_dist_params['sigma_payout_log'][start_idx:end_idx].to(device_name)
-                        
-                        payout_params_gpu = {
-                            'mu_payout_log': mu_log_gpu,
-                            'sigma_payout_log': sigma_log_gpu
-                        }
-                    
-                    # 在此GPU上計算CRPS
-                    crps_chunk = self._compute_crps_single_gpu(obs_losses_gpu, payout_params_gpu, n_pred_samples)
-                    crps_chunks.append(crps_chunk.to(self.primary_device))
-                
-                print(f"  GPU {gpu_id}: 事件 {start_idx}-{end_idx-1}")
+                # 在此GPU上計算CRPS
+                crps_chunk = self._compute_crps_single_gpu(obs_losses_gpu, payout_params_gpu, n_pred_samples)
+                crps_chunks.append(crps_chunk.to(self.primary_device))
             
-            # 聚合所有GPU結果
-            crps_scores = torch.cat(crps_chunks, dim=0)
-            
-            print(f"✅ 多GPU CRPS計算完成: {crps_scores.shape[0]}個分數")
-            return crps_scores
+            print(f"  GPU {gpu_id}: 事件 {start_idx}-{end_idx-1}")
         
-        def benchmark_gpu_speedup(self, n_events: int = 1000, n_pred_samples: int = 100,
-                                n_trials: int = 5) -> Dict[str, float]:
-            """GPU加速效能基準測試"""
-            
-            print(f"🏃‍♂️ GPU CRPS計算效能基準測試:")
-            print(f"   事件數: {n_events}, 預測樣本數: {n_pred_samples}")
-            
-            # 生成測試數據
-            observed_losses = torch.rand(n_events) * 1e8
-            payout_dist_params = {
-                'mu_payout_log': torch.randn(n_events) + 16,  # log(1e7)左右
-                'sigma_payout_log': torch.ones(n_events) * 0.5
-            }
-            
-            # CPU基準測試
+        # 聚合所有GPU結果
+        crps_scores = torch.cat(crps_chunks, dim=0)
+        
+        print(f"✅ 多GPU CRPS計算完成: {crps_scores.shape[0]}個分數")
+        return crps_scores
+    
+    def benchmark_gpu_speedup(self, n_events: int = 1000, n_pred_samples: int = 100,
+                            n_trials: int = 5) -> Dict[str, float]:
+        """GPU加速效能基準測試"""
+        
+        print(f"🏃‍♂️ GPU CRPS計算效能基準測試:")
+        print(f"   事件數: {n_events}, 預測樣本數: {n_pred_samples}")
+        
+        # 生成測試數據
+        observed_losses = torch.rand(n_events) * 1e8
+        payout_dist_params = {
+            'mu_payout_log': torch.randn(n_events) + 16,  # log(1e7)左右
+            'sigma_payout_log': torch.ones(n_events) * 0.5
+        }
+        
+        # CPU基準測試
+        start_time = time.time()
+        for _ in range(n_trials):
+            _ = self._compute_crps_single_gpu(observed_losses, payout_dist_params, n_pred_samples)
+        cpu_time = (time.time() - start_time) / n_trials
+        
+        # GPU測試（如果可用）
+        gpu_time = cpu_time  # Fallback
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
             start_time = time.time()
             for _ in range(n_trials):
                 _ = self._compute_crps_single_gpu(observed_losses, payout_dist_params, n_pred_samples)
-            cpu_time = (time.time() - start_time) / n_trials
-            
-            # GPU測試（如果可用）
-            gpu_time = cpu_time  # Fallback
-            if torch.cuda.is_available():
-                torch.cuda.synchronize()
-                start_time = time.time()
-                for _ in range(n_trials):
-                    _ = self._compute_crps_single_gpu(observed_losses, payout_dist_params, n_pred_samples)
-                torch.cuda.synchronize()
-                gpu_time = (time.time() - start_time) / n_trials
-            
-            # 多GPU測試（如果可用）
-            multi_gpu_time = gpu_time  # Fallback
-            if self.use_multi_gpu:
-                torch.cuda.synchronize()
-                start_time = time.time()
-                for _ in range(n_trials):
-                    _ = self._compute_crps_multi_gpu(observed_losses, payout_dist_params, n_pred_samples)
-                torch.cuda.synchronize()
-                multi_gpu_time = (time.time() - start_time) / n_trials
-            
-            speedup_single = cpu_time / gpu_time if gpu_time > 0 else 1.0
-            speedup_multi = cpu_time / multi_gpu_time if multi_gpu_time > 0 else 1.0
-            
-            results = {
-                'cpu_time_sec': cpu_time,
-                'single_gpu_time_sec': gpu_time,
-                'multi_gpu_time_sec': multi_gpu_time,
-                'single_gpu_speedup': speedup_single,
-                'multi_gpu_speedup': speedup_multi,
-                'gpu_efficiency': speedup_multi / len(self.gpu_devices) if len(self.gpu_devices) > 1 else 1.0
-            }
-            
-            print(f"📊 基準測試結果:")
-            print(f"   CPU時間: {cpu_time:.4f}秒")
-            print(f"   單GPU時間: {gpu_time:.4f}秒 (加速{speedup_single:.2f}x)")
-            print(f"   多GPU時間: {multi_gpu_time:.4f}秒 (加速{speedup_multi:.2f}x)")
-            print(f"   GPU效率: {results['gpu_efficiency']:.2f}")
-            
-            return results
+            torch.cuda.synchronize()
+            gpu_time = (time.time() - start_time) / n_trials
+        
+        # 多GPU測試（如果可用）
+        multi_gpu_time = gpu_time  # Fallback
+        if self.use_multi_gpu:
+            torch.cuda.synchronize()
+            start_time = time.time()
+            for _ in range(n_trials):
+                _ = self._compute_crps_multi_gpu(observed_losses, payout_dist_params, n_pred_samples)
+            torch.cuda.synchronize()
+            multi_gpu_time = (time.time() - start_time) / n_trials
+        
+        speedup_single = cpu_time / gpu_time if gpu_time > 0 else 1.0
+        speedup_multi = cpu_time / multi_gpu_time if multi_gpu_time > 0 else 1.0
+        
+        results = {
+            'cpu_time_sec': cpu_time,
+            'single_gpu_time_sec': gpu_time,
+            'multi_gpu_time_sec': multi_gpu_time,
+            'single_gpu_speedup': speedup_single,
+            'multi_gpu_speedup': speedup_multi,
+            'gpu_efficiency': speedup_multi / len(self.gpu_devices) if len(self.gpu_devices) > 1 else 1.0
+        }
+        
+        print(f"📊 基準測試結果:")
+        print(f"   CPU時間: {cpu_time:.4f}秒")
+        print(f"   單GPU時間: {gpu_time:.4f}秒 (加速{speedup_single:.2f}x)")
+        print(f"   多GPU時間: {multi_gpu_time:.4f}秒 (加速{speedup_multi:.2f}x)")
+        print(f"   GPU效率: {results['gpu_efficiency']:.2f}")
+        
+        return results
     
     print("✅ GPU並行CRPS計算器定義完成")
 
@@ -1452,18 +1452,18 @@ def test_dual_gpu_performance():
     try:
         crps_computer = ParallelCRPSComputer(use_multi_gpu=USE_MULTI_GPU)
             
-            # 基準測試
-            speedup_results = crps_computer.benchmark_gpu_speedup(
-                n_events=500, n_pred_samples=100, n_trials=3
-            )
+        # 基準測試
+        speedup_results = crps_computer.benchmark_gpu_speedup(
+            n_events=500, n_pred_samples=100, n_trials=3
+        )
+        
+        print("\n📈 CRPS性能提升總結:")
+        print(f"   單GPU加速比: {speedup_results['single_gpu_speedup']:.2f}x")
+        print(f"   多GPU加速比: {speedup_results['multi_gpu_speedup']:.2f}x")
+        print(f"   多GPU效率: {speedup_results['gpu_efficiency']:.2f}")
             
-            print("\n📈 CRPS性能提升總結:")
-            print(f"   單GPU加速比: {speedup_results['single_gpu_speedup']:.2f}x")
-            print(f"   多GPU加速比: {speedup_results['multi_gpu_speedup']:.2f}x")
-            print(f"   多GPU效率: {speedup_results['gpu_efficiency']:.2f}")
-            
-        except Exception as e:
-            print(f"⚠️  CRPS性能測試出現錯誤: {e}")
+    except Exception as e:
+        print(f"⚠️  CRPS性能測試出現錯誤: {e}")
     
     # ==========================================
     # 2. 端到端訓練性能測試
@@ -1472,113 +1472,113 @@ def test_dual_gpu_performance():
     print(f"\n🧠 第二項測試: 端到端訓練GPU加速")
     
     try:
-            # 生成測試數據
-            n_hospitals = 20
-            n_events = 50
-            n_regions = 4
-            
-            print(f"   生成測試數據: {n_hospitals}家醫院, {n_events}個事件")
-            
-            # 模擬數據
-            hazard_intensities = torch.rand(n_hospitals, n_events) * 60 + 20  # 20-80 m/s
-            exposure_values = torch.rand(n_hospitals) * 5e7 + 1e7  # 10M-60M
-            gamma_dist = torch.distributions.Gamma(2.0, 1.0/5e6)
-            observed_losses = gamma_dist.sample((n_hospitals, n_events))
-            distance_matrix = torch.rand(n_hospitals, n_hospitals) * 100  # 0-100km
-            
-            # 產品配置
-            test_product_config = {
-                'trigger_threshold': 30.0,
-                'max_payout': 10e6,
-                'steepness': 0.1
-            }
-            
-            # 創建測試模型
-            test_model = UnifiedEndToEndVIModel(
-                n_hospitals=n_hospitals,
-                n_regions=n_regions, 
-                n_events=n_events,
-                distance_matrix=distance_matrix.numpy(),
-                product_config=test_product_config,
-                n_hbm_params=7
-            )
-            
-            print("   模型創建完成")
-            
-            # 測試不同GPU配置的訓練速度
-            configurations = [
-                ("CPU模式", False),
-                ("GPU模式", USE_MULTI_GPU and torch.cuda.is_available())
-            ]
-            
-            performance_results = {}
-            
-            for config_name, enable_gpu in configurations:
-                if config_name == "GPU模式" and not torch.cuda.is_available():
-                    print(f"   跳過{config_name}: GPU不可用")
-                    continue
-                    
-                print(f"\n   測試配置: {config_name}")
+        # 生成測試數據
+        n_hospitals = 20
+        n_events = 50
+        n_regions = 4
+        
+        print(f"   生成測試數據: {n_hospitals}家醫院, {n_events}個事件")
+        
+        # 模擬數據
+        hazard_intensities = torch.rand(n_hospitals, n_events) * 60 + 20  # 20-80 m/s
+        exposure_values = torch.rand(n_hospitals) * 5e7 + 1e7  # 10M-60M
+        gamma_dist = torch.distributions.Gamma(2.0, 1.0/5e6)
+        observed_losses = gamma_dist.sample((n_hospitals, n_events))
+        distance_matrix = torch.rand(n_hospitals, n_hospitals) * 100  # 0-100km
+        
+        # 產品配置
+        test_product_config = {
+            'trigger_threshold': 30.0,
+            'max_payout': 10e6,
+            'steepness': 0.1
+        }
+        
+        # 創建測試模型
+        test_model = UnifiedEndToEndVIModel(
+            n_hospitals=n_hospitals,
+            n_regions=n_regions, 
+            n_events=n_events,
+            distance_matrix=distance_matrix.numpy(),
+            product_config=test_product_config,
+            n_hbm_params=7
+        )
+        
+        print("   模型創建完成")
+        
+        # 測試不同GPU配置的訓練速度
+        configurations = [
+            ("CPU模式", False),
+            ("GPU模式", USE_MULTI_GPU and torch.cuda.is_available())
+        ]
+        
+        performance_results = {}
+        
+        for config_name, enable_gpu in configurations:
+            if config_name == "GPU模式" and not torch.cuda.is_available():
+                print(f"   跳過{config_name}: GPU不可用")
+                continue
                 
-                try:
-                    # 創建訓練器
-                    trainer = EndToEndTrainer(
-                        test_model, 
-                        learning_rate=0.01,
-                        enable_multi_gpu=enable_gpu
+            print(f"\n   測試配置: {config_name}")
+            
+            try:
+                # 創建訓練器
+                trainer = EndToEndTrainer(
+                    test_model, 
+                    learning_rate=0.01,
+                    enable_multi_gpu=enable_gpu
+                )
+                
+                # 執行少量epoch測試
+                n_test_epochs = 3
+                epoch_times = []
+                
+                for epoch in range(n_test_epochs):
+                    start_time = time.time()
+                    
+                    loss_dict = trainer.train_epoch(
+                        hazard_intensities, exposure_values, 
+                        observed_losses.mean(dim=1),  # 平均損失
+                        n_samples=5  # 減少樣本數以加快測試
                     )
                     
-                    # 執行少量epoch測試
-                    n_test_epochs = 3
-                    epoch_times = []
+                    epoch_time = time.time() - start_time
+                    epoch_times.append(epoch_time)
                     
-                    for epoch in range(n_test_epochs):
-                        start_time = time.time()
-                        
-                        loss_dict = trainer.train_epoch(
-                            hazard_intensities, exposure_values, 
-                            observed_losses.mean(dim=1),  # 平均損失
-                            n_samples=5  # 減少樣本數以加快測試
-                        )
-                        
-                        epoch_time = time.time() - start_time
-                        epoch_times.append(epoch_time)
-                        
-                        print(f"     Epoch {epoch+1}: {epoch_time:.3f}秒, Loss: {loss_dict['total_loss']:.3f}")
-                    
-                    avg_epoch_time = np.mean(epoch_times)
-                    performance_results[config_name] = {
-                        'avg_epoch_time': avg_epoch_time,
-                        'total_time': sum(epoch_times)
-                    }
-                    
-                    # 獲取性能統計
-                    perf_stats = trainer.get_performance_stats()
-                    print(f"     平均epoch時間: {avg_epoch_time:.3f}秒")
-                    if 'gpu_memory_mb' in perf_stats:
-                        print(f"     GPU記憶體使用: {perf_stats['gpu_memory_mb']['current']}MB")
-                    
-                except Exception as e:
-                    print(f"     ❌ {config_name}測試失敗: {e}")
-            
-            # 性能比較
-            if len(performance_results) >= 2:
-                cpu_time = performance_results.get("CPU模式", {}).get('avg_epoch_time', 0)
-                gpu_time = performance_results.get("GPU模式", {}).get('avg_epoch_time', 0)
+                    print(f"     Epoch {epoch+1}: {epoch_time:.3f}秒, Loss: {loss_dict['total_loss']:.3f}")
                 
-                if cpu_time > 0 and gpu_time > 0:
-                    training_speedup = cpu_time / gpu_time
-                    print(f"\n🚀 訓練加速比: {training_speedup:.2f}x")
+                avg_epoch_time = np.mean(epoch_times)
+                performance_results[config_name] = {
+                    'avg_epoch_time': avg_epoch_time,
+                    'total_time': sum(epoch_times)
+                }
+                
+                # 獲取性能統計
+                perf_stats = trainer.get_performance_stats()
+                print(f"     平均epoch時間: {avg_epoch_time:.3f}秒")
+                if 'gpu_memory_mb' in perf_stats:
+                    print(f"     GPU記憶體使用: {perf_stats['gpu_memory_mb']['current']}MB")
+                
+            except Exception as e:
+                print(f"     ❌ {config_name}測試失敗: {e}")
+        
+        # 性能比較
+        if len(performance_results) >= 2:
+            cpu_time = performance_results.get("CPU模式", {}).get('avg_epoch_time', 0)
+            gpu_time = performance_results.get("GPU模式", {}).get('avg_epoch_time', 0)
+            
+            if cpu_time > 0 and gpu_time > 0:
+                training_speedup = cpu_time / gpu_time
+                print(f"\n🚀 訓練加速比: {training_speedup:.2f}x")
+                
+                if training_speedup > 1.5:
+                    print("   ✅ 顯著的GPU加速效果！")
+                elif training_speedup > 1.1:
+                    print("   ⚠️  中等GPU加速效果")
+                else:
+                    print("   ❌ GPU加速效果不明顯")
                     
-                    if training_speedup > 1.5:
-                        print("   ✅ 顯著的GPU加速效果！")
-                    elif training_speedup > 1.1:
-                        print("   ⚠️  中等GPU加速效果")
-                    else:
-                        print("   ❌ GPU加速效果不明顯")
-                        
-        except Exception as e:
-            print(f"⚠️  端到端訓練測試出現錯誤: {e}")
+    except Exception as e:
+        print(f"⚠️  端到端訓練測試出現錯誤: {e}")
     
     # ==========================================
     # 3. 記憶體使用分析
@@ -1666,84 +1666,80 @@ class PriorLikelihoodProcessor:
                     2.0    # 額外參數
                 ][:n_params])
                 
-            elif prior_scenario == PriorScenario.WEAK_INFORMATIVE:
-                # 弱信息先驗: 以Emanuel值為中心，中等方差
-                mu_prior = torch.tensor([
-                    0.0,           # log σ_α 
-                    0.0,           # log σ_β 
-                    0.0,           # log σ_δ 
-                    1.0,           # log ρ_spatial (默認10km相關長度)
-                    emanuel_a_log, # log(vulnerability_a) - Emanuel參考
-                    emanuel_b_log, # log(vulnerability_b) - Emanuel參考  
-                    np.log(1e6),   # log(sigma_obs) - 默認觀測誤差
-                    emanuel_v0_log,# log(v_threshold) - Emanuel參考
-                    0.0            # 額外參數
-                ][:n_params])
+        elif prior_scenario == PriorScenario.WEAK_INFORMATIVE:
+            # 弱信息先驗: 以Emanuel值為中心，中等方差
+            mu_prior = torch.tensor([
+                0.0,           # log σ_α 
+                0.0,           # log σ_β 
+                0.0,           # log σ_δ 
+                1.0,           # log ρ_spatial (默認10km相關長度)
+                emanuel_a_log, # log(vulnerability_a) - Emanuel參考
+                emanuel_b_log, # log(vulnerability_b) - Emanuel參考  
+                np.log(1e6),   # log(sigma_obs) - 默認觀測誤差
+                emanuel_v0_log,# log(v_threshold) - Emanuel參考
+                0.0            # 額外參數
+            ][:n_params])
+            
+            sigma_prior = torch.tensor([
+                2.0,   # 層次效應可有中等變化
+                2.0, 
+                2.0,
+                1.0,   # 空間相關性
+                1.5,   # a參數允許較大變化
+                1.0,   # b參數相對穩定  
+                2.0,   # 觀測誤差變化
+                0.8,   # v₀在Emanuel基礎上中等變化
+                1.5    # 額外參數
+            ][:n_params])
+            
+        elif prior_scenario == PriorScenario.OPTIMISTIC:
+            # 樂觀先驗: 期望較低的脆弱度（較小的a, b）
+            mu_prior = torch.tensor([
+                -0.5,          # 較小的層次效應
+                -0.5, 
+                -0.5,
+                1.5,           # 更強的空間相關性
+                emanuel_a_log - 0.5,  # a偏小 (更樂觀)
+                emanuel_b_log - 0.3,  # b偏小 (更樂觀)
+                np.log(8e5),   # 較小的觀測誤差
+                emanuel_v0_log + 0.2, # v₀偏高 (需更強風才損失)
+                -0.5           # 樂觀額外效應
+            ][:n_params])
+            
+            sigma_prior = torch.tensor([
+                1.5, 1.5, 1.5, 0.8,  # 層次和空間效應
+                1.2,   # a的不確定性
+                0.8,   # b相對確定
+                1.8,   # 觀測誤差
+                0.6,   # v₀變化較小
+                1.2    # 額外參數
+            ][:n_params])
+            
+        elif prior_scenario == PriorScenario.PESSIMISTIC:
+            # 悲觀先驗: 期望較高的脆弱度（較大的a, b）
+            mu_prior = torch.tensor([
+                0.3,           # 較大的層次效應
+                0.3,
+                0.3, 
+                0.8,           # 較弱的空間相關性
+                emanuel_a_log + 0.4,  # a偏大 (更悲觀)
+                emanuel_b_log + 0.2,  # b偏大 (更悲觀)
+                np.log(1.2e6), # 較大的觀測誤差
+                emanuel_v0_log - 0.15,# v₀偏低 (較弱風就損失)
+                0.3            # 悲觀額外效應
+            ][:n_params])
+            
+            sigma_prior = torch.tensor([
+                2.0, 2.0, 2.0, 1.2,  # 更大的層次效應不確定性
+                1.8,   # a的較大不確定性  
+                1.2,   # b的中等不確定性
+                2.5,   # 較大觀測誤差不確定性
+                0.9,   # v₀的中等變化
+                1.8    # 額外參數不確定性
+            ][:n_params])
                 
-                sigma_prior = torch.tensor([
-                    2.0,   # 層次效應可有中等變化
-                    2.0, 
-                    2.0,
-                    1.0,   # 空間相關性
-                    1.5,   # a參數允許較大變化
-                    1.0,   # b參數相對穩定  
-                    2.0,   # 觀測誤差變化
-                    0.8,   # v₀在Emanuel基礎上中等變化
-                    1.5    # 額外參數
-                ][:n_params])
-                
-            elif prior_scenario == PriorScenario.OPTIMISTIC:
-                # 樂觀先驗: 期望較低的脆弱度（較小的a, b）
-                mu_prior = torch.tensor([
-                    -0.5,          # 較小的層次效應
-                    -0.5, 
-                    -0.5,
-                    1.5,           # 更強的空間相關性
-                    emanuel_a_log - 0.5,  # a偏小 (更樂觀)
-                    emanuel_b_log - 0.3,  # b偏小 (更樂觀)
-                    np.log(8e5),   # 較小的觀測誤差
-                    emanuel_v0_log + 0.2, # v₀偏高 (需更強風才損失)
-                    -0.5           # 樂觀額外效應
-                ][:n_params])
-                
-                sigma_prior = torch.tensor([
-                    1.5, 1.5, 1.5, 0.8,  # 層次和空間效應
-                    1.2,   # a的不確定性
-                    0.8,   # b相對確定
-                    1.8,   # 觀測誤差
-                    0.6,   # v₀變化較小
-                    1.2    # 額外參數
-                ][:n_params])
-                
-            elif prior_scenario == PriorScenario.PESSIMISTIC:
-                # 悲觀先驗: 期望較高的脆弱度（較大的a, b）
-                mu_prior = torch.tensor([
-                    0.3,           # 較大的層次效應
-                    0.3,
-                    0.3, 
-                    0.8,           # 較弱的空間相關性
-                    emanuel_a_log + 0.4,  # a偏大 (更悲觀)
-                    emanuel_b_log + 0.2,  # b偏大 (更悲觀)
-                    np.log(1.2e6), # 較大的觀測誤差
-                    emanuel_v0_log - 0.15,# v₀偏低 (較弱風就損失)
-                    0.3            # 悲觀額外效應
-                ][:n_params])
-                
-                sigma_prior = torch.tensor([
-                    2.0, 2.0, 2.0, 1.2,  # 更大的層次效應不確定性
-                    1.8,   # a的較大不確定性  
-                    1.2,   # b的中等不確定性
-                    2.5,   # 較大觀測誤差不確定性
-                    0.9,   # v₀的中等變化
-                    1.8    # 額外參數不確定性
-                ][:n_params])
-                
-            else:
-                raise ValueError(f"未知的先驗情境: {prior_scenario}")
         else:
-            # PyTorch不可用時的fallback
-            mu_prior = [0.0] * n_params
-            sigma_prior = [2.0] * n_params
+            raise ValueError(f"未知的先驗情境: {prior_scenario}")
             
         return {
             'mu_prior': mu_prior,
@@ -1953,10 +1949,10 @@ class ModelConfiguration:
         ]
 
 class EndToEndTrainer:
-        """端到端訓練器 - GPU-Accelerated Version"""
+    """端到端訓練器 - GPU-Accelerated Version"""
         
-        def __init__(self, model: UnifiedEndToEndVIModel, learning_rate: float = 0.001,
-                     enable_multi_gpu: bool = USE_MULTI_GPU):
+    def __init__(self, model: UnifiedEndToEndVIModel, learning_rate: float = 0.001,
+                    enable_multi_gpu: bool = USE_MULTI_GPU):
         self.original_model = model
         self.enable_multi_gpu = enable_multi_gpu and USE_MULTI_GPU
         
