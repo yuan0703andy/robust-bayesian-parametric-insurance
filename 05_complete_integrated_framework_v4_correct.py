@@ -59,9 +59,13 @@ from robust_hierarchical_bayesian_simulation.robust_priors import (
     run_basic_contamination_workflow
 )
 
-# 階段3: 階層建模
+# 階段3: 階層建模 - 使用新的PyTorch風險大腦
+from robust_hierarchical_bayesian_simulation.hierarchical_modeling.pytorch_core_model import (
+    PyTorchHierarchicalBayesianModel,
+    PyTorchHBMIntegrationAdapter,
+    create_pytorch_hbm_model
+)
 from robust_hierarchical_bayesian_simulation import (
-    ParametricHierarchicalModel,
     build_hierarchical_model,
     validate_model_inputs,
     get_portfolio_loss_predictions

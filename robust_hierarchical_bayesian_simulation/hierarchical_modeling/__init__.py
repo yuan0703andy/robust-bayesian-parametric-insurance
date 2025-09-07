@@ -46,6 +46,20 @@ except ImportError:
     ParametricHierarchicalModel = None
     CORE_MODEL_AVAILABLE = False
 
+# PyTorch階層模型
+try:
+    from .pytorch_core_model import (
+        PyTorchHierarchicalBayesianModel,
+        PyTorchHBMIntegrationAdapter,
+        create_pytorch_hbm_model
+    )
+    PYTORCH_HBM_AVAILABLE = True
+except ImportError:
+    PyTorchHierarchicalBayesianModel = None
+    PyTorchHBMIntegrationAdapter = None
+    create_pytorch_hbm_model = None
+    PYTORCH_HBM_AVAILABLE = False
+
 try:
     from .hierarchical_model_builder import (
         build_hierarchical_model,

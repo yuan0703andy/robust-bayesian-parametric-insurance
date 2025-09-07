@@ -67,7 +67,7 @@ class PyTorchHierarchicalBayesianModel(nn.Module):
     """
     
     def __init__(self, 
-                 model_spec: 'ModelSpec',
+                 model_spec,  # 移除類型提示避免循環導入
                  n_hospitals: int = 100,
                  n_events: int = 1000,
                  device: Optional[torch.device] = None):
@@ -347,12 +347,12 @@ class PyTorchHierarchicalBayesianModel(nn.Module):
                            X: torch.Tensor, 
                            n_samples: int = 1000) -> torch.Tensor:
         """
-        預測分布生成方法 - 與BasisRiskAwareVI兼容
+        預測分布生成方法 - 與BasisRiskAwareVI兼容，支援梯度計算
         
         Parameters:
         -----------
         theta : torch.Tensor  
-            參數向量 (來自VI優化)
+            參數向量 (來自VI優化)，支援梯度
         X : torch.Tensor
             輸入特徵 [hazard_intensities, exposure_values]
         n_samples : int
@@ -361,67 +361,71 @@ class PyTorchHierarchicalBayesianModel(nn.Module):
         Returns:
         --------
         torch.Tensor
-            預測樣本 (n_samples, n_hospitals, n_events)
+            預測樣本 (n_samples, n_hospitals, n_events)，保持梯度連接
         """
         
-        # 確保在評估模式
-        self.eval()
+        # 設置為訓練模式以啟用梯度
+        self.train()
         
-        with torch.no_grad():
-            # 解析輸入
-            hazard_intensities = X[0]  # (n_hospitals, n_events)
-            exposure_values = X[1]     # (n_hospitals,)
+        # 移除 torch.no_grad() 以保持梯度流
+        # 解析輸入
+        hazard_intensities = X[0]  # (n_hospitals, n_events)
+        exposure_values = X[1]     # (n_hospitals,)
+        
+        # 確保張量在正確設備上並保持梯度
+        hazard_intensities = hazard_intensities.to(self.device)
+        exposure_values = exposure_values.to(self.device)
+        
+        # 如果提供了theta參數，更新模型參數
+        if theta is not None:
+            self._update_parameters_from_theta(theta)
+        
+        # 生成多個樣本
+        samples = []
+        for _ in range(n_samples):
+            expected_loss = self.forward(hazard_intensities, exposure_values)
             
-            # 確保張量在正確設備上
-            hazard_intensities = hazard_intensities.to(self.device)
-            exposure_values = exposure_values.to(self.device)
+            # 添加觀測噪聲但保持梯度
+            sigma = torch.abs(self.observation_sigma)
+            if self.model_spec.likelihood_family == LikelihoodFamily.NORMAL:
+                sample = torch.normal(expected_loss, sigma)
+            elif self.model_spec.likelihood_family == LikelihoodFamily.LOGNORMAL:
+                log_expected = torch.log(torch.clamp(expected_loss, min=1e-6))
+                sample = torch.distributions.LogNormal(log_expected, sigma).sample()
+            else:
+                sample = torch.normal(expected_loss, sigma)
             
-            # 如果提供了theta參數，更新模型參數
-            if theta is not None:
-                self._update_parameters_from_theta(theta)
-            
-            # 生成多個樣本
-            samples = []
-            for _ in range(n_samples):
-                expected_loss = self.forward(hazard_intensities, exposure_values)
-                
-                # 添加觀測噪聲
-                sigma = torch.abs(self.observation_sigma)
-                if self.model_spec.likelihood_family == LikelihoodFamily.NORMAL:
-                    sample = torch.normal(expected_loss, sigma)
-                elif self.model_spec.likelihood_family == LikelihoodFamily.LOGNORMAL:
-                    log_expected = torch.log(torch.clamp(expected_loss, min=1e-6))
-                    sample = torch.distributions.LogNormal(log_expected, sigma).sample()
-                else:
-                    sample = torch.normal(expected_loss, sigma)
-                
-                samples.append(sample)
-            
-            return torch.stack(samples, dim=0)  # (n_samples, n_hospitals, n_events)
+            samples.append(sample)
+        
+        return torch.stack(samples, dim=0)  # (n_samples, n_hospitals, n_events)
     
     def _update_parameters_from_theta(self, theta: torch.Tensor):
-        """從theta向量更新模型參數"""
+        """從theta向量更新模型參數，保持梯度連接"""
         
-        # 確保theta在正確設備上
+        # 確保theta在正確設備上並保持梯度
         theta = theta.to(self.device)
         
-        # 這個方法需要根據具體的參數化方案實現
-        # 這裡提供一個簡化版本
-        with torch.no_grad():
-            # 假設theta包含主要的脆弱度參數
-            if len(theta) >= 2:
-                if hasattr(self, 'vuln_a'):
-                    self.vuln_a.data = theta[0]
-                if hasattr(self, 'vuln_b'):
-                    self.vuln_b.data = theta[1]
-                    
-                # 如果有更多參數
-                if len(theta) > 2 and hasattr(self, 'vuln_c'):
-                    self.vuln_c.data = theta[2]
-                    
-                # 更新觀測噪聲
-                if len(theta) > 3:
-                    self.observation_sigma.data = torch.abs(theta[3])
+        # 移除 torch.no_grad() 以保持梯度流
+        # 假設theta包含主要的脆弱度參數和階層參數
+        if len(theta) >= 2:
+            if hasattr(self, 'vuln_a'):
+                self.vuln_a.data = theta[0].data  # 只更新data，保持Parameter性質
+            if hasattr(self, 'vuln_b'):
+                self.vuln_b.data = theta[1].data
+                
+            # 如果有更多參數
+            if len(theta) > 2 and hasattr(self, 'vuln_c'):
+                self.vuln_c.data = theta[2].data
+                
+            # 更新觀測噪聲
+            if len(theta) > 3:
+                self.observation_sigma.data = torch.abs(theta[3]).data
+                
+            # 更新階層參數（如果theta足夠長）
+            if len(theta) > 4:
+                self.global_alpha_mean.data = theta[4].data
+            if len(theta) > 5:
+                self.global_alpha_std.data = torch.abs(theta[5]).data
     
     def get_parameter_dict(self) -> Dict[str, torch.Tensor]:
         """獲取所有模型參數的字典"""
@@ -546,14 +550,14 @@ class PyTorchHBMIntegrationAdapter:
     def predict_distribution(self, 
                            theta: Union[np.ndarray, torch.Tensor],
                            X: List[Union[np.ndarray, torch.Tensor]], 
-                           n_samples: int = 1000) -> np.ndarray:
+                           n_samples: int = 1000) -> torch.Tensor:
         """
-        與BasisRiskAwareVI兼容的預測接口
+        與BasisRiskAwareVI兼容的預測接口 - 支援梯度計算
         
         Parameters:
         -----------
         theta : array-like
-            參數向量
+            參數向量，支援梯度
         X : list
             輸入特徵 [hazard_intensities, exposure_values]
         n_samples : int
@@ -561,15 +565,15 @@ class PyTorchHBMIntegrationAdapter:
             
         Returns:
         --------
-        np.ndarray
-            預測樣本
+        torch.Tensor
+            預測樣本，保持梯度連接
         """
         
-        # 轉換輸入為PyTorch張量
+        # 轉換輸入為PyTorch張量並保持梯度
         if isinstance(theta, np.ndarray):
-            theta = torch.from_numpy(theta).float().to(self.device)
+            theta = torch.from_numpy(theta).float().to(self.device).requires_grad_(True)
         elif isinstance(theta, torch.Tensor):
-            theta = theta.to(self.device)
+            theta = theta.to(self.device).requires_grad_(True)
         
         # 轉換特徵
         X_tensors = []
@@ -582,12 +586,14 @@ class PyTorchHBMIntegrationAdapter:
                 x_tensor = torch.tensor(x).float().to(self.device)
             X_tensors.append(x_tensor)
         
-        # 調用PyTorch模型的預測方法
-        with torch.no_grad():
-            predictions = self.pytorch_model.predict_distribution(theta, X_tensors, n_samples)
+        # 設置為訓練模式以啟用梯度
+        self.pytorch_model.train()
+        
+        # 調用PyTorch模型的預測方法 - 移除torch.no_grad()以保持梯度流
+        predictions = self.pytorch_model.predict_distribution(theta, X_tensors, n_samples)
             
-        # 轉換回numpy格式
-        return predictions.cpu().numpy()
+        # 返回PyTorch張量保持梯度連接
+        return predictions
     
     def get_model_summary(self) -> Dict[str, Any]:
         """獲取模型摘要信息"""
@@ -608,7 +614,7 @@ class PyTorchHBMIntegrationAdapter:
         }
 
 
-def create_pytorch_hbm_model(model_spec: 'ModelSpec', 
+def create_pytorch_hbm_model(model_spec, 
                            n_hospitals: int = 100, 
                            n_events: int = 1000) -> PyTorchHBMIntegrationAdapter:
     """
