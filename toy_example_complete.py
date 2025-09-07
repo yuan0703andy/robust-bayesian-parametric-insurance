@@ -2400,7 +2400,7 @@ def stage3_run_model_matrix(generator: ToyDataGenerator,
         model.to_multi_gpu()
         print(f"✅ 模型已移動到設備: {device}")
         
-        trainer = EndToEndTrainer(model, learning_rate=0.01)
+        trainer = EndToEndTrainer(model, learning_rate=0.001)
         print(f"🏋️ 開始訓練 ({n_epochs} epochs)...")
         best_test_elbo = float('-inf')
         for epoch in range(n_epochs):
@@ -2490,7 +2490,7 @@ def run_complete_analysis():
     # ========================================================================
     # 階段3: 測試不同模型配置和保險產品
     # ========================================================================
-    results = stage3_run_model_matrix(generator, spatial_data, split, n_epochs=30)
+    results = stage3_run_model_matrix(generator, spatial_data, split, n_epochs=200)
 
     # ========================================================================
     # 階段4: 完整Prior/Likelihood組合結果分析
