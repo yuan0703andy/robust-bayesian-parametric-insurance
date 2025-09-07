@@ -2664,6 +2664,29 @@ def run_complete_analysis():
         product_config = product_configs[0]  # 使用Multi-Level產品進行比較
         print(f"\n💰 保險產品: {product_config['name']}")
         
+        # 檢查並創建必要的變量
+        if 'generator' not in locals() and 'generator' not in globals():
+            print("⚠️  generator未定義，創建默認數據生成器...")
+            generator = ToyDataGenerator(n_hospitals=15, n_events=30, n_regions=3)
+            
+            # 生成基礎數據
+            climada_data = generator.generate_climada_data()
+            spatial_data = generator.generate_spatial_data(climada_data.hospital_coords)
+            
+            # 創建訓練數據
+            n_events = climada_data.n_events
+            n_train = int(0.7 * n_events)
+            event_indices = np.random.permutation(n_events)
+            train_indices = event_indices[:n_train]
+            
+            train_hazards = torch.tensor(climada_data.hazard_intensities[:, train_indices], 
+                                        dtype=torch.float32)
+            train_losses = torch.tensor(climada_data.observed_losses[:, train_indices],
+                                       dtype=torch.float32)
+            exposure_tensor = torch.tensor(climada_data.exposure_values, dtype=torch.float32)
+            
+            print(f"✅ 自動生成數據: {generator.n_hospitals}家醫院, {train_hazards.shape[1]}個訓練事件")
+        
         # 初始化端到端模型 - 傳遞完整的Prior/Likelihood參數
         model = UnifiedEndToEndVIModel(
             n_hospitals=generator.n_hospitals,
