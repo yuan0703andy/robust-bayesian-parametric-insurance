@@ -585,38 +585,42 @@ class DifferentiableHierarchicalBayesianModel(nn.Module):
         def _sample_spatial_effects(self, params: Dict[str, torch.Tensor],
                                    batch_size: int) -> torch.Tensor:
             """
-            採樣空間結構化隨機效應 - 改進版本使用Matern核提高穩定性
-            
-            使用Matern協方差函數 (ν=1.5): 
-            Σ(d_ij) = σ_δ² * (1 + √3*d_ij/ρ) * exp(-√3*d_ij/ρ)
-            
-            Matern核比指數核更穩健，因為：
-            1. 微分性：Matern(ν=1.5)一次可微，而指數核不可微
-            2. 數值穩定性：避免極端的短程相關
-            3. 靈活性：參數ν控制平滑度
-            
-            Args:
-                params: 包含sigma_delta和rho_spatial的參數字典
-                batch_size: 批次大小
-                
-            Returns:
-                spatial_effects: (batch_size, n_hospitals) 空間效應張量
+            無協方差分解版的空間效應採樣：
+            δ = σ_δ * W_norm @ ε，其中 W_ij = exp(-d_ij / ρ)，再做
+              1) 列和歸一 (row-normalize)、
+              2) 每列 L2 規範化，令 Var(δ_i) ≈ σ_δ^2。
+            避免 Cholesky / MVN，數值穩定且可微。
+            返回: (batch_size, n_hospitals)
             """
-            sigma_delta = params['sigma_delta']  # 空間標準差
-            rho_spatial = params['rho_spatial']  # 空間相關範圍 (km)
-            
-            spatial_effects = []
+            device = self.distance_matrix.device
+            D = self.distance_matrix  # (H, H)
+            H = self.n_hospitals
+
+            # 參數保護
+            sigma_delta = torch.clamp(params['sigma_delta'], min=1e-6)               # (B,)
+            rho_spatial = torch.clamp(params['rho_spatial'], min=1e-3, max=1e4)      # (B,)
+
+            effects = []
             for b in range(batch_size):
-                # 構建Matern協方差矩陣 (ν=1.5)
-                cov_matrix = self._compute_matern_covariance(
-                    self.distance_matrix, sigma_delta[b], rho_spatial[b], nu=1.5
-                )
-                
-                # 多變量正態採樣 δ ~ MVN(0, Σ)
-                spatial_effect = self._sample_from_covariance(cov_matrix, sigma_delta[b])
-                spatial_effects.append(spatial_effect)
-            
-            return torch.stack(spatial_effects)
+                rho = rho_spatial[b]
+                # 距離衰減權重
+                W = torch.exp(- D / rho).to(device)
+                # 主對角保底（自身權重）
+                W.fill_diagonal_(1.0)
+                # 列和歸一化
+                row_sum = W.sum(dim=1, keepdim=True).clamp_min(1e-8)
+                Wn = W / row_sum
+                # 每列 L2 規範化
+                l2 = torch.sqrt((Wn ** 2).sum(dim=1, keepdim=True)).clamp_min(1e-8)
+                Wn = Wn / l2
+                # 抽 i.i.d 噪聲並平滑
+                eps = torch.randn(H, device=device)
+                delta = sigma_delta[b] * (Wn @ eps)
+                # 清理數值
+                delta = torch.nan_to_num(delta, nan=0.0, posinf=0.0, neginf=0.0)
+                effects.append(delta)
+
+            return torch.stack(effects)
         
         def _compute_matern_covariance(self, distance_matrix: torch.Tensor, 
                                      sigma_delta: torch.Tensor, 
