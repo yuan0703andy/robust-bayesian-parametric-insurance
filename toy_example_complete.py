@@ -392,7 +392,7 @@ class DifferentiableHierarchicalBayesianModel(nn.Module):
             
             # Level 1: 觀測層 - 損失預測
             loss_distribution_params = self._compute_loss_predictions(
-                hazard_intensities, exposure_values, vulnerability_params, params
+                hazard_intensities, exposure_values, vulnerability_params, params, region_assignments
             )
             
             return loss_distribution_params
@@ -640,7 +640,8 @@ class DifferentiableHierarchicalBayesianModel(nn.Module):
         def _compute_loss_predictions(self, hazard_intensities: torch.Tensor,
                                         exposure_values: torch.Tensor,
                                         vulnerability_params: torch.Tensor,
-                                        params: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+                                        params: Dict[str, torch.Tensor],
+                                        region_assignments: torch.Tensor = None) -> Dict[str, torch.Tensor]:
             """
             Level 1: 計算損失預測分佈參數
             
@@ -667,7 +668,13 @@ class DifferentiableHierarchicalBayesianModel(nn.Module):
             for b in range(batch_size):
                 # 每個樣本可能有不同的閾值
                 v_thresh_b = v_threshold[b] if v_threshold.dim() > 0 else v_threshold
-                hazard_excess = torch.clamp(hazard_intensities - v_thresh_b, min=0.0)
+                # 對齊維度：保證風險強度按醫院維度排列
+                if hazard_intensities.shape[0] == self.n_regions and region_assignments is not None:
+                    # 將區域層風險提升至醫院層
+                    hi_by_hospital = hazard_intensities.index_select(0, region_assignments)
+                else:
+                    hi_by_hospital = hazard_intensities
+                hazard_excess = torch.clamp(hi_by_hospital - v_thresh_b, min=0.0)
                 normalized_excess = hazard_excess / v_thresh_b
                 hazard_excess_batch.append(hazard_excess)
                 normalized_excess_batch.append(normalized_excess)
