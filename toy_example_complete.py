@@ -30,6 +30,7 @@ from enum import Enum
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 from torch.distributions import Normal, LogNormal, StudentT
 print("✅ PyTorch已成功導入")
@@ -336,56 +337,7 @@ print("✅ 數據生成器定義完成")
 # 檢查PyTorch可用性
 print("🧠 開始定義四層階層貝氏模型...")
 
-class PriorLikelihoodProcessor:
-        """Prior/Likelihood處理器 - 將配置轉換為實際的數學實現"""
-        
-        @staticmethod
-        def get_prior_parameters(prior_scenario: 'PriorScenario', n_params: int = 9) -> Dict[str, Any]:
-            """
-            根據先驗情境獲取先驗參數 - 改進版本支持更靈活的a, b, v₀學習
-            
-            擴展參數空間:
-            - theta[0-3]: 層次效應參數 (log σ_α, log σ_β, log σ_δ, log ρ_spatial)
-            - theta[4]: log(vulnerability_a) - Emanuel函數的風險係數  
-            - theta[5]: log(vulnerability_b) - Emanuel函數的指數
-            - theta[6]: log(sigma_obs) - 觀測誤差
-            - theta[7]: log(v_threshold) - 可學習的閾值風速v₀
-            - theta[8]: 額外污染參數或其他擴展
-            
-            Returns:
-                Dict with 'mu_prior' and 'sigma_prior' for N(μ, σ²I)
-            """
-            # Emanuel 2011的歷史參考值: a=0.0039, b=2.04, v₀=25.7 m/s
-            emanuel_a_log = np.log(0.0039)  # ≈ -5.54
-            emanuel_b_log = np.log(2.04)    # ≈ 0.71
-            emanuel_v0_log = np.log(25.7)   # ≈ 3.25
-            
-            # 簡化的先驗配置
-            if hasattr(prior_scenario, 'value'):
-                scenario_name = prior_scenario.value
-            else:
-                scenario_name = str(prior_scenario)
-                
-            # 基於情境的先驗參數
-            if 'NON_INFORMATIVE' in scenario_name.upper():
-                # 非信息先驗: 極大方差
-                mu_prior = torch.zeros(n_params)
-                sigma_prior = torch.ones(n_params) * 3.0
-            elif 'WEAK_INFORMATIVE' in scenario_name.upper():
-                # 弱信息先驗: 以Emanuel值為中心
-                mu_values = [0.0, 0.0, 0.0, 1.0, emanuel_a_log, emanuel_b_log, np.log(1e6), emanuel_v0_log, 0.0]
-                sigma_values = [2.0, 2.0, 2.0, 1.0, 1.5, 1.0, 2.0, 1.0, 1.5]
-                mu_prior = torch.tensor(mu_values[:n_params])
-                sigma_prior = torch.tensor(sigma_values[:n_params])
-            else:
-                # 默認配置
-                mu_prior = torch.zeros(n_params)
-                sigma_prior = torch.ones(n_params) * 2.0
-                
-            return {
-                'mu_prior': mu_prior,
-                'sigma_prior': sigma_prior
-            }
+## 移除早期占位的 PriorLikelihoodProcessor，保留後續完整實現
 class DifferentiableHierarchicalBayesianModel(nn.Module):
         """可微分的4層階層貝氏模型 - 「風險大腦」"""
         
@@ -456,22 +408,22 @@ class DifferentiableHierarchicalBayesianModel(nn.Module):
             """
             # 基礎參數 (使用softplus確保正值)
             parsed_params = {
-                'sigma_alpha': torch.softplus(theta_samples[:, 0]),      # 區域效應標準差
-                'sigma_gamma': torch.softplus(theta_samples[:, 1]),      # 個體效應標準差  
-                'sigma_delta': torch.softplus(theta_samples[:, 2]),      # 空間效應標準差
-                'rho_spatial': torch.softplus(theta_samples[:, 3]),      # 空間相關範圍
-                'vulnerability_a': torch.softplus(theta_samples[:, 4]),  # Emanuel參數a
-                'vulnerability_b': torch.softplus(theta_samples[:, 5]),  # Emanuel參數b
-                'sigma_obs_base': torch.softplus(theta_samples[:, 6])    # 基礎觀測誤差
+                'sigma_alpha': F.softplus(theta_samples[:, 0]),      # 區域效應標準差
+                'sigma_gamma': F.softplus(theta_samples[:, 1]),      # 個體效應標準差  
+                'sigma_delta': F.softplus(theta_samples[:, 2]),      # 空間效應標準差
+                'rho_spatial': F.softplus(theta_samples[:, 3]),      # 空間相關範圍
+                'vulnerability_a': F.softplus(theta_samples[:, 4]),  # Emanuel參數a
+                'vulnerability_b': F.softplus(theta_samples[:, 5]),  # Emanuel參數b
+                'sigma_obs_base': F.softplus(theta_samples[:, 6])    # 基礎觀測誤差
             }
             
             # 可學習的閾值風速v₀ (如果參數空間足夠大)
             if theta_samples.shape[1] > 7:
-                parsed_params['v_threshold'] = torch.softplus(theta_samples[:, 7])
+                parsed_params['v_threshold'] = F.softplus(theta_samples[:, 7])
                 
             # 觀測誤差異質性縮放 (如果參數空間足夠大)
             if theta_samples.shape[1] > 8:
-                parsed_params['sigma_obs_scale'] = torch.softplus(theta_samples[:, 8])
+                parsed_params['sigma_obs_scale'] = F.softplus(theta_samples[:, 8])
                 
             # 構建異質觀測誤差
             parsed_params['sigma_obs'] = self._compute_heteroscedastic_sigma_obs(
@@ -1496,9 +1448,11 @@ def test_dual_gpu_performance():
         observed_losses = gamma_dist.sample((n_hospitals, n_events))
         distance_matrix = torch.rand(n_hospitals, n_hospitals) * 100  # 0-100km
         
-        # 產品配置
+        # 產品配置（修正為與 DifferentiablePayoutFunction 相容的鍵）
         test_product_config = {
-            'trigger_threshold': 30.0,
+            'name': 'Benchmark Single Threshold',
+            'thresholds': [30e6, 999e6, 999e6, 999e6],  # 單一觸發門檻
+            'ratios': [1.0, 0.0, 0.0, 0.0],             # 100% 賠付
             'max_payout': 10e6,
             'steepness': 0.1
         }
@@ -1625,11 +1579,7 @@ def test_dual_gpu_performance():
     print("🏁" + "="*70)
 
 # 執行性能測試（可選）
-if __name__ == "__main__":
-    try:
-        test_dual_gpu_performance()
-    except Exception as e:
-        print(f"性能測試執行錯誤: {e}")
+# 提示：統一在文末主入口調用 main()，如需單獨性能測試請從外部調用 test_dual_gpu_performance()
 
 # %%
 # ============================================================================
@@ -2012,13 +1962,14 @@ class EndToEndTrainer:
             torch.cuda.synchronize()
             memory_before = [torch.cuda.memory_allocated(i) / 1e6 for i in GPU_DEVICES]
         
-        # 計算損失 - 支援多GPU並行
+        # 計算損失
         if self.enable_multi_gpu:
             loss_dict = self._multi_gpu_forward(
                 hazard_intensities, exposure_values, observed_losses, n_samples, spatial_data
             )
         else:
-            loss_dict = self.model.compute_elbo_loss(
+            base_model = self.model.module if hasattr(self.model, 'module') else self.model
+            loss_dict = base_model.compute_elbo_loss(
                 hazard_intensities, exposure_values, observed_losses, n_samples, spatial_data
             )
         
@@ -2062,9 +2013,10 @@ class EndToEndTrainer:
         batch_size = hazard_intensities.shape[0]
         chunk_size = batch_size // len(GPU_DEVICES)
         
-        # 使用DataParallel自動分割數據
-        # DataParallel會自動處理數據分割和結果聚合
-        return self.model.compute_elbo_loss(
+        # 注意：自定義方法 compute_elbo_loss 不會被 DataParallel 自動分發。
+        # 這裡取出底層模型直接計算，以確保方法存在並可用。
+        base_model = self.model.module if hasattr(self.model, 'module') else self.model
+        return base_model.compute_elbo_loss(
             hazard_intensities, exposure_values, observed_losses, n_samples, spatial_data
         )
     
@@ -2141,7 +2093,8 @@ class EndToEndTrainer:
                     hazard_intensities, exposure_values, observed_losses, n_samples, spatial_data
                 )
             else:
-                loss_dict = self.model.compute_elbo_loss(
+                base_model = self.model.module if hasattr(self.model, 'module') else self.model
+                loss_dict = base_model.compute_elbo_loss(
                     hazard_intensities, exposure_values, observed_losses, n_samples, spatial_data
                 )
         
@@ -2998,14 +2951,4 @@ def demonstrate_prior_likelihood_combinations():
     print("   每種組合針對不同的風險預期和建模假設")
     print("   ε-contamination提供對模型誤指定的保護")
 
-if __name__ == "__main__":
-    # 可以選擇運行演示或主要分析
-    import sys
-    if len(sys.argv) > 1 and sys.argv[1] == "demo":
-        demonstrate_prior_likelihood_combinations()
-    else:
-        main()
-else:
-    print("✅ 玩具範例模組已載入")
-    print("   使用 main() 函數執行完整分析")
-    print("   使用 demonstrate_prior_likelihood_combinations() 查看配置詳情")
+# 已整合到上方單一 __main__ 入口
