@@ -967,8 +967,10 @@ class UnifiedEndToEndVIModel(nn.Module):
         prior_params = PriorLikelihoodProcessor.get_prior_parameters(prior_scenario, n_hbm_params)
         
         # 變分參數 φ = (μ_θ, log_σ_θ) - 使用適應性初始化
-        self.mu_theta = nn.Parameter(prior_params['mu_prior'].clone() * 0.1)  # 基於先驗初始化
-        self.log_sigma_theta = nn.Parameter(torch.log(prior_params['sigma_prior'] * 0.1))  # log(σ)形式
+        self.mu_theta = nn.Parameter(prior_params['mu_prior'].clone() * 0.05)
+        self.log_sigma_theta = nn.Parameter(
+            torch.clamp(torch.log(prior_params['sigma_prior'] * 0.1), -4.0, 4.0)
+)
         
         # 註冊先驗參數為buffer（不可訓練）
         self.register_buffer('prior_mu', prior_params['mu_prior'])
@@ -1017,8 +1019,12 @@ class UnifiedEndToEndVIModel(nn.Module):
         # 6. KL(q||p_ε)
         kl_div = self._compute_kl_divergence_with_prior(theta_samples)
         
-        # 7. ELBO 與最終損失
+        # 數值保護
         crps_term = torch.mean(crps_scores)
+        crps_term = torch.nan_to_num(crps_term, nan=1e6, posinf=1e6, neginf=1e6)
+        kl_div = torch.nan_to_num(kl_div, nan=0.0, posinf=1e3, neginf=1e3)
+        
+        # 7. ELBO 與最終損失
         elbo = - crps_term - kl_div
         total_loss = -elbo
         
@@ -1162,6 +1168,8 @@ class UnifiedEndToEndVIModel(nn.Module):
         S = int(n_pred_samples)
         eps = torch.randn(S, B, H, E, device=device)
         X = torch.exp(mu_log.unsqueeze(0) + sigma_log.unsqueeze(0) * eps)  # (S,B,H,E)
+        # 數值保護：清理樣本中的 NaN/Inf
+        X = torch.nan_to_num(X, nan=0.0, posinf=1e12, neginf=0.0)
         # 向量化計算
         N = B * H * E
         Xf = X.reshape(S, N)                                # (S,N)
@@ -1174,6 +1182,8 @@ class UnifiedEndToEndVIModel(nn.Module):
             # 若預測分佈包含多個 θ 樣本 (B>1)，將 y 在 batch 維度上擴展對齊
             if obs.shape[0] == 1 and B > 1:
                 obs = obs.expand(B, -1, -1)
+            # 清理觀測中的 NaN/Inf
+            obs = torch.nan_to_num(obs, nan=0.0, posinf=1e12, neginf=0.0)
             y = obs.reshape(1, N)  # (1,N)
         # term1 = E|X - y|
         term1 = torch.mean(torch.abs(Xf - y), dim=0)        # (N,)
@@ -1192,61 +1202,54 @@ class UnifiedEndToEndVIModel(nn.Module):
 
     def _compute_kl_divergence_with_prior(self, theta_samples: torch.Tensor) -> torch.Tensor:
         """
-        計算KL散度 KL(q_φ(θ) || p_ε(θ))，使用指定的先驗情境
+        數值安全版 KL(q||p_ε)。避免 -inf、inf、NaN 外溢。
         """
-        mu_theta = self.mu_theta
-        sigma_theta = torch.exp(self.log_sigma_theta)
-        
-        # 使用註冊的先驗參數
-        prior_mu = self.prior_mu  # 來自PriorScenario
-        prior_sigma = self.prior_sigma
-        
+        # 參數護欄
+        prior_mu = self.prior_mu
+        prior_sigma = torch.clamp(self.prior_sigma, min=1e-6, max=1e6)
+
+        log_sigma_theta_safe = torch.clamp(self.log_sigma_theta, min=-20.0, max=20.0)
+        sigma_theta = torch.clamp(torch.exp(log_sigma_theta_safe), min=1e-6, max=1e6)
+        mu_theta = torch.nan_to_num(self.mu_theta, nan=0.0, posinf=0.0, neginf=0.0)
+
         if self.epsilon_prior <= 0:
-            # 標準情況: KL(q_φ(θ) || p(θ)) with specified prior
-            # KL(N(μ_q,σ_q²) || N(μ_p,σ_p²))
-            kl = 0.5 * torch.sum(
-                (sigma_theta**2 + (mu_theta - prior_mu)**2) / (prior_sigma**2) +
-                2*torch.log(prior_sigma) - 2*self.log_sigma_theta - 1
-            )
-        else:
-            # ε-contamination先驗的情況
-            kappa = 3.0  # 重尾係數
-            
-            # log q_φ(θ)
-            log_q = torch.sum(
-                -0.5 * ((theta_samples - mu_theta.unsqueeze(0))**2 / sigma_theta.unsqueeze(0)**2)
-                - 0.5 * torch.log(2 * torch.pi * sigma_theta.unsqueeze(0)**2), dim=1
-            )
-            
-            # log p₀(θ): 基礎先驗 N(prior_mu, prior_sigma²)
-            log_p0 = torch.sum(
-                -0.5 * ((theta_samples - prior_mu.unsqueeze(0))**2 / prior_sigma.unsqueeze(0)**2)
-                - 0.5 * torch.log(2 * torch.pi * prior_sigma.unsqueeze(0)**2), dim=1
-            )
-            
-            # log q_p(θ): 污染先驗 N(prior_mu, (κ*prior_sigma)²)
-            contamination_sigma = kappa * prior_sigma
-            log_qp = torch.sum(
-                -0.5 * ((theta_samples - prior_mu.unsqueeze(0))**2 / contamination_sigma.unsqueeze(0)**2)
-                - 0.5 * torch.log(2 * torch.pi * contamination_sigma.unsqueeze(0)**2), dim=1
-            )
-            
-            # log p_ε(θ): 混合先驗的log密度（將浮點ε轉為Tensor並做數值保護）
-            eps = torch.as_tensor(self.epsilon_prior, device=log_p0.device, dtype=log_p0.dtype)
-            eps = torch.clamp(eps, 1e-8, 1 - 1e-8)
-            log_w0 = torch.log1p(-eps)  # log(1 - eps)
-            log_we = torch.log(eps)     # log(eps)
-            log_mixture = torch.logsumexp(
-                torch.stack([
-                    log_w0 + log_p0,
-                    log_we + log_qp
-                ], dim=0), dim=0
-            )
-            
-            # 蒙特卡羅估計
-            kl = torch.mean(log_q - log_mixture)
-        
-        return kl
+            # 閉式解（數值安全）
+            term1 = (sigma_theta**2 + (mu_theta - prior_mu)**2) / (prior_sigma**2)
+            term2 = 2 * torch.log(prior_sigma) - 2 * log_sigma_theta_safe - 1
+            kl = 0.5 * torch.sum(torch.nan_to_num(term1 + term2, nan=0.0, posinf=1e6, neginf=1e6))
+            return torch.clamp(torch.nan_to_num(kl, nan=1e6, posinf=1e6, neginf=1e6), 0.0, 1e9)
+
+        # ε-contamination 混合先驗路徑（Monte Carlo）
+        eps = torch.tensor(float(self.epsilon_prior), device=theta_samples.device, dtype=theta_samples.dtype)
+        eps = torch.clamp(eps, 1e-8, 1 - 1e-8)
+
+        # log q_φ(θ)
+        log_q = torch.sum(
+            -0.5 * ((theta_samples - mu_theta.unsqueeze(0))**2 / sigma_theta.unsqueeze(0)**2)
+            - 0.5 * torch.log(2 * torch.pi * sigma_theta.unsqueeze(0)**2), dim=1
+        )
+
+        # 基礎先驗 N(prior_mu, prior_sigma²)
+        log_p0 = torch.sum(
+            -0.5 * ((theta_samples - prior_mu.unsqueeze(0))**2 / prior_sigma.unsqueeze(0)**2)
+            - 0.5 * torch.log(2 * torch.pi * prior_sigma.unsqueeze(0)**2), dim=1
+        )
+
+        # 污染先驗 N(prior_mu, (κ prior_sigma)²)
+        kappa = 3.0
+        contamination_sigma = torch.clamp(kappa * prior_sigma, min=1e-6, max=1e6)
+        log_qp = torch.sum(
+            -0.5 * ((theta_samples - prior_mu.unsqueeze(0))**2 / contamination_sigma.unsqueeze(0)**2)
+            - 0.5 * torch.log(2 * torch.pi * contamination_sigma.unsqueeze(0)**2), dim=1
+        )
+
+        log_w0 = torch.log1p(-eps)   # log(1-ε)
+        log_we = torch.log(eps)      # log(ε)
+
+        log_mix = torch.logsumexp(torch.stack([log_w0 + log_p0, log_we + log_qp], dim=0), dim=0)
+        kl_mc = torch.mean(log_q - log_mix)
+        kl_mc = torch.nan_to_num(kl_mc, nan=1e6, posinf=1e6, neginf=1e6)
+        return torch.clamp(kl_mc, 0.0, 1e9)
     
     # 預留：若需加入似然相關的評估函數，可在此擴展（不影響VI目標）
     
@@ -1731,11 +1734,25 @@ class EndToEndTrainer:
         total_loss_scalar.backward()
         
         # 梯度裁剪
+        # 1) 梯度裁剪 + 非有限梯度置零
         torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+        with torch.no_grad():
+            for p in self.model.parameters():
+                if p.grad is not None:
+                    bad = ~torch.isfinite(p.grad)
+                    if bad.any():
+                        p.grad[bad] = 0.0
+
         
         # 參數更新
         self.optimizer.step()
         
+        with torch.no_grad():
+            base_model = self.model.module if hasattr(self.model, 'module') else self.model
+            # log_sigma_theta 與 mu_theta 約束在合理範圍
+            base_model.log_sigma_theta.clamp_(-10.0, 10.0)
+            base_model.mu_theta.clamp_(-20.0, 20.0)
+            
         # 記錄性能指標
         epoch_time = time.time() - start_time
         self.training_times.append(epoch_time)
@@ -2130,7 +2147,7 @@ class RobustnessStressTester:
             model.to_multi_gpu()
             
             # 訓練器
-            trainer = EndToEndTrainer(model, learning_rate=0.001)
+            trainer = EndToEndTrainer(model, learning_rate=0.0001)
             
             # 快速訓練 (壓力測試用)
             n_epochs = 200
