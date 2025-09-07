@@ -184,10 +184,17 @@ class ToyDataGenerator:
         # 2. 風速數據（颱風強度，單位: m/s）
         # 基於真實颱風分佈：大部分中等強度，少數極強
         base_intensities = np.random.gamma(2, 15, (self.n_hospitals, self.n_events))
-        # 添加地理相關性：靠近海岸的醫院受到更強風速
-        coastal_factor = np.exp(-hospital_coords[:, 1] + 80)  # 越靠東海岸越強
-        hazard_intensities = base_intensities * coastal_factor.reshape(-1, 1)
-        hazard_intensities = np.clip(hazard_intensities, 10, 80)  # 10-80 m/s range
+        # # 添加地理相關性：靠近海岸的醫院受到更強風速
+        # coastal_factor = np.exp(-hospital_coords[:, 1] + 80)  # 越靠東海岸越強
+        # hazard_intensities = base_intensities * coastal_factor.reshape(-1, 1)
+        # hazard_intensities = np.clip(hazard_intensities, 10, 80)  # 10-80 m/s range
+        # 修正海岸相關性：使用 0~1 的「海岸性」避免指數爆炸；靠東(經度大)風更強
+        lon = hospital_coords[:, 1]
+        min_lon, max_lon = -84.0, -75.5
+        coastiness = np.clip((lon - min_lon) / (max_lon - min_lon), 0.0, 1.0)  # 0(西)→1(東)
+        coastal_factor = 1.0 + 0.6 * coastiness  # 1.0~1.6，線性放大，不會把事件全夾到80
+        hazard_intensities = base_intensities * coastiness.reshape(-1, 1) * 0 + base_intensities * coastal_factor.reshape(-1, 1)
+        hazard_intensities = np.clip(hazard_intensities, 10, 80)  # 10–80 m/s 合理範圍
         
         # 3. 暴露價值（醫院資產價值，單位：美元）
         # 基於醫院規模的對數正態分佈
@@ -1090,53 +1097,46 @@ class UnifiedEndToEndVIModel(nn.Module):
         }
     
     def _compute_crps_batch(self, observed_losses: torch.Tensor,
-                        payout_dist_params: Dict[str, torch.Tensor],
-                        n_pred_samples: int = 50) -> torch.Tensor:
+                            payout_dist_params: Dict[str, torch.Tensor],
+                            n_pred_samples: int = 50) -> torch.Tensor:
         """
-        批次計算CRPS分數（可微分）
-        - 使用重參數化採樣保證梯度流
-        - 不在CRPS層引入污染；污染僅在likelihood層處理
-        
-        CRPS(F, y) = E[|X - y|] - 0.5 * E[|X - X'|]
+        批次計算 CRPS（非負；越小越好）
+        CRPS(F,y) = E|X - y| - 0.5 E|X - X'|
+        - 重參數化取樣：X = exp(μ + σ·ε)
+        - 排序係數法：O(S log S) 計算 E|X - X'|，避免 S^2 記憶體
+        回傳 shape 為 (batch,)；若無 batch，回傳 (1,)
         """
-        # 準備參數與設備（使用LogNormal重參數化）
-        mu_log = payout_dist_params['mu_payout_log']
+        mu_log = payout_dist_params['mu_payout_log']   # (...= [B,H,E] 或 [H,E])
         sigma_log = payout_dist_params['sigma_payout_log']
         device = mu_log.device
-        
-        # 形狀: 可能為 (batch, H, E) 或 (H, E)（理論上前者）
+        # 標準化 batch 維
         has_batch = (mu_log.dim() == 3)
         if not has_batch:
             mu_log = mu_log.unsqueeze(0)
             sigma_log = sigma_log.unsqueeze(0)
-        batch_size, n_hospitals, n_events = mu_log.shape
-        
-        # 產生樣本（重參數化）：X = exp(μ + σ·ε)
-        eps = torch.randn(n_pred_samples, batch_size, n_hospitals, n_events, device=device)
-        X_samples = torch.exp(mu_log.unsqueeze(0) + sigma_log.unsqueeze(0) * eps)
-        
-        # 與觀測維度對齊
-        # observed_losses: (H, E)
-        obs = observed_losses
-        if has_batch:
-            # 計算每個batch的CRPS，最後取平均
-            crps_scores = []
-            for b in range(batch_size):
-                X_b = X_samples[:, b, :, :]  # (S, H, E)
-                term1 = torch.mean(torch.abs(X_b - obs.unsqueeze(0)), dim=0)
-                diff = X_b.unsqueeze(0) - X_b.unsqueeze(1)  # (S, S, H, E)
-                term2 = 0.5 * torch.mean(torch.abs(diff), dim=(0, 1))
-                crps_scores.append(torch.mean(term1 - term2))
-            return torch.stack(crps_scores)
-        else:
-            X = X_samples.squeeze(1)  # (S, H, E)
-            term1 = torch.mean(torch.abs(X - obs.unsqueeze(0)), dim=0)
-            diff = X.unsqueeze(0) - X.unsqueeze(1)
-            term2 = 0.5 * torch.mean(torch.abs(diff), dim=(0, 1))
-            return torch.tensor([torch.mean(term1 - term2)], device=device)
-        
-        # 不會到達此段落（上面已返回），保留以防未來擴展
-        # return torch.tensor([0.0], device=device)
+        B, H, E = mu_log.shape
+        # 重參數化樣本（等價 rsample）
+        S = int(n_pred_samples)
+        eps = torch.randn(S, B, H, E, device=device)
+        X = torch.exp(mu_log.unsqueeze(0) + sigma_log.unsqueeze(0) * eps)  # (S,B,H,E)
+        # 向量化計算
+        N = B * H * E
+        Xf = X.reshape(S, N)                                # (S,N)
+        y  = observed_losses.clamp_min(0).reshape(1, N).to(device)  # (1,N)
+        # term1 = E|X - y|
+        term1 = torch.mean(torch.abs(Xf - y), dim=0)        # (N,)
+        # term2 = 0.5 * E|X - X'|
+        # Σ_{i,j}|x_i-x_j| = 2 Σ_{i<j}(x_j - x_i)（升序時）
+        # 0.5*E ≈ (1/(2S^2))Σ_{i,j}|·| = (1/S^2) Σ_{i<j}(x_j - x_i)
+        Xs, _ = torch.sort(Xf, dim=0)                       # (S,N)
+        idx = torch.arange(1, S + 1, device=device, dtype=Xs.dtype).view(S, 1)
+        coeff = 2 * idx - (S + 1)                           # (S,1)
+        pair_sum = (Xs * coeff).sum(dim=0)                  # (N,)
+        term2 = pair_sum / (S * S)                          # (N,)
+        crps_vec = term1 - term2                            # (N,)
+        crps_vec = torch.clamp(crps_vec, min=0.0)           # 數值保護
+        crps_b = crps_vec.view(B, H, E).mean(dim=(1, 2))    # (B,)
+        return crps_b
 
     def _compute_kl_divergence_with_prior(self, theta_samples: torch.Tensor) -> torch.Tensor:
         """
@@ -1573,11 +1573,12 @@ class ModelConfiguration:
         """獲取Steinmann保險產品配置"""
         return [
             {
-                'name': 'Single Threshold Product',
-                'thresholds': [50e6, 999e6, 999e6, 999e6],  # 只有一個有效閾值
-                'ratios': [1.0, 0.0, 0.0, 0.0],             # 100%賠付
-                'max_payout': 20e6,
-                'steepness': 0.1
+                # 將第一個產品改為與資料量級匹配的多階梯版本（與 Stage3 的預設 product_configs[0] 相容）
+                'name': 'Standard Multi-Level (scaled)',
+                'thresholds': [0.2e6, 0.6e6, 1.0e6, 1.5e6],   # 20萬、60萬、100萬、150萬
+                'ratios':     [0.25,  0.5,   0.75,  1.0],     # 25%、50%、75%、100%
+                'max_payout': 3e6,                            # 上限 300 萬
+                'steepness':  0.2                             # 平滑些，避免過硬的階梯
             },
             {
                 'name': 'Dual Threshold Product', 
@@ -2036,11 +2037,11 @@ class RobustnessStressTester:
         
         # 使用固定的保險產品配置
         product_config = {
-            'name': 'Standard Multi-Level',
-            'thresholds': [20e6, 40e6, 60e6, 80e6],
-            'ratios': [0.25, 0.5, 0.75, 1.0], 
-            'max_payout': 20e6,
-            'steepness': 0.1
+            'name': 'Standard Multi-Level (scaled)',
+            'thresholds': [0.2e6, 0.6e6, 1.0e6, 1.5e6],  # 20萬~150萬
+            'ratios':     [0.25,  0.5,   0.75,  1.0],
+            'max_payout': 3e6,    # 比損失上緣略高的上限
+            'steepness':  0.2     # 讓階段變化更平滑
         }
         
         for model_config in test_models:
@@ -2093,12 +2094,12 @@ class RobustnessStressTester:
             )
             
             scenario_results[model_config['name']] = {
-                'crps_score': -final_results['crps_term'],
+                'crps_score': final_results['crps_term'],
                 'best_val_crps': best_val_crps,
                 'model_config': model_config
             }
             
-            print(f"       CRPS: {-final_results['crps_term']:.1f}")
+            print(f"越小越好 CRPS: {final_results['crps_term']:.1f}")
         
         return scenario_results
     
@@ -2404,13 +2405,13 @@ def stage3_run_model_matrix(generator: ToyDataGenerator,
         final_test = trainer.evaluate(test_hazards, exposure_tensor, test_losses, n_samples=30, spatial_data=spatial_data)
         config_results[product_config['name']] = {
             'final_test_elbo': final_test['elbo'],
-            'final_crps': -final_test['crps_term'],
+            'final_crps': final_test['crps_term'],
             'best_test_elbo': best_test_elbo,
             'model_config': model_config,
             'product_config': product_config
         }
         print(f"   ✅ 最終測試ELBO: {final_test['elbo']:.3f}")
-        print(f"   📊 CRPS分數: {-final_test['crps_term']:.1f}")
+        print(f"   📊 CRPS分數: {final_test['crps_term']:.1f}")
         results[model_config['name']] = config_results
     return results
 
