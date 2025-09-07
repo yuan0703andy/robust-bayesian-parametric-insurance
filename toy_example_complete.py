@@ -197,9 +197,9 @@ class ToyDataGenerator:
         hazard_intensities = np.clip(hazard_intensities, 10, 80)  # 10–80 m/s 合理範圍
         
         # 3. 暴露價值（醫院資產價值，單位：美元）
-        # 基於醫院規模的對數正態分佈
-        exposure_values = np.random.lognormal(np.log(20e6), 0.5, self.n_hospitals)
-        
+        # 醫院級資產：中位 ~ 2.5e8，離散度稍大（更貼近大型綜合醫院/醫學中心）
+        exposure_values = np.random.lognormal(mean=np.log(250e6), sigma=0.6, size=self.n_hospitals)
+
         # 4. 觀測損失（使用真實的Emanuel脆弱度函數生成）
         observed_losses = self._generate_realistic_losses(
             hazard_intensities, exposure_values
