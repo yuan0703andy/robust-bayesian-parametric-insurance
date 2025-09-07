@@ -50,6 +50,16 @@ warnings.filterwarnings('ignore')
 
 # 全局控制輸出詳盡程度（Stage 3 等大矩陣運行時可關閉冗長輸出）
 VERBOSE = False
+# Notebook auto-run controls: execute each stage right after definition in notebooks
+NB_AUTORUN = True           # set False to disable automatic execution in notebooks
+NB_LIGHT_EPOCHS = 2         # lightweight epochs for quick feedback in stage3
+
+def _in_notebook() -> bool:
+    try:
+        from IPython import get_ipython  # type: ignore
+        return get_ipython() is not None
+    except Exception:
+        return False
 
 # 設定隨機種子確保可重現性
 np.random.seed(42)
@@ -469,16 +479,10 @@ class DifferentiableHierarchicalBayesianModel(nn.Module):
                 return sigma_obs_heteroscedastic  # (batch_size, n_hospitals)
                 
             elif theta_samples.shape[1] >= 9:
-                # 使用基於區域的異質誤差
-                # 生成醫院特定的隨機效應 (種子基於醫院索引確保一致性)
-                torch.manual_seed(42)  # 固定種子確保可重現性
-                hospital_random_effects = torch.randn(self.n_hospitals, device=theta_samples.device)
-                
-                hospital_multipliers = torch.exp(sigma_obs_scale.unsqueeze(1) * 
-                                               hospital_random_effects.unsqueeze(0))
-                
+                # 使用基於區域的異質誤差（每個樣本一組隨機效應）
+                hospital_random_effects = torch.randn(batch_size, self.n_hospitals, device=theta_samples.device)
+                hospital_multipliers = torch.exp(sigma_obs_scale.unsqueeze(1) * hospital_random_effects)
                 sigma_obs_heteroscedastic = sigma_obs_base.unsqueeze(1) * hospital_multipliers
-                
                 if self.verbose:
                     print(f"✅ 使用基於區域的異質觀測誤差 - {self.n_hospitals}家醫院")
                 return sigma_obs_heteroscedastic  # (batch_size, n_hospitals)
@@ -2025,7 +2029,7 @@ class RobustnessStressTester:
             # 創建模型 - 修改參數維度以包含污染參數
             model = UnifiedEndToEndVIModel(
                 n_hospitals=train_hazards.shape[0],
-                n_regions=3,
+                n_regions=spatial_data.n_regions,
                 n_events=train_hazards.shape[1], 
                 distance_matrix=spatial_data.distance_matrix,
                 product_config=product_config,
@@ -2051,19 +2055,19 @@ class RobustnessStressTester:
             
             for epoch in range(n_epochs):
                 train_results = trainer.train_epoch(
-                    train_hazards_tensor, exposure_tensor, train_losses_tensor, n_samples=8
+                    train_hazards_tensor, exposure_tensor, train_losses_tensor, n_samples=8, spatial_data=spatial_data
                 )
                 
                 if (epoch + 1) % 5 == 0:
                     val_results = trainer.evaluate(
-                        val_hazards_tensor, exposure_tensor, val_losses_tensor, n_samples=15
+                        val_hazards_tensor, exposure_tensor, val_losses_tensor, n_samples=15, spatial_data=spatial_data
                     )
                     if val_results['crps'] < best_val_crps:
                         best_val_crps = val_results['crps']
             
             # 最終評估
             final_results = trainer.evaluate(
-                val_hazards_tensor, exposure_tensor, val_losses_tensor, n_samples=30
+                val_hazards_tensor, exposure_tensor, val_losses_tensor, n_samples=30, spatial_data=spatial_data
             )
             
             scenario_results[model_config['name']] = {
@@ -2294,6 +2298,13 @@ def stage1_generate_data(n_hospitals: int = 15, n_events: int = 30, n_regions: i
         pass
     return generator, climada_data, spatial_data
 
+# Auto-run Stage 1 in notebook
+if _in_notebook() and NB_AUTORUN:
+    try:
+        _NB_generator, _NB_climada, _NB_spatial = stage1_generate_data()
+    except Exception as e:
+        print(f"[NB] Stage1 auto-run failed: {e}")
+
 def stage2_train_test_split(climada_data: SimulatedCLIMADAData, train_ratio: float = 0.7):
     """階段2：訓練/測試分離（Notebook友好）。
     Returns: dict with tensors for train/test and exposure
@@ -2319,6 +2330,14 @@ def stage2_train_test_split(climada_data: SimulatedCLIMADAData, train_ratio: flo
         'test_losses': test_losses,
         'exposure_tensor': exposure_tensor
     }
+
+# Auto-run Stage 2 in notebook (depends on Stage 1)
+if _in_notebook() and NB_AUTORUN:
+    try:
+        if '_NB_climada' in globals():
+            _NB_split = stage2_train_test_split(_NB_climada)
+    except Exception as e:
+        print(f"[NB] Stage2 auto-run failed: {e}")
 
 def stage3_run_model_matrix(generator: ToyDataGenerator,
                             spatial_data: SimulatedSpatialData,
@@ -2375,7 +2394,7 @@ def stage3_run_model_matrix(generator: ToyDataGenerator,
                 test_losses_dict = trainer.evaluate(test_hazards, exposure_tensor, test_losses, n_samples=15, spatial_data=spatial_data)
                 print(f"   Epoch {epoch+1:2d}: Test ELBO={test_losses_dict['elbo']:.3f}")
                 best_test_elbo = max(best_test_elbo, test_losses_dict['elbo'])
-        final_test = trainer.evaluate(test_hazards, exposure_tensor, test_losses, n_samples=30)
+        final_test = trainer.evaluate(test_hazards, exposure_tensor, test_losses, n_samples=30, spatial_data=spatial_data)
         config_results[product_config['name']] = {
             'final_test_elbo': final_test['elbo'],
             'final_crps': -final_test['crps_term'],
@@ -2387,6 +2406,14 @@ def stage3_run_model_matrix(generator: ToyDataGenerator,
         print(f"   📊 CRPS分數: {-final_test['crps_term']:.1f}")
         results[model_config['name']] = config_results
     return results
+
+# Auto-run Stage 3 (light) in notebook (depends on Stage 1 & 2)
+if _in_notebook() and NB_AUTORUN:
+    try:
+        if all(name in globals() for name in ['_NB_generator', '_NB_spatial', '_NB_split']):
+            _NB_results = stage3_run_model_matrix(_NB_generator, _NB_spatial, _NB_split, n_epochs=NB_LIGHT_EPOCHS)
+    except Exception as e:
+        print(f"[NB] Stage3 auto-run failed: {e}")
 
 def stage4_analyze_results(results: Dict) -> Dict:
     """階段4：分析與可視化（Notebook友好）。返回重要匯總。"""
@@ -2418,6 +2445,14 @@ def stage4_analyze_results(results: Dict) -> Dict:
     create_results_visualization(results)
     return {'leaderboard': all_results}
 
+# Auto-run Stage 4 in notebook
+if _in_notebook() and NB_AUTORUN:
+    try:
+        if '_NB_results' in globals():
+            _NB_summary = stage4_analyze_results(_NB_results)
+    except Exception as e:
+        print(f"[NB] Stage4 auto-run failed: {e}")
+
 def stage5_stress_test(climada_data: SimulatedCLIMADAData,
                        spatial_data: SimulatedSpatialData,
                        contamination_ratio: float = 0.05,
@@ -2435,6 +2470,8 @@ def stage5_stress_test(climada_data: SimulatedCLIMADAData,
     print(f"\n🏆 壓力測試結論:")
     print(f"   獲勝模型: {results['winner']}")
     return results
+
+# Optional: Do NOT auto-run Stage 5 by default (can be heavy)
 
 def run_complete_analysis():
     """執行完整分析 - 分離出來方便調試"""
