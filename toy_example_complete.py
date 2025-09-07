@@ -113,6 +113,23 @@ class LikelihoodFamily(Enum):
     LOGNORMAL = "lognormal" 
     STUDENT_T = "student_t"
 
+# --- Utility: safe expansion of sigma_obs to match mu_loss (batch, H, E)
+def _expand_sigma_obs_to_mu(mu_loss: torch.Tensor, sigma_obs: torch.Tensor) -> torch.Tensor:
+    """Expand sigma_obs to match shape of mu_loss (batch, H, E).
+    Accepts (batch,), (batch,H), or already (batch,H,E). Handles 0-d scalar as well.
+    """
+    if isinstance(sigma_obs, (int, float)):
+        sigma_obs = torch.tensor(sigma_obs, device=mu_loss.device)
+    if sigma_obs.dim() == 0:  # scalar
+        return sigma_obs.view(1, 1, 1).expand_as(mu_loss)
+    if sigma_obs.dim() == 1:  # (batch,)
+        return sigma_obs.view(-1, 1, 1).expand_as(mu_loss)
+    if sigma_obs.dim() == 2:  # (batch, H)
+        return sigma_obs.unsqueeze(-1).expand_as(mu_loss)
+    if sigma_obs.dim() == 3:  # (batch, H, E)
+        return sigma_obs
+    raise ValueError(f"sigma_obs has unsupported shape {tuple(sigma_obs.shape)}")
+
 @dataclass
 class SimulatedCLIMADAData:
     """模擬的CLIMADA數據結構"""
@@ -390,6 +407,11 @@ class DifferentiableHierarchicalBayesianModel(nn.Module):
             
             # Level 4: 超參數層 - 已在theta_samples中
             
+            # 確保區域分配存在且類型/設備一致
+            if region_assignments is None:
+                region_assignments = torch.zeros(self.n_hospitals, dtype=torch.long, device=hazard_intensities.device)
+            else:
+                region_assignments = region_assignments.to(hazard_intensities.device).long()
             # Level 3: 參數層
             region_effects, individual_effects, spatial_effects = self._compute_level3_effects(
                 params, batch_size
@@ -606,7 +628,7 @@ class DifferentiableHierarchicalBayesianModel(nn.Module):
                                             individual_effects: torch.Tensor,
                                             spatial_effects: torch.Tensor,
                                             params: Dict[str, torch.Tensor],
-                                            region_assignments: torch.Tensor = None) -> torch.Tensor:
+                                            region_assignments: torch.Tensor) -> torch.Tensor:
             """
             Level 2: 計算位置特定脆弱度參數 - 改進版本支持真實區域分配
             
@@ -615,46 +637,30 @@ class DifferentiableHierarchicalBayesianModel(nn.Module):
                                   如果為None，則使用K-means聚類生成的預設分配
             """
             batch_size = region_effects.shape[0]
-            
-            # 如果沒有提供區域分配，使用預設的K-means聚類結果
-            if region_assignments is None:
-                # 使用簡單的空間分佈來分配區域 (基於醫院索引)
-                # 這是一個fallback，更好的做法是從ToyDataGenerator獲取真實分配
-                region_assignments = torch.zeros(self.n_hospitals, dtype=torch.long, device=region_effects.device)
-                if self.verbose:
-                    print("⚠️ 使用預設區域分配 (所有醫院在區域0) - 建議提供真實區域分配")
-            else:
-                # 確保區域分配在有效範圍內
-                region_assignments = region_assignments.to(region_effects.device).long()
-                if region_assignments.numel() != self.n_hospitals:
-                    raise RuntimeError(
-                        f"region_assignments 長度錯誤: 得到 {region_assignments.numel()}，預期 {self.n_hospitals}。"
-                    )
-                if torch.min(region_assignments) < 0 or torch.max(region_assignments) >= self.n_regions:
-                    raise RuntimeError(
-                        f"region_assignments 值域超界: 允許 [0, {self.n_regions-1}]，實際最小={int(torch.min(region_assignments))} 最大={int(torch.max(region_assignments))}。"
-                    )
-                if self.verbose:
-                    print(f"✅ 使用真實區域分配 - {len(torch.unique(region_assignments))}個不同區域")
-            
-            vulnerability_params = torch.zeros(batch_size, self.n_hospitals, device=region_effects.device)
-            
-            # 計算層次結構: β_i = α_{r(i)} + δ_i + γ_i
-            for b in range(batch_size):
-                # 將所有項目對齊到醫院層
-                re_h = region_effects[b, region_assignments]  # (n_hospitals,)
-                sp_b = spatial_effects[b]
-                if sp_b.numel() != self.n_hospitals:
-                    raise RuntimeError(
-                        f"spatial_effects 維度錯誤: 得到 {tuple(sp_b.shape)}，預期 ({self.n_hospitals},)。"
-                    )
-                ind_b = individual_effects[b]
-                if ind_b.numel() != self.n_hospitals:
-                    raise RuntimeError(
-                        f"individual_effects 維度錯誤: 得到 {tuple(ind_b.shape)}，預期 ({self.n_hospitals},)。"
-                    )
-                vulnerability_params[b] = re_h + sp_b + ind_b
-            
+            # 驗證 region_assignments
+            region_assignments = region_assignments.to(region_effects.device).long()
+            if region_assignments.numel() != self.n_hospitals:
+                raise RuntimeError(
+                    f"region_assignments 長度錯誤: 得到 {region_assignments.numel()}，預期 {self.n_hospitals}。"
+                )
+            if torch.min(region_assignments) < 0 or torch.max(region_assignments) >= self.n_regions:
+                raise RuntimeError(
+                    f"region_assignments 值域超界: 允許 [0, {self.n_regions-1}]，實際最小={int(torch.min(region_assignments))} 最大={int(torch.max(region_assignments))}。"
+                )
+            # 將區域效應一次性映射到醫院層: (batch, n_regions) -> (batch, n_hospitals)
+            index = region_assignments.unsqueeze(0).expand(batch_size, -1)
+            region_effects_mapped = torch.gather(region_effects, 1, index)
+            # 確保 spatial 與 individual 已是 (batch, n_hospitals)
+            if spatial_effects.shape != (batch_size, self.n_hospitals):
+                raise RuntimeError(
+                    f"spatial_effects 維度錯誤: 得到 {tuple(spatial_effects.shape)}，預期 ({batch_size}, {self.n_hospitals})。"
+                )
+            if individual_effects.shape != (batch_size, self.n_hospitals):
+                raise RuntimeError(
+                    f"individual_effects 維度錯誤: 得到 {tuple(individual_effects.shape)}，預期 ({batch_size}, {self.n_hospitals})。"
+                )
+            # β_i = α_{r(i)} + δ_i + γ_i
+            vulnerability_params = region_effects_mapped + spatial_effects + individual_effects
             return vulnerability_params
     
         def _compute_loss_predictions(self, hazard_intensities: torch.Tensor,
@@ -718,6 +724,7 @@ class DifferentiableHierarchicalBayesianModel(nn.Module):
             
             # 批次計算損失期望 - 使用每個批次特定的normalized_excess
             mu_loss_batch = []
+            vulnerability_batch = []
             for b in range(batch_size):
                 # 使用該批次的標準化風速超量
                 normalized_excess_b = normalized_excess_batch[b]
@@ -739,8 +746,10 @@ class DifferentiableHierarchicalBayesianModel(nn.Module):
                 # 期望損失 = V(v; β_i) × E_i
                 expected_loss = vulnerability * exposure_values.unsqueeze(1)
                 mu_loss_batch.append(expected_loss)
+                vulnerability_batch.append(vulnerability)
             
             mu_loss = torch.stack(mu_loss_batch)  # (batch_size, n_hospitals, n_events)
+            vulnerability_all = torch.stack(vulnerability_batch)  # (batch_size, n_hospitals, n_events)
             
             # 對數正態分佈參數化: Loss ~ LogNormal(μ_log, σ_log)
             # 確保數值穩定性
@@ -766,7 +775,7 @@ class DifferentiableHierarchicalBayesianModel(nn.Module):
                 'mu_log': mu_log,         # 對數正態分佈的位置參數
                 'sigma_log': sigma_log,   # 對數正態分佈的尺度參數
                 'mu_loss': mu_loss,       # 原始損失期望 (用於分析)
-                'vulnerability': vulnerability,  # 脆弱度值 (用於診斷)
+                'vulnerability': vulnerability_all,  # 脆弱度值 (用於診斷，含batch)
                 'sigma_obs': params.get('sigma_obs', torch.exp(sigma_log))  # 傳遞觀測誤差（供NORMAL/Student-t使用）
             }
 
@@ -838,8 +847,9 @@ class DifferentiablePayoutFunction(nn.Module):
             
             prev_ratio = 0.0
             for i, (threshold_m, ratio) in enumerate(zip(self.thresholds, self.ratios)):
-                if ratio > prev_ratio:  # 只有當比例增加時才添加
-                    threshold_millions = threshold_m / 1e6
+                ratio_val = float(ratio)
+                if ratio_val > prev_ratio:  # 只有當比例增加時才添加
+                    threshold_millions = float(threshold_m) / 1e6
                     
                     # Sigmoid激活: sigmoid((x - T_i) / k)
                     sigmoid_activation = torch.sigmoid(
@@ -847,10 +857,10 @@ class DifferentiablePayoutFunction(nn.Module):
                     )
                     
                     # 增量賠付
-                    increment_payout = (ratio - prev_ratio) * sigmoid_activation
+                    increment_payout = (ratio_val - prev_ratio) * sigmoid_activation
                     total_payout += increment_payout
                     
-                    prev_ratio = ratio
+                    prev_ratio = ratio_val
             
             # 乘以最大賠付金額
             final_payout = total_payout * self.max_payout
@@ -1015,14 +1025,14 @@ class UnifiedEndToEndVIModel(nn.Module):
             log_p0 = base_dist.log_prob(observed_losses.unsqueeze(0) + 1e-3).sum(dim=(1, 2))
             log_pc = contam_dist.log_prob(observed_losses.unsqueeze(0) + 1e-3).sum(dim=(1, 2))
         elif self.likelihood_family == LikelihoodFamily.NORMAL:
-            std = sigma_obs.unsqueeze(-1).unsqueeze(-1).expand_as(mu_loss)
+            std = _expand_sigma_obs_to_mu(mu_loss, sigma_obs)
             base_dist = Normal(mu_loss, std)
             contam_dist = Normal(mu_loss, contam_scale * std)
             log_p0 = base_dist.log_prob(observed_losses.unsqueeze(0)).sum(dim=(1, 2))
             log_pc = contam_dist.log_prob(observed_losses.unsqueeze(0)).sum(dim=(1, 2))
         elif self.likelihood_family == LikelihoodFamily.STUDENT_T:
             df_base, df_c = 3.0, 2.0
-            scale = sigma_obs.unsqueeze(-1).unsqueeze(-1).expand_as(mu_loss)
+            scale = _expand_sigma_obs_to_mu(mu_loss, sigma_obs)
             base_dist = StudentT(df_base, mu_loss, scale)
             contam_dist = StudentT(df_c, mu_loss, contam_scale * scale)
             log_p0 = base_dist.log_prob(observed_losses.unsqueeze(0)).sum(dim=(1, 2))
@@ -1403,11 +1413,11 @@ class PriorLikelihoodProcessor:
             if likelihood_family == LikelihoodFamily.NORMAL:
                 # 正態似然: Loss ~ N(μ, σ²)
                 mu_loss = predicted_params['mu_loss']  # (batch, hospitals, events)
-                # 擴展為 (batch, hospitals, 1) 以便與 mu_loss 廣播成 (batch, hospitals, events)
-                sigma_obs = predicted_params.get('sigma_obs', torch.tensor(1e6)).unsqueeze(-1)
+                sigma_obs_raw = predicted_params.get('sigma_obs', torch.tensor(1e6, device=mu_loss.device))
+                std = _expand_sigma_obs_to_mu(mu_loss, sigma_obs_raw)
                 
                 # 計算log probability
-                dist = Normal(mu_loss, sigma_obs.expand_as(mu_loss))
+                dist = Normal(mu_loss, std)
                 log_prob = dist.log_prob(observed_losses.unsqueeze(0)).sum(dim=(1, 2))  # sum over hospitals and events
                 
             elif likelihood_family == LikelihoodFamily.LOGNORMAL:
@@ -1416,16 +1426,17 @@ class PriorLikelihoodProcessor:
                 sigma_log = predicted_params['sigma_log']
                 
                 dist = LogNormal(mu_log, sigma_log)
-                log_prob = dist.log_prob(observed_losses.unsqueeze(0) + 1e3).sum(dim=(1, 2))  # +1e3 避免log(0)
+                eps = 1e-3
+                log_prob = dist.log_prob((observed_losses.unsqueeze(0)).clamp_min(eps)).sum(dim=(1, 2))
                 
             elif likelihood_family == LikelihoodFamily.STUDENT_T:
                 # Student-t似然: 重尾分佈，對異常值更穩健
                 mu_loss = predicted_params['mu_loss']  # (batch, hospitals, events)
-                # 擴展為 (batch, hospitals, 1) 以便與 mu_loss 廣播
-                sigma_obs = predicted_params.get('sigma_obs', torch.tensor(1e6)).unsqueeze(-1)
+                sigma_obs_raw = predicted_params.get('sigma_obs', torch.tensor(1e6, device=mu_loss.device))
+                scale = _expand_sigma_obs_to_mu(mu_loss, sigma_obs_raw)
                 df = 3.0  # 自由度，較小值產生更重的尾部
                 
-                dist = StudentT(df, mu_loss, sigma_obs.expand_as(mu_loss))
+                dist = StudentT(df, mu_loss, scale)
                 log_prob = dist.log_prob(observed_losses.unsqueeze(0)).sum(dim=(1, 2))
                 
             else:
