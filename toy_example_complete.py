@@ -1122,7 +1122,13 @@ class UnifiedEndToEndVIModel(nn.Module):
         # 向量化計算
         N = B * H * E
         Xf = X.reshape(S, N)                                # (S,N)
-        y  = observed_losses.clamp_min(0).reshape(1, N).to(device)  # (1,N)
+        # 擴展 observed_losses 到正確形狀
+        if observed_losses.dim() == 2:  # (H, E)
+            # 擴展到 batch 維度
+            y = observed_losses.unsqueeze(0).expand(B, -1, -1)  # (B, H, E)
+            y = y.clamp_min(0).reshape(1, N).to(device)  # (1, N)
+        else:  # 已經有 batch 維度
+            y = observed_losses.clamp_min(0).reshape(1, N).to(device)  # (1,N)
         # term1 = E|X - y|
         term1 = torch.mean(torch.abs(Xf - y), dim=0)        # (N,)
         # term2 = 0.5 * E|X - X'|
