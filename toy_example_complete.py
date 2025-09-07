@@ -409,7 +409,10 @@ class DifferentiableHierarchicalBayesianModel(nn.Module):
             
             # 確保區域分配存在且類型/設備一致
             if region_assignments is None:
-                region_assignments = torch.zeros(self.n_hospitals, dtype=torch.long, device=hazard_intensities.device)
+                # 預設採用循環分配，避免全部歸到同一區域造成偏置
+                region_assignments = (torch.arange(self.n_hospitals, device=hazard_intensities.device) % self.n_regions).long()
+                if self.verbose:
+                    print(f"⚠️ 使用預設區域分配 (循環分配到 {self.n_regions} 個區域)")
             else:
                 region_assignments = region_assignments.to(hazard_intensities.device).long()
             # Level 3: 參數層
@@ -687,40 +690,32 @@ class DifferentiableHierarchicalBayesianModel(nn.Module):
             else:
                 v_threshold = torch.full_like(vulnerability_a, 25.7)  # Emanuel預設閾值風速
             
-            # 計算標準化風速超量 - 支持批次不同的v₀值
-            hazard_excess_batch = []
-            normalized_excess_batch = []
-            
-            # 檢測輸入hazard是否為區域層，使用region_assignments推斷區域數
-            n_regions_from_assign = None
-            if region_assignments is not None and region_assignments.numel() == self.n_hospitals:
-                n_regions_from_assign = int(torch.max(region_assignments).item() + 1)
-            
-            # 如果是區域層風險但未提供分配，報錯提示
-            if n_regions_from_assign is not None and hazard_intensities.shape[0] == n_regions_from_assign and region_assignments is None:
-                raise RuntimeError(
-                    "hazard_intensities 為區域層 (n_regions x n_events)，但未提供 region_assignments。\n"
-                    "請在訓練/評估時傳入 spatial_data 以提供 region_assignments，或改用醫院層 (n_hospitals x n_events) 風險矩陣。"
+            # 對齊 hazard 至醫院層級
+            if hazard_intensities.shape[0] == self.n_hospitals:
+                hi_by_hospital = hazard_intensities
+            elif hazard_intensities.shape[0] == self.n_regions:
+                if region_assignments is None:
+                    raise RuntimeError(
+                        "hazard_intensities 為區域層 (n_regions x n_events)，但未提供 region_assignments。\n"
+                        "請在訓練/評估時傳入 spatial_data 以提供 region_assignments，或改用醫院層 (n_hospitals x n_events) 風險矩陣。"
+                    )
+                hi_by_hospital = hazard_intensities.index_select(0, region_assignments.to(hazard_intensities.device))
+            else:
+                raise ValueError(
+                    f"hazard_intensities 維度 {tuple(hazard_intensities.shape)} 不匹配 n_hospitals={self.n_hospitals} 或 n_regions={self.n_regions}"
                 )
 
+            # 確保 exposure_values 形狀為 (n_hospitals, 1) 以利廣播
+            if exposure_values.dim() == 1:
+                exposure_values = exposure_values.view(-1, 1)
+
+            # 計算標準化風速超量 - 支持批次不同的v₀值
+            normalized_excess_batch = []
             for b in range(batch_size):
-                # 每個樣本可能有不同的閾值
                 v_thresh_b = v_threshold[b] if v_threshold.dim() > 0 else v_threshold
-                # 對齊維度：保證風險強度按醫院維度排列
-                enter_region_branch = False
-                if (region_assignments is not None) and (hazard_intensities.shape[0] != self.n_hospitals):
-                    # 只要不是醫院層，且有分配，就映射到醫院層
-                    hi_by_hospital = hazard_intensities.index_select(0, region_assignments.to(hazard_intensities.device))
-                    enter_region_branch = True
-                else:
-                    hi_by_hospital = hazard_intensities
                 hazard_excess = torch.clamp(hi_by_hospital - v_thresh_b, min=0.0)
                 normalized_excess = hazard_excess / v_thresh_b
-                hazard_excess_batch.append(hazard_excess)
                 normalized_excess_batch.append(normalized_excess)
-                if VERBOSE:
-                    print(f"[HBM:L1] b={b} hazards shape={hazard_intensities.shape} -> hi_by_hospital={hi_by_hospital.shape} "
-                          f"region_branch={enter_region_branch}, n_regions_from_assign={n_regions_from_assign}")
             
             # 批次計算損失期望 - 使用每個批次特定的normalized_excess
             mu_loss_batch = []
@@ -744,7 +739,7 @@ class DifferentiableHierarchicalBayesianModel(nn.Module):
                 vulnerability = torch.clamp(vulnerability, max=1.0)
                 
                 # 期望損失 = V(v; β_i) × E_i
-                expected_loss = vulnerability * exposure_values.unsqueeze(1)
+                expected_loss = vulnerability * exposure_values
                 mu_loss_batch.append(expected_loss)
                 vulnerability_batch.append(vulnerability)
             
@@ -1022,8 +1017,10 @@ class UnifiedEndToEndVIModel(nn.Module):
         if self.likelihood_family == LikelihoodFamily.LOGNORMAL:
             base_dist = LogNormal(mu_log, sigma_log)
             contam_dist = LogNormal(mu_log, contam_scale * sigma_log)
-            log_p0 = base_dist.log_prob(observed_losses.unsqueeze(0) + 1e-3).sum(dim=(1, 2))
-            log_pc = contam_dist.log_prob(observed_losses.unsqueeze(0) + 1e-3).sum(dim=(1, 2))
+            eps_min = 1e-3
+            obs_safe = (observed_losses.unsqueeze(0)).clamp_min(eps_min)
+            log_p0 = base_dist.log_prob(obs_safe).sum(dim=(1, 2))
+            log_pc = contam_dist.log_prob(obs_safe).sum(dim=(1, 2))
         elif self.likelihood_family == LikelihoodFamily.NORMAL:
             std = _expand_sigma_obs_to_mu(mu_loss, sigma_obs)
             base_dist = Normal(mu_loss, std)
