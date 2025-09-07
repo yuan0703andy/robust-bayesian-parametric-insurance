@@ -345,12 +345,13 @@ class DifferentiableHierarchicalBayesianModel(nn.Module):
         """可微分的4層階層貝氏模型 - 「風險大腦」"""
         
         def __init__(self, n_hospitals: int, n_regions: int, n_events: int,
-                     distance_matrix: np.ndarray):
+                     distance_matrix: np.ndarray, verbose: bool = False):
             super().__init__()
             
             self.n_hospitals = n_hospitals
             self.n_regions = n_regions  
             self.n_events = n_events
+            self.verbose = verbose
             
             # 註冊距離矩陣為不可訓練參數
             self.register_buffer('distance_matrix', 
@@ -463,7 +464,8 @@ class DifferentiableHierarchicalBayesianModel(nn.Module):
                 # 每家醫院的誤差: σ_obs_i = σ_obs_base * multiplier_i
                 sigma_obs_heteroscedastic = sigma_obs_base.unsqueeze(1) * hospital_multipliers
                 
-                print(f"✅ 使用完全異質觀測誤差 - {self.n_hospitals}家醫院獨立")
+                if self.verbose:
+                    print(f"✅ 使用完全異質觀測誤差 - {self.n_hospitals}家醫院獨立")
                 return sigma_obs_heteroscedastic  # (batch_size, n_hospitals)
                 
             elif theta_samples.shape[1] >= 9:
@@ -477,12 +479,14 @@ class DifferentiableHierarchicalBayesianModel(nn.Module):
                 
                 sigma_obs_heteroscedastic = sigma_obs_base.unsqueeze(1) * hospital_multipliers
                 
-                print(f"✅ 使用基於區域的異質觀測誤差 - {self.n_hospitals}家醫院")
+                if self.verbose:
+                    print(f"✅ 使用基於區域的異質觀測誤差 - {self.n_hospitals}家醫院")
                 return sigma_obs_heteroscedastic  # (batch_size, n_hospitals)
             
             else:
                 # 回退到同質觀測誤差
-                print("⚠️ 參數不足，使用同質觀測誤差")
+                if self.verbose:
+                    print("⚠️ 參數不足，使用同質觀測誤差")
                 return sigma_obs_base.unsqueeze(1).expand(batch_size, self.n_hospitals)
         
         def _compute_level3_effects(self, params: Dict[str, torch.Tensor], 
@@ -612,11 +616,13 @@ class DifferentiableHierarchicalBayesianModel(nn.Module):
                 # 使用簡單的空間分佈來分配區域 (基於醫院索引)
                 # 這是一個fallback，更好的做法是從ToyDataGenerator獲取真實分配
                 region_assignments = torch.zeros(self.n_hospitals, dtype=torch.long)
-                print("⚠️ 使用預設區域分配 (所有醫院在區域0) - 建議提供真實區域分配")
+                if self.verbose:
+                    print("⚠️ 使用預設區域分配 (所有醫院在區域0) - 建議提供真實區域分配")
             else:
                 # 確保區域分配在有效範圍內
                 region_assignments = torch.clamp(region_assignments, 0, self.n_regions - 1)
-                print(f"✅ 使用真實區域分配 - {len(torch.unique(region_assignments))}個不同區域")
+                if self.verbose:
+                    print(f"✅ 使用真實區域分配 - {len(torch.unique(region_assignments))}個不同區域")
             
             vulnerability_params = torch.zeros(batch_size, self.n_hospitals)
             
@@ -701,11 +707,13 @@ class DifferentiableHierarchicalBayesianModel(nn.Module):
             if sigma_obs.dim() == 2:  # 異質觀測誤差 (batch_size, n_hospitals)
                 # 擴展到 (batch_size, n_hospitals, n_events)
                 sigma_log = torch.log(sigma_obs.unsqueeze(2).expand_as(mu_loss_clamped))
-                print(f"✅ 使用異質觀測誤差 - 每家醫院獨立: {sigma_obs.shape}")
+                if self.verbose:
+                    print(f"✅ 使用異質觀測誤差 - 每家醫院獨立: {sigma_obs.shape}")
             else:  # 同質觀測誤差 (batch_size,)
                 # 擴展到 (batch_size, n_hospitals, n_events) 
                 sigma_log = torch.log(sigma_obs.unsqueeze(1).unsqueeze(2).expand_as(mu_loss_clamped))
-                print(f"⚠️ 使用同質觀測誤差: {sigma_obs.shape}")
+                if self.verbose:
+                    print(f"⚠️ 使用同質觀測誤差: {sigma_obs.shape}")
             
             return {
                 'mu_log': mu_log,         # 對數正態分佈的位置參數
@@ -804,12 +812,12 @@ print("✅ 可微分保險賠付函數定義完成")
 
 # %%
 # ============================================================================
-# 5. 統一的端到端VI模型（「總指揮」）
+# 5. 統一的端到端VI模型
 # ============================================================================
 
 class UnifiedEndToEndVIModel(nn.Module):
     """
-    統一的端到端變分推斷模型 - 「總指揮」
+    統一的端到端變分推斷模型
     
     集成ε-contamination robust方法:
     - Prior contamination: p_ε(θ) = (1-ε_p) * p₀(θ) + ε_p * q_p(θ)  
@@ -893,6 +901,92 @@ class UnifiedEndToEndVIModel(nn.Module):
         total_loss = -elbo
         
         return total_loss, elbo, crps_term, kl_div
+
+    def evaluate_metrics(self, hazard_intensities: torch.Tensor,
+                         exposure_values: torch.Tensor,
+                         observed_losses: torch.Tensor,
+                         n_samples: int = 10,
+                         spatial_data: 'SimulatedSpatialData' = None,
+                         n_pred_samples: int = 50,
+                         contam_scale_eval: float = 2.0) -> Dict[str, torch.Tensor]:
+        """
+        評估用工具：同時計算 CRPS 與 robust log-likelihood 指標（不影響訓練）。
+        - CRPS 依據 payout F(θ) 進行，保持可微分設計（僅用於評估時無需梯度）。
+        - Robust log-likelihood 使用 ε_like 的混合：log((1-ε) p0 + ε pc)，在HBM likelihood層。
+        """
+        with torch.no_grad():
+            # 1) 產生分佈參數
+            theta_samples = self._sample_theta(n_samples)
+            region_assignments = None
+            if spatial_data is not None and hasattr(spatial_data, 'region_assignments'):
+                region_assignments = torch.tensor(spatial_data.region_assignments, dtype=torch.long, device=hazard_intensities.device)
+            loss_dist_params = self.hbm(hazard_intensities, exposure_values, theta_samples, region_assignments)
+            payout_dist_params = self.payout_function(loss_dist_params)
+
+            # 2) CRPS（取均值）
+            crps_scores = self._compute_crps_batch(observed_losses, payout_dist_params, n_pred_samples=n_pred_samples)
+            crps_mean = torch.mean(crps_scores)
+
+            # 3) 基礎 log-likelihood（不混合）
+            base_loglik = PriorLikelihoodProcessor.compute_likelihood_logprob(
+                observed_losses, loss_dist_params, self.likelihood_family
+            )
+
+            # 4) 混合 robust log-likelihood（僅評估用）
+            eps_like = float(self.epsilon_likelihood)
+            if eps_like > 0:
+                robust_ll = self._robust_loglikelihood_mixture_eval(
+                    observed_losses, loss_dist_params, contam_scale_eval
+                )
+            else:
+                robust_ll = base_loglik
+
+        return {
+            'crps_mean': crps_mean,
+            'base_loglik_mean': base_loglik,
+            'robust_loglik_mean': robust_ll,
+            'epsilon_likelihood': torch.tensor(self.epsilon_likelihood),
+            'likelihood_family': torch.tensor(0)  # placeholder for logging
+        }
+
+    def _robust_loglikelihood_mixture_eval(self, observed_losses: torch.Tensor,
+                                            predicted_params: Dict[str, torch.Tensor],
+                                            contam_scale: float = 2.0) -> torch.Tensor:
+        """僅在評估時使用的 ε_like 混合 log-likelihood（不參與訓練目標）。"""
+        mu_log = predicted_params.get('mu_log')
+        sigma_log = predicted_params.get('sigma_log')
+        mu_loss = predicted_params.get('mu_loss')
+        sigma_obs = predicted_params.get('sigma_obs')
+        device = mu_log.device
+        eps = torch.tensor(float(self.epsilon_likelihood), device=device)
+
+        if self.likelihood_family == LikelihoodFamily.LOGNORMAL:
+            base_dist = LogNormal(mu_log, sigma_log)
+            contam_dist = LogNormal(mu_log, contam_scale * sigma_log)
+            log_p0 = base_dist.log_prob(observed_losses.unsqueeze(0) + 1e-3).sum(dim=(1, 2))
+            log_pc = contam_dist.log_prob(observed_losses.unsqueeze(0) + 1e-3).sum(dim=(1, 2))
+        elif self.likelihood_family == LikelihoodFamily.NORMAL:
+            std = sigma_obs.unsqueeze(-1).unsqueeze(-1).expand_as(mu_loss)
+            base_dist = Normal(mu_loss, std)
+            contam_dist = Normal(mu_loss, contam_scale * std)
+            log_p0 = base_dist.log_prob(observed_losses.unsqueeze(0)).sum(dim=(1, 2))
+            log_pc = contam_dist.log_prob(observed_losses.unsqueeze(0)).sum(dim=(1, 2))
+        elif self.likelihood_family == LikelihoodFamily.STUDENT_T:
+            df_base, df_c = 3.0, 2.0
+            scale = sigma_obs.unsqueeze(-1).unsqueeze(-1).expand_as(mu_loss)
+            base_dist = StudentT(df_base, mu_loss, scale)
+            contam_dist = StudentT(df_c, mu_loss, contam_scale * scale)
+            log_p0 = base_dist.log_prob(observed_losses.unsqueeze(0)).sum(dim=(1, 2))
+            log_pc = contam_dist.log_prob(observed_losses.unsqueeze(0)).sum(dim=(1, 2))
+        else:
+            raise ValueError(f"未知的似然族: {self.likelihood_family}")
+
+        log_mix = torch.logsumexp(torch.stack([
+            torch.log(1 - eps) + log_p0,
+            torch.log(eps) + log_pc
+        ], dim=0), dim=0)
+
+        return log_mix.mean()
     
     def _sample_theta(self, n_samples: int) -> torch.Tensor:
         """使用重參數化技巧採樣HBM參數"""
@@ -2068,6 +2162,27 @@ class EndToEndTrainer:
                 }
         
         return {k: v.item() if hasattr(v, 'item') else v for k, v in loss_dict.items()}
+
+    def evaluate_with_metrics(self, hazard_intensities: torch.Tensor,
+                              exposure_values: torch.Tensor,
+                              observed_losses: torch.Tensor,
+                              n_samples: int = 30,
+                              spatial_data: 'SimulatedSpatialData' = None,
+                              n_pred_samples: int = 100) -> Dict[str, float]:
+        """計算CRPS與robust log-likelihood（評估用，不影響訓練）。"""
+        self.model.eval()
+        hazard_intensities = hazard_intensities.to(self.device)
+        exposure_values = exposure_values.to(self.device)
+        observed_losses = observed_losses.to(self.device)
+        with torch.no_grad():
+            base_model = self.model.module if hasattr(self.model, 'module') else self.model
+            metrics = base_model.evaluate_metrics(
+                hazard_intensities, exposure_values, observed_losses,
+                n_samples=n_samples, spatial_data=spatial_data,
+                n_pred_samples=n_pred_samples
+            )
+        # to cpu scalars
+        return {k: (v.item() if hasattr(v, 'item') else v) for k, v in metrics.items()}
     
     def get_performance_stats(self) -> Dict[str, Any]:
         """獲取性能統計"""
@@ -2510,120 +2625,87 @@ print("✅ 壓力測試模組定義完成")
 # ============================================================================
 
 def main():
-    """主要執行邏輯"""
-    # 檢查依賴
-    # 開始執行主要邏輯
+    """主要執行邏輯（腳本模式）。
+    在Notebook中，建議分別呼叫 stage1~stage5 函數以獲得逐步輸出。"""
     print("🚀 開始完整的端到端CRPS-VI玩具範例")
     print("="*80)
     return run_complete_analysis()
 
-def run_complete_analysis():
-    """執行完整分析 - 分離出來方便調試"""
-    
-    # ========================================================================
-    # 階段1: 數據生成
-    # ========================================================================
+def stage1_generate_data(n_hospitals: int = 15, n_events: int = 30, n_regions: int = 3):
+    """階段1：生成模擬數據（Notebook友好）。
+    Returns: (generator, climada_data, spatial_data)
+    """
     print("\n📊 階段1: 生成模擬數據")
     print("-"*50)
-    
-    generator = ToyDataGenerator(n_hospitals=15, n_events=30, n_regions=3)
-    
-    # 生成CLIMADA數據
+    generator = ToyDataGenerator(n_hospitals=n_hospitals, n_events=n_events, n_regions=n_regions)
     climada_data = generator.generate_climada_data()
     print(f"✅ CLIMADA數據: {climada_data.hazard_intensities.shape}")
     print(f"   風速範圍: {climada_data.hazard_intensities.min():.1f}-{climada_data.hazard_intensities.max():.1f} m/s")
     print(f"   損失範圍: ${climada_data.observed_losses.min()/1e6:.1f}M-${climada_data.observed_losses.max()/1e6:.1f}M")
-    
-    # 生成空間數據
     spatial_data = generator.generate_spatial_data(climada_data.hospital_coords)
     print(f"✅ 空間數據: {spatial_data.n_regions}個區域")
     print(f"   平均醫院間距: {spatial_data.distance_matrix[spatial_data.distance_matrix>0].mean():.1f} km")
-    
-    # ========================================================================
-    # 7.2 訓練/測試分離
-    # ========================================================================
+    return generator, climada_data, spatial_data
+
+def stage2_train_test_split(climada_data: SimulatedCLIMADAData, train_ratio: float = 0.7):
+    """階段2：訓練/測試分離（Notebook友好）。
+    Returns: dict with tensors for train/test and exposure
+    """
     print("\n✂️ 階段2: 訓練/測試分離")
     print("-"*50)
-    
     n_events = climada_data.n_events
-    n_train = int(0.7 * n_events)
-    
-    # 隨機分割事件
+    n_train = int(train_ratio * n_events)
     event_indices = np.random.permutation(n_events)
     train_indices = event_indices[:n_train]
     test_indices = event_indices[n_train:]
-    
-    # 分離數據
-    train_hazards = torch.tensor(climada_data.hazard_intensities[:, train_indices], 
-                                dtype=torch.float32)
-    train_losses = torch.tensor(climada_data.observed_losses[:, train_indices],
-                               dtype=torch.float32)
-    test_hazards = torch.tensor(climada_data.hazard_intensities[:, test_indices],
-                               dtype=torch.float32)
-    test_losses = torch.tensor(climada_data.observed_losses[:, test_indices],
-                              dtype=torch.float32)
-    
+    train_hazards = torch.tensor(climada_data.hazard_intensities[:, train_indices], dtype=torch.float32)
+    train_losses = torch.tensor(climada_data.observed_losses[:, train_indices], dtype=torch.float32)
+    test_hazards = torch.tensor(climada_data.hazard_intensities[:, test_indices], dtype=torch.float32)
+    test_losses = torch.tensor(climada_data.observed_losses[:, test_indices], dtype=torch.float32)
     exposure_tensor = torch.tensor(climada_data.exposure_values, dtype=torch.float32)
-    
     print(f"✅ 訓練集: {train_hazards.shape[1]}個事件")
     print(f"✅ 測試集: {test_hazards.shape[1]}個事件")
+    return {
+        'train_hazards': train_hazards,
+        'train_losses': train_losses,
+        'test_hazards': test_hazards,
+        'test_losses': test_losses,
+        'exposure_tensor': exposure_tensor
+    }
 
-# %%
-    # ========================================================================
-    # 階段3: 測試不同模型配置和保險產品
-    # ========================================================================
+def stage3_run_model_matrix(generator: ToyDataGenerator,
+                            spatial_data: SimulatedSpatialData,
+                            split: Dict[str, torch.Tensor],
+                            model_configs: List[Dict] = None,
+                            product_configs: List[Dict] = None,
+                            n_epochs: int = 30) -> Dict:
+    """階段3：測試全面的Prior/Likelihood組合（Notebook友好）。
+    Returns: results dict same as run_complete_analysis() stage3 output
+    """
     print("\n🧪 階段3: 測試全面的Prior/Likelihood組合")
     print("-"*50)
-    
-    # 使用完整的測試配置矩陣
-    model_configs = ModelConfiguration.get_comprehensive_test_configs()
-    product_configs = ModelConfiguration.get_steinmann_product_configs()
-    
+    if model_configs is None:
+        model_configs = ModelConfiguration.get_comprehensive_test_configs()
+    if product_configs is None:
+        product_configs = ModelConfiguration.get_steinmann_product_configs()
     print(f"📊 測試矩陣: {len(model_configs)}種模型配置 × {len(product_configs)}種保險產品")
     print(f"   總計: {len(model_configs) * len(product_configs)}個測試組合")
-    
     results = {}
-    
-    # 對每種模型配置進行測試
+    train_hazards = split['train_hazards']
+    train_losses = split['train_losses']
+    test_hazards = split['test_hazards']
+    test_losses = split['test_losses']
+    exposure_tensor = split['exposure_tensor']
     for idx, model_config in enumerate(model_configs):
         print(f"\n🔍 配置 {idx+1}/{len(model_configs)}: {model_config['name']}")
         print(f"   描述: {model_config['description']}")
         print(f"   ε值: Prior={model_config['epsilon_prior']:.3f}, Likelihood={model_config['epsilon_likelihood']:.3f}")
-        
         config_results = {}
-        
-        # 對每種保險產品進行測試 (為了演示，只用第一個產品)
-        product_config = product_configs[0]  # 使用Multi-Level產品進行比較
+        product_config = product_configs[0]
         print(f"\n💰 保險產品: {product_config['name']}")
-        
-        # 檢查並創建必要的變量
-        if 'generator' not in locals() and 'generator' not in globals():
-            if VERBOSE:
-                print("⚠️  generator未定義，創建默認數據生成器...")
-            generator = ToyDataGenerator(n_hospitals=15, n_events=30, n_regions=3)
-            
-            # 生成基礎數據
-            climada_data = generator.generate_climada_data()
-            spatial_data = generator.generate_spatial_data(climada_data.hospital_coords)
-            
-            # 創建訓練數據
-            n_events = climada_data.n_events
-            n_train = int(0.7 * n_events)
-            event_indices = np.random.permutation(n_events)
-            train_indices = event_indices[:n_train]
-            
-            train_hazards = torch.tensor(climada_data.hazard_intensities[:, train_indices], 
-                                        dtype=torch.float32)
-            train_losses = torch.tensor(climada_data.observed_losses[:, train_indices],
-                                       dtype=torch.float32)
-            exposure_tensor = torch.tensor(climada_data.exposure_values, dtype=torch.float32)
-            
-            print(f"✅ 自動生成數據: {generator.n_hospitals}家醫院, {train_hazards.shape[1]}個訓練事件")
-        
-        # 初始化端到端模型 - 傳遞完整的Prior/Likelihood參數
         model = UnifiedEndToEndVIModel(
             n_hospitals=generator.n_hospitals,
-            n_regions=generator.n_regions, 
+            n_regions=generator.n_regions,
             n_events=train_hazards.shape[1],
             distance_matrix=spatial_data.distance_matrix,
             product_config=product_config,
@@ -2632,53 +2714,88 @@ def run_complete_analysis():
             prior_scenario=model_config['prior_scenario'],
             likelihood_family=model_config['likelihood_family']
         )
-        
-        # 訓練器
         trainer = EndToEndTrainer(model, learning_rate=0.01)
-        
-        # 訓練迴圈 (縮短以適應完整測試矩陣)
-        n_epochs = 30  # 減少epoch數以加快測試
         print(f"🏋️ 開始訓練 ({n_epochs} epochs)...")
-        
         best_test_elbo = float('-inf')
         for epoch in range(n_epochs):
-            # 訓練
-            train_losses_dict = trainer.train_epoch(
-                train_hazards, exposure_tensor, train_losses, n_samples=8  # 減少樣本數
-            )
-            
-            # 每10個epoch評估一次
+            _ = trainer.train_epoch(train_hazards, exposure_tensor, train_losses, n_samples=8)
             if (epoch + 1) % 10 == 0:
-                test_losses_dict = trainer.evaluate(
-                    test_hazards, exposure_tensor, test_losses, n_samples=15
-                )
-                
-                print(f"   Epoch {epoch+1:2d}: "
-                      f"Train ELBO={train_losses_dict['elbo']:.3f}, "
-                      f"Test ELBO={test_losses_dict['elbo']:.3f}")
-                
-                if test_losses_dict['elbo'] > best_test_elbo:
-                    best_test_elbo = test_losses_dict['elbo']
-        
-        # 最終評估
-        final_test_results = trainer.evaluate(
-            test_hazards, exposure_tensor, test_losses, n_samples=30
-        )
-        
+                test_losses_dict = trainer.evaluate(test_hazards, exposure_tensor, test_losses, n_samples=15)
+                print(f"   Epoch {epoch+1:2d}: Test ELBO={test_losses_dict['elbo']:.3f}")
+                best_test_elbo = max(best_test_elbo, test_losses_dict['elbo'])
+        final_test = trainer.evaluate(test_hazards, exposure_tensor, test_losses, n_samples=30)
         config_results[product_config['name']] = {
-            'final_test_elbo': final_test_results['elbo'],
-            'final_crps': -final_test_results['crps_term'],  # 轉回正值
+            'final_test_elbo': final_test['elbo'],
+            'final_crps': -final_test['crps_term'],
             'best_test_elbo': best_test_elbo,
             'model_config': model_config,
             'product_config': product_config
         }
-        
-        print(f"   ✅ 最終測試ELBO: {final_test_results['elbo']:.3f}")
-        print(f"   📊 CRPS分數: {-final_test_results['crps_term']:.1f}")
-        
+        print(f"   ✅ 最終測試ELBO: {final_test['elbo']:.3f}")
+        print(f"   📊 CRPS分數: {-final_test['crps_term']:.1f}")
         results[model_config['name']] = config_results
+    return results
 
-# %%    
+def stage4_analyze_results(results: Dict) -> Dict:
+    """階段4：分析與可視化（Notebook友好）。返回重要匯總。"""
+    print("\n📈 階段4: 完整Prior/Likelihood組合結果分析")
+    print("-"*80)
+    all_results = []
+    for model_name, model_results in results.items():
+        for product_name, product_results in model_results.items():
+            model_config = product_results['model_config']
+            all_results.append({
+                'model_name': model_name,
+                'crps_score': product_results['final_crps'],
+                'elbo_score': product_results['final_test_elbo'],
+                'epsilon_prior': model_config['epsilon_prior'],
+                'epsilon_likelihood': model_config['epsilon_likelihood'],
+                'prior_scenario': model_config.get('prior_scenario', 'unknown'),
+                'likelihood_family': model_config.get('likelihood_family', 'unknown')
+            })
+    all_results.sort(key=lambda x: x['crps_score'])
+    print("\n🏆 完整排行榜 (按CRPS分數排序，越低越好):")
+    print("-"*80)
+    print(f"{'排名':<4} {'模型配置':<35} {'CRPS':<8} {'ELBO':<8} {'ε_prior':<8} {'ε_like':<8}")
+    print("-"*80)
+    for i, result in enumerate(all_results[:10]):
+        rank_emoji = "🥇" if i == 0 else "🥈" if i == 1 else "🥉" if i == 2 else f"{i+1:2d}."
+        print(f"{rank_emoji:<4} {result['model_name'][:34]:<35} "
+              f"{result['crps_score']:<8.1f} {result['elbo_score']:<8.3f} "
+              f"{result['epsilon_prior']:<8.3f} {result['epsilon_likelihood']:<8.3f}")
+    create_results_visualization(results)
+    return {'leaderboard': all_results}
+
+def stage5_stress_test(climada_data: SimulatedCLIMADAData,
+                       spatial_data: SimulatedSpatialData,
+                       contamination_ratio: float = 0.05,
+                       extreme_multiplier: float = 8.0,
+                       n_folds: int = 3) -> Dict:
+    """階段5：壓力測試（Notebook友好）。"""
+    print("\n🧪 階段5: 壓力測試 - 證明Robust方法的真正價值")
+    print("-"*80)
+    stress_tester = RobustnessStressTester(
+        contamination_ratio=contamination_ratio,
+        extreme_multiplier=extreme_multiplier,
+        n_folds=n_folds
+    )
+    results = stress_tester.run_stress_test(climada_data, spatial_data)
+    print(f"\n🏆 壓力測試結論:")
+    print(f"   獲勝模型: {results['winner']}")
+    return results
+
+def run_complete_analysis():
+    """執行完整分析 - 分離出來方便調試"""
+    # 階段1
+    generator, climada_data, spatial_data = stage1_generate_data()
+    # 階段2
+    split = stage2_train_test_split(climada_data)
+
+    # ========================================================================
+    # 階段3: 測試不同模型配置和保險產品
+    # ========================================================================
+    results = stage3_run_model_matrix(generator, spatial_data, split, n_epochs=30)
+
     # ========================================================================
     # 階段4: 完整Prior/Likelihood組合結果分析
     # ========================================================================
@@ -2751,22 +2868,10 @@ def run_complete_analysis():
     # 可視化結果
     create_results_visualization(results)
 
-# %%    
     # ========================================================================
     # 階段5: 壓力測試：證明雙重污染模型的優越性
     # ========================================================================
-    print("\n🧪 階段5: 壓力測試 - 證明Robust方法的真正價值")
-    print("-"*80)
-    
-    # 初始化壓力測試器
-    stress_tester = RobustnessStressTester(
-        contamination_ratio=0.05,  # 5%事件為極端
-        extreme_multiplier=8.0,    # 損失放大8倍
-        n_folds=3                  # 3-Fold交叉驗證
-    )
-    
-    # 執行壓力測試
-    stress_results = stress_tester.run_stress_test(climada_data, spatial_data)
+    stress_results = stage5_stress_test(climada_data, spatial_data, 0.05, 8.0, 3)
     
     print(f"\n🏆 壓力測試結論:")
     print(f"   獲勝模型: {stress_results['winner']}")
@@ -2781,7 +2886,6 @@ def run_complete_analysis():
         'stress_test_results': stress_results
     }
 
-# %%
 def create_results_visualization(results: Dict):
     """創建結果可視化"""
     print("\n🎨 生成結果可視化...")
