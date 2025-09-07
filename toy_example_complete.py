@@ -108,6 +108,16 @@ class SimulatedCLIMADAData:
     observed_losses: np.ndarray      # (n_hospitals, n_events) - 觀測損失
     track_data: Dict                 # 颱風路徑數據
     impact_data: Dict                # 影響數據
+    
+    @property
+    def n_hospitals(self) -> int:
+        """醫院數量"""
+        return self.hazard_intensities.shape[0]
+    
+    @property 
+    def n_events(self) -> int:
+        """事件數量"""
+        return self.hazard_intensities.shape[1]
 
 @dataclass  
 class SimulatedSpatialData:
