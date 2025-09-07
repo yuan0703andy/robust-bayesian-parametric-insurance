@@ -1122,13 +1122,17 @@ class UnifiedEndToEndVIModel(nn.Module):
         # 向量化計算
         N = B * H * E
         Xf = X.reshape(S, N)                                # (S,N)
-        # 擴展 observed_losses 到正確形狀
-        if observed_losses.dim() == 2:  # (H, E)
-            # 擴展到 batch 維度
-            y = observed_losses.unsqueeze(0).expand(B, -1, -1)  # (B, H, E)
-            y = y.clamp_min(0).reshape(1, N).to(device)  # (1, N)
-        else:  # 已經有 batch 維度
-            y = observed_losses.clamp_min(0).reshape(1, N).to(device)  # (1,N)
+        # 將 observed_losses 透過同一保單函數映射成實際賠付 y_payout
+        with torch.no_grad():
+            obs = observed_losses.to(device)
+            if obs.dim() == 2:           # (H,E) -> (1,H,E)
+                obs = obs.unsqueeze(0)
+                obs = obs.clamp_min(1e3)     # 避免 log(0) 尾部問題
+            y_payout_bhe = self.payout_function._compute_sigmoid_payout(obs)  # (1,H,E) 或 (B?,H,E)
+            # 將實際賠付在 batch 維度上複製成 (B,H,E)，對應 θ 的混合抽樣
+            if y_payout_bhe.shape[0] == 1 and B > 1:
+                y_payout_bhe = y_payout_bhe.expand(B, -1, -1)
+            y = y_payout_bhe.reshape(1, N)  # (1,N)
         # term1 = E|X - y|
         term1 = torch.mean(torch.abs(Xf - y), dim=0)        # (N,)
         # term2 = 0.5 * E|X - X'|
@@ -1608,8 +1612,6 @@ class EndToEndTrainer:
                     enable_multi_gpu: bool = False, verbose: bool = False):
         self.original_model = model
         # 暫時停用多卡，避免DataParallel沿H維切片導致維度不一致
-        if enable_multi_gpu:
-            print("⚠️ 忽略 enable_multi_gpu=True：暫時關閉 DataParallel 以避免 H 維被切片。")
         self.enable_multi_gpu = False
         self.verbose = verbose
         
