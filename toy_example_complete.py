@@ -472,7 +472,7 @@ class DifferentiableHierarchicalBayesianModel(nn.Module):
                 # 使用基於區域的異質誤差
                 # 生成醫院特定的隨機效應 (種子基於醫院索引確保一致性)
                 torch.manual_seed(42)  # 固定種子確保可重現性
-                hospital_random_effects = torch.randn(self.n_hospitals)
+                hospital_random_effects = torch.randn(self.n_hospitals, device=theta_samples.device)
                 
                 hospital_multipliers = torch.exp(sigma_obs_scale.unsqueeze(1) * 
                                                hospital_random_effects.unsqueeze(0))
@@ -494,10 +494,11 @@ class DifferentiableHierarchicalBayesianModel(nn.Module):
             """Level 3: 計算參數層效應"""
             
             # 區域平均效應 α_r ~ N(0, σ_α²)  
-            region_effects = torch.randn(batch_size, self.n_regions) * params['sigma_alpha'].unsqueeze(1)
+            device = params['sigma_alpha'].device
+            region_effects = torch.randn(batch_size, self.n_regions, device=device) * params['sigma_alpha'].unsqueeze(1)
             
             # 非結構化個體隨機效應 γ_i ~ N(0, σ_γ²)
-            individual_effects = torch.randn(batch_size, self.n_hospitals) * params['sigma_gamma'].unsqueeze(1)
+            individual_effects = torch.randn(batch_size, self.n_hospitals, device=device) * params['sigma_gamma'].unsqueeze(1)
             
             # 空間結構化隨機效應 δ_i ~ MVN(0, Σ_spatial)
             spatial_effects = self._sample_spatial_effects(params, batch_size)
@@ -1349,10 +1350,11 @@ class ParallelCRPSComputer:
         print(f"   事件數: {n_events}, 預測樣本數: {n_pred_samples}")
         
         # 生成測試數據
-        observed_losses = torch.rand(n_events) * 1e8
+        device_for_test = self.primary_device
+        observed_losses = torch.rand(n_events, device=device_for_test) * 1e8
         payout_dist_params = {
-            'mu_payout_log': torch.randn(n_events) + 16,  # log(1e7)左右
-            'sigma_payout_log': torch.ones(n_events) * 0.5
+            'mu_payout_log': torch.randn(n_events, device=device_for_test) + 16,  # log(1e7)左右
+            'sigma_payout_log': torch.ones(n_events, device=device_for_test) * 0.5
         }
         
         # CPU基準測試
