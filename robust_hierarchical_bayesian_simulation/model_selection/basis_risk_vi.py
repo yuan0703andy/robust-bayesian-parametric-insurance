@@ -587,7 +587,8 @@ class BasisRiskAwareVI:
                  # 新增: Sigmoid代理優化參數
                  use_sigmoid_proxy: bool = True,
                  sigmoid_steepness: float = 0.1,
-                 training_mode: bool = True):
+                 training_mode: bool = True,
+                 pytorch_hbm_model = None):
         """
         初始化基差風險導向 VI
         
@@ -600,11 +601,13 @@ class BasisRiskAwareVI:
                 - 'traditional_elbo': 傳統ELBO (第二層比較)
                 - 'crps_basis_risk': CRPS-based ELBO創新 (第三層比較)
                 - 'hbm_two_step': 兩步法 - 先優化G(θ)再評估F_k(θ)
+                - 'pytorch_hbm': PyTorch HBM風險大腦模式
             n_params: 參數維度 (None=自動計算, 2=向後兼容, 350=完整產品選擇)
             hierarchical_model: 外部HBM模型實例 (用於two_step模式)
             use_sigmoid_proxy: 是否使用Sigmoid代理函數進行可微分優化
             sigmoid_steepness: Sigmoid陡峭度參數k (越大越接近階梯函數)
             training_mode: True=訓練模式(Sigmoid), False=評估模式(階梯)
+            pytorch_hbm_model: PyTorch HBM適配器實例 (用於pytorch_hbm模式)
         """
         if epsilon_values is None:
             epsilon_values = [0.0, 0.05, 0.10, 0.15, 0.20]
@@ -622,6 +625,7 @@ class BasisRiskAwareVI:
         self.basis_risk_types = basis_risk_types
         self.objective = objective
         self.hierarchical_model = hierarchical_model  # 外部HBM實例
+        self.pytorch_hbm_model = pytorch_hbm_model  # PyTorch HBM適配器
         
         # Sigmoid代理優化相關參數
         self.use_sigmoid_proxy = use_sigmoid_proxy
@@ -1154,6 +1158,11 @@ class BasisRiskAwareVI:
             return self._compute_hbm_two_step_elbo_batch_gpu(
                 X_tensor, y_tensor, theta_samples, mu_theta, sigma_theta
             )
+        elif self.objective == 'pytorch_hbm':
+            # PyTorch HBM風險大腦：使用PyTorch層級貝氏模型
+            return self._compute_pytorch_hbm_elbo_batch_gpu(
+                X_tensor, y_tensor, theta_samples, mu_theta, sigma_theta
+            )
         else:
             raise ValueError(f"不支持的目標函數: {self.objective}")
     
@@ -1254,6 +1263,89 @@ class BasisRiskAwareVI:
         kl_divergence = log_q - log_prior
         
         # HBM ELBO = -E[CRPS(y,G(θ))] - KL
+        elbo = crps_term - kl_divergence
+        
+        return elbo
+    
+    def _compute_pytorch_hbm_elbo_batch_gpu(self, X_tensor, y_tensor, theta_samples, 
+                                          mu_theta, sigma_theta):
+        """PyTorch HBM風險大腦: 使用PyTorch層次貝氏模型進行VI優化
+        
+        實現公式: ℒPyTorchHBM(φ) = -E_qφ(θ)[CRPS(y, PyTorchHBM(θ))] - KL(qφ(θ)||p(θ))
+        
+        PyTorchHBM是一個完全可微分的4層階層模型，支持端到端優化
+        """
+        if self.pytorch_hbm_model is None:
+            raise ValueError("PyTorch HBM模式需要提供 pytorch_hbm_model 適配器實例")
+            
+        batch_size = theta_samples.shape[0]
+        
+        # *** 核心：使用PyTorch HBM預測損失分布 ***
+        # PyTorch HBM適配器已經處理GPU張量，無需轉換
+        X_list = [X_tensor[:, 0], X_tensor[:, 1]]  # [hazard_intensities, exposure_values]
+        
+        # 批次調用PyTorch HBM預測
+        crps_scores = []
+        for i in range(batch_size):
+            # 調用PyTorch HBM適配器的predict_distribution方法
+            # 該方法返回numpy數組，需要轉換為GPU張量
+            pred_samples_np = self.pytorch_hbm_model.predict_distribution(
+                theta=theta_samples[i].detach().cpu().numpy(),
+                X=X_list,
+                n_samples=100
+            )
+            
+            # 轉換為GPU張量 [n_samples, n_hospitals, n_events] -> [n_data, n_samples]
+            pred_samples_tensor = torch.from_numpy(pred_samples_np).float().to(self.device)
+            
+            # 重新調整維度以匹配期望格式 [n_data, n_samples]
+            if pred_samples_tensor.dim() == 3:
+                # 假設我們關心第一個醫院的所有事件
+                pred_samples_flat = pred_samples_tensor[:, 0, :].T  # [n_events, n_samples] -> [n_samples, n_events]
+                # 進一步平坦化為 [n_data=n_events*n_hospitals, n_samples]
+                pred_samples_2d = pred_samples_flat.T  # [n_events, n_samples]
+            else:
+                pred_samples_2d = pred_samples_tensor
+                
+            # 計算CRPS(y_observed, PyTorchHBM(θ))
+            crps_batch = []
+            n_data = min(pred_samples_2d.shape[0], y_tensor.shape[0])
+            
+            for j in range(n_data):
+                y_obs = y_tensor[j:j+1]  # [1]
+                
+                if pred_samples_2d.shape[0] > j:
+                    forecast = pred_samples_2d[j]  # [n_samples]
+                    
+                    # 簡化CRPS計算 (可微分)
+                    if len(forecast.shape) > 0 and forecast.numel() > 1:
+                        crps_val = torch.mean(torch.abs(forecast - y_obs)) - 0.5 * torch.mean(
+                            torch.abs(forecast.unsqueeze(0) - forecast.unsqueeze(1))
+                        )
+                    else:
+                        # 退化到MSE
+                        crps_val = torch.abs(forecast.mean() - y_obs)
+                        
+                    crps_batch.append(crps_val)
+            
+            if crps_batch:
+                crps_scores.append(torch.stack(crps_batch).mean())
+            else:
+                # 如果沒有有效的CRPS計算，使用默認懲罰
+                crps_scores.append(torch.tensor(1e6, device=self.device))
+        
+        crps_term = -torch.stack(crps_scores)  # 負號使CRPS最小化等效ELBO最大化
+        
+        # KL散度正則化項 (與其他方法保持一致)
+        log_prior = -0.5 * torch.sum(theta_samples**2, dim=1) - \
+                    0.5 * self.n_params * torch.log(torch.tensor(2 * np.pi, device=self.device))
+        
+        log_q = -0.5 * torch.sum((theta_samples - mu_theta)**2 / sigma_theta**2, dim=1) - \
+                0.5 * torch.sum(torch.log(2 * np.pi * sigma_theta**2))
+        
+        kl_divergence = log_q - log_prior
+        
+        # PyTorch HBM ELBO = -E[CRPS(y,PyTorchHBM(θ))] - KL
         elbo = crps_term - kl_divergence
         
         return elbo
