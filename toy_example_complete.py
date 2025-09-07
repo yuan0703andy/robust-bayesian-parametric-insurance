@@ -625,15 +625,15 @@ class DifferentiableHierarchicalBayesianModel(nn.Module):
                     print("⚠️ 使用預設區域分配 (所有醫院在區域0) - 建議提供真實區域分配")
             else:
                 # 確保區域分配在有效範圍內
-                region_assignments = torch.clamp(region_assignments.to(region_effects.device), 0, self.n_regions - 1)
+                region_assignments = region_assignments.to(region_effects.device).long()
                 if region_assignments.numel() != self.n_hospitals:
-                    # 構建穩健回退：按模數分配醫院到區域，避免維度錯誤中斷
-                    if self.verbose:
-                        print(
-                            f"⚠️ region_assignments 長度為 {region_assignments.numel()}，但 n_hospitals={self.n_hospitals}。"
-                            " 使用穩健回退分配 (i % n_regions)。"
-                        )
-                    region_assignments = (torch.arange(self.n_hospitals, device=region_effects.device) % self.n_regions).long()
+                    raise RuntimeError(
+                        f"region_assignments 長度錯誤: 得到 {region_assignments.numel()}，預期 {self.n_hospitals}。"
+                    )
+                if torch.min(region_assignments) < 0 or torch.max(region_assignments) >= self.n_regions:
+                    raise RuntimeError(
+                        f"region_assignments 值域超界: 允許 [0, {self.n_regions-1}]，實際最小={int(torch.min(region_assignments))} 最大={int(torch.max(region_assignments))}。"
+                    )
                 if self.verbose:
                     print(f"✅ 使用真實區域分配 - {len(torch.unique(region_assignments))}個不同區域")
             
@@ -645,11 +645,14 @@ class DifferentiableHierarchicalBayesianModel(nn.Module):
                 re_h = region_effects[b, region_assignments]  # (n_hospitals,)
                 sp_b = spatial_effects[b]
                 if sp_b.numel() != self.n_hospitals:
-                    # 若意外為區域層，映射到醫院層
-                    sp_b = sp_b.index_select(0, region_assignments)
+                    raise RuntimeError(
+                        f"spatial_effects 維度錯誤: 得到 {tuple(sp_b.shape)}，預期 ({self.n_hospitals},)。"
+                    )
                 ind_b = individual_effects[b]
                 if ind_b.numel() != self.n_hospitals:
-                    ind_b = ind_b.index_select(0, region_assignments)
+                    raise RuntimeError(
+                        f"individual_effects 維度錯誤: 得到 {tuple(ind_b.shape)}，預期 ({self.n_hospitals},)。"
+                    )
                 vulnerability_params[b] = re_h + sp_b + ind_b
             
             return vulnerability_params
@@ -1400,7 +1403,8 @@ class PriorLikelihoodProcessor:
             if likelihood_family == LikelihoodFamily.NORMAL:
                 # 正態似然: Loss ~ N(μ, σ²)
                 mu_loss = predicted_params['mu_loss']  # (batch, hospitals, events)
-                sigma_obs = predicted_params.get('sigma_obs', torch.tensor(1e6)).unsqueeze(-1).unsqueeze(-1)
+                # 擴展為 (batch, hospitals, 1) 以便與 mu_loss 廣播成 (batch, hospitals, events)
+                sigma_obs = predicted_params.get('sigma_obs', torch.tensor(1e6)).unsqueeze(-1)
                 
                 # 計算log probability
                 dist = Normal(mu_loss, sigma_obs.expand_as(mu_loss))
@@ -1417,7 +1421,8 @@ class PriorLikelihoodProcessor:
             elif likelihood_family == LikelihoodFamily.STUDENT_T:
                 # Student-t似然: 重尾分佈，對異常值更穩健
                 mu_loss = predicted_params['mu_loss']  # (batch, hospitals, events)
-                sigma_obs = predicted_params.get('sigma_obs', torch.tensor(1e6)).unsqueeze(-1).unsqueeze(-1)
+                # 擴展為 (batch, hospitals, 1) 以便與 mu_loss 廣播
+                sigma_obs = predicted_params.get('sigma_obs', torch.tensor(1e6)).unsqueeze(-1)
                 df = 3.0  # 自由度，較小值產生更重的尾部
                 
                 dist = StudentT(df, mu_loss, sigma_obs.expand_as(mu_loss))
@@ -2062,8 +2067,10 @@ class RobustnessStressTester:
                     val_results = trainer.evaluate(
                         val_hazards_tensor, exposure_tensor, val_losses_tensor, n_samples=15, spatial_data=spatial_data
                     )
-                    if val_results['crps'] < best_val_crps:
-                        best_val_crps = val_results['crps']
+                    # 使用 -crps_term 作為 CRPS 分數（越小越好）
+                    val_crps = -val_results['crps_term']
+                    if val_crps < best_val_crps:
+                        best_val_crps = val_crps
             
             # 最終評估
             final_results = trainer.evaluate(
@@ -2071,12 +2078,12 @@ class RobustnessStressTester:
             )
             
             scenario_results[model_config['name']] = {
-                'crps_score': final_results['crps'],
+                'crps_score': -final_results['crps_term'],
                 'best_val_crps': best_val_crps,
                 'model_config': model_config
             }
             
-            print(f"       CRPS: {final_results['crps']:.1f}")
+            print(f"       CRPS: {-final_results['crps_term']:.1f}")
         
         return scenario_results
     
@@ -2298,13 +2305,6 @@ def stage1_generate_data(n_hospitals: int = 15, n_events: int = 30, n_regions: i
         pass
     return generator, climada_data, spatial_data
 
-# Auto-run Stage 1 in notebook
-if _in_notebook() and NB_AUTORUN:
-    try:
-        _NB_generator, _NB_climada, _NB_spatial = stage1_generate_data()
-    except Exception as e:
-        print(f"[NB] Stage1 auto-run failed: {e}")
-
 def stage2_train_test_split(climada_data: SimulatedCLIMADAData, train_ratio: float = 0.7):
     """階段2：訓練/測試分離（Notebook友好）。
     Returns: dict with tensors for train/test and exposure
@@ -2330,14 +2330,6 @@ def stage2_train_test_split(climada_data: SimulatedCLIMADAData, train_ratio: flo
         'test_losses': test_losses,
         'exposure_tensor': exposure_tensor
     }
-
-# Auto-run Stage 2 in notebook (depends on Stage 1)
-if _in_notebook() and NB_AUTORUN:
-    try:
-        if '_NB_climada' in globals():
-            _NB_split = stage2_train_test_split(_NB_climada)
-    except Exception as e:
-        print(f"[NB] Stage2 auto-run failed: {e}")
 
 def stage3_run_model_matrix(generator: ToyDataGenerator,
                             spatial_data: SimulatedSpatialData,
@@ -2406,14 +2398,6 @@ def stage3_run_model_matrix(generator: ToyDataGenerator,
         print(f"   📊 CRPS分數: {-final_test['crps_term']:.1f}")
         results[model_config['name']] = config_results
     return results
-
-# Auto-run Stage 3 (light) in notebook (depends on Stage 1 & 2)
-if _in_notebook() and NB_AUTORUN:
-    try:
-        if all(name in globals() for name in ['_NB_generator', '_NB_spatial', '_NB_split']):
-            _NB_results = stage3_run_model_matrix(_NB_generator, _NB_spatial, _NB_split, n_epochs=NB_LIGHT_EPOCHS)
-    except Exception as e:
-        print(f"[NB] Stage3 auto-run failed: {e}")
 
 def stage4_analyze_results(results: Dict) -> Dict:
     """階段4：分析與可視化（Notebook友好）。返回重要匯總。"""
