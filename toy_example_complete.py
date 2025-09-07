@@ -695,9 +695,9 @@ class DifferentiableHierarchicalBayesianModel(nn.Module):
                 v_thresh_b = v_threshold[b] if v_threshold.dim() > 0 else v_threshold
                 # 對齊維度：保證風險強度按醫院維度排列
                 enter_region_branch = False
-                if region_assignments is not None and n_regions_from_assign is not None and hazard_intensities.shape[0] == n_regions_from_assign:
-                    # 將區域層風險提升至醫院層
-                    hi_by_hospital = hazard_intensities.index_select(0, region_assignments)
+                if (region_assignments is not None) and (hazard_intensities.shape[0] != self.n_hospitals):
+                    # 只要不是醫院層，且有分配，就映射到醫院層
+                    hi_by_hospital = hazard_intensities.index_select(0, region_assignments.to(hazard_intensities.device))
                     enter_region_branch = True
                 else:
                     hi_by_hospital = hazard_intensities
