@@ -678,8 +678,13 @@ class DifferentiableHierarchicalBayesianModel(nn.Module):
             hazard_excess_batch = []
             normalized_excess_batch = []
             
-            # 如果傳入的是區域層風險，且沒有提供區域分配，提示使用者
-            if hazard_intensities.shape[0] == self.n_regions and region_assignments is None:
+            # 檢測輸入hazard是否為區域層，使用region_assignments推斷區域數
+            n_regions_from_assign = None
+            if region_assignments is not None and region_assignments.numel() == self.n_hospitals:
+                n_regions_from_assign = int(torch.max(region_assignments).item() + 1)
+            
+            # 如果是區域層風險但未提供分配，報錯提示
+            if n_regions_from_assign is not None and hazard_intensities.shape[0] == n_regions_from_assign and region_assignments is None:
                 raise RuntimeError(
                     "hazard_intensities 為區域層 (n_regions x n_events)，但未提供 region_assignments。\n"
                     "請在訓練/評估時傳入 spatial_data 以提供 region_assignments，或改用醫院層 (n_hospitals x n_events) 風險矩陣。"
@@ -689,15 +694,21 @@ class DifferentiableHierarchicalBayesianModel(nn.Module):
                 # 每個樣本可能有不同的閾值
                 v_thresh_b = v_threshold[b] if v_threshold.dim() > 0 else v_threshold
                 # 對齊維度：保證風險強度按醫院維度排列
-                if hazard_intensities.shape[0] == self.n_regions and region_assignments is not None:
+                enter_region_branch = False
+                if region_assignments is not None and n_regions_from_assign is not None and 
+                   hazard_intensities.shape[0] == n_regions_from_assign:
                     # 將區域層風險提升至醫院層
                     hi_by_hospital = hazard_intensities.index_select(0, region_assignments)
+                    enter_region_branch = True
                 else:
                     hi_by_hospital = hazard_intensities
                 hazard_excess = torch.clamp(hi_by_hospital - v_thresh_b, min=0.0)
                 normalized_excess = hazard_excess / v_thresh_b
                 hazard_excess_batch.append(hazard_excess)
                 normalized_excess_batch.append(normalized_excess)
+                if VERBOSE:
+                    print(f"[HBM:L1] b={b} hazards shape={hazard_intensities.shape} -> hi_by_hospital={hi_by_hospital.shape} "
+                          f"region_branch={enter_region_branch}, n_regions_from_assign={n_regions_from_assign}")
             
             # 批次計算損失期望 - 使用每個批次特定的normalized_excess
             mu_loss_batch = []
@@ -713,6 +724,8 @@ class DifferentiableHierarchicalBayesianModel(nn.Module):
                 
                 # 最終脆弱度: V(v; β_i) = V_base × exp(β_i)
                 vulnerability = base_vulnerability * hierarchical_multiplier
+                if VERBOSE:
+                    print(f"[HBM:L1] base_vuln={base_vulnerability.shape}, hier_mult={hierarchical_multiplier.shape}, vuln={vulnerability.shape}")
                 
                 # 飽和效應: V ≤ 1.0
                 vulnerability = torch.clamp(vulnerability, max=1.0)
@@ -2273,6 +2286,13 @@ def stage1_generate_data(n_hospitals: int = 15, n_events: int = 30, n_regions: i
     spatial_data = generator.generate_spatial_data(climada_data.hospital_coords)
     print(f"✅ 空間數據: {spatial_data.n_regions}個區域")
     print(f"   平均醫院間距: {spatial_data.distance_matrix[spatial_data.distance_matrix>0].mean():.1f} km")
+    # 調試輸出以確保一致性
+    print(f"   n_regions(generator)={generator.n_regions}, n_regions(spatial)={spatial_data.n_regions}")
+    try:
+        import numpy as np
+        print(f"   region_assignments uniques: {np.unique(spatial_data.region_assignments)}")
+    except Exception:
+        pass
     return generator, climada_data, spatial_data
 
 def stage2_train_test_split(climada_data: SimulatedCLIMADAData, train_ratio: float = 0.7):
