@@ -1179,11 +1179,15 @@ class UnifiedEndToEndVIModel(nn.Module):
                 - 0.5 * torch.log(2 * torch.pi * contamination_sigma.unsqueeze(0)**2), dim=1
             )
             
-            # log p_ε(θ): 混合先驗的log密度
+            # log p_ε(θ): 混合先驗的log密度（將浮點ε轉為Tensor並做數值保護）
+            eps = torch.as_tensor(self.epsilon_prior, device=log_p0.device, dtype=log_p0.dtype)
+            eps = torch.clamp(eps, 1e-8, 1 - 1e-8)
+            log_w0 = torch.log1p(-eps)  # log(1 - eps)
+            log_we = torch.log(eps)     # log(eps)
             log_mixture = torch.logsumexp(
                 torch.stack([
-                    torch.log(1 - self.epsilon_prior) + log_p0,
-                    torch.log(self.epsilon_prior) + log_qp
+                    log_w0 + log_p0,
+                    log_we + log_qp
                 ], dim=0), dim=0
             )
             
