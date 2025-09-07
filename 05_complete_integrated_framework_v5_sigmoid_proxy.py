@@ -638,6 +638,16 @@ try:
     if PYTORCH_HBM_AVAILABLE:
         print("🧠 初始化 PyTorch HBM 風險大腦模型...")
         
+        # 檢查必要變數是否已定義
+        if 'exposure_values' not in globals() or 'observed_losses' not in globals():
+            print("⚠️ 缺少階段三的數據，使用預設維度")
+            n_hospitals = 100  # 預設醫院數量
+            n_events = 200     # 預設事件數量
+        else:
+            # 確定模型維度 
+            n_hospitals = len(exposure_values)
+            n_events = len(observed_losses)
+        
         # 模擬 ModelSpec 類別
         class ModelSpec:
             def __init__(self):
@@ -645,10 +655,6 @@ try:
                 self.vulnerability_type = VulnerabilityFunctionType.EMANUEL
                 self.likelihood_family = LikelihoodFamily.NORMAL
                 self.prior_scenario = PriorScenario.WEAK_INFORMATIVE
-        
-        # 確定模型維度 
-        n_hospitals = len(exposure_values)
-        n_events = len(observed_losses)
         
         print(f"   模型維度: {n_hospitals}醫院 × {n_events}事件")
         
