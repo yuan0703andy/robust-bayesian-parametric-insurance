@@ -497,7 +497,7 @@ class DifferentiableHierarchicalBayesianModel(nn.Module):
                 'sigma_alpha': F.softplus(theta_samples[:, 0]),      # 區域效應標準差
                 'sigma_gamma': F.softplus(theta_samples[:, 1]),      # 個體效應標準差  
                 'sigma_delta': F.softplus(theta_samples[:, 2]),      # 空間效應標準差
-                'rho_spatial': F.softplus(theta_samples[:, 3]),      # 空間相關範圍
+                'rho_spatial': torch.clamp(F.softplus(theta_samples[:, 3]), min=1e-3),      # 空間相關範圍（加下限）
                 'vulnerability_a': F.softplus(theta_samples[:, 4]),  # Emanuel參數a
                 'vulnerability_b': F.softplus(theta_samples[:, 5]),  # Emanuel參數b
                 'sigma_obs_base': F.softplus(theta_samples[:, 6])    # 基礎觀測誤差
@@ -622,56 +622,66 @@ class DifferentiableHierarchicalBayesianModel(nn.Module):
                                      rho_spatial: torch.Tensor, 
                                      nu: float = 1.5) -> torch.Tensor:
             """
-            計算Matern協方差矩陣
-            
-            Matern核: K(d) = σ² * 2^(1-ν)/Γ(ν) * (√(2ν)*d/ρ)^ν * K_ν(√(2ν)*d/ρ)
-            
-            對於ν=1.5的簡化形式: K(d) = σ² * (1 + √3*d/ρ) * exp(-√3*d/ρ)
+            計算Matern協方差矩陣（ν=1.5）- 數值穩定版。
+            - 對 ρ 做下限夾取，避免除以 0
+            - 對 (1+d)*exp(-d) 使用安全計算，避免 inf*0 → NaN
+            - 清理 NaN/Inf，並加 nugget 提升正定性
             """
-            # 標準化距離: d_norm = √3 * d / ρ  
-            d_norm = (np.sqrt(3.0) * distance_matrix / rho_spatial).clamp(min=1e-12)
-            
-            # Matern ν=1.5: K(d) = σ² * (1 + d_norm) * exp(-d_norm)
-            matern_kernel = (1.0 + d_norm) * torch.exp(-d_norm)
-            cov_matrix = sigma_delta**2 * matern_kernel
-            
-            # 確保正定性: 添加nugget effect
+            # 保護 ρ 範圍
+            rho = torch.clamp(
+                rho_spatial,
+                min=torch.tensor(1e-3, device=distance_matrix.device, dtype=distance_matrix.dtype),
+                max=torch.tensor(1e4, device=distance_matrix.device, dtype=distance_matrix.dtype)
+            )
+            # 標準化距離: d_norm = √3 * d / ρ
+            d_norm = (np.sqrt(3.0) * distance_matrix / rho)
+            # 安全計算 (1 + d_norm) * exp(-d_norm)
+            matern_kernel = torch.zeros_like(d_norm)
+            small_mask = d_norm < 50  # 大於此值時趨近0
+            if small_mask.any():
+                d_small = d_norm[small_mask]
+                matern_kernel[small_mask] = (1.0 + d_small) * torch.exp(-d_small)
+            # 清理 NaN/Inf
+            matern_kernel = torch.nan_to_num(matern_kernel, nan=0.0, posinf=0.0, neginf=0.0)
+            cov_matrix = (sigma_delta**2) * matern_kernel
+            # 加 nugget 確保正定
             nugget = torch.clamp(sigma_delta**2 * 1e-4, min=1e-8, max=1e-3)
-            cov_matrix += nugget * torch.eye(self.n_hospitals, device=cov_matrix.device)
-            
+            cov_matrix = cov_matrix + nugget * torch.eye(self.n_hospitals, device=cov_matrix.device)
             return cov_matrix
         
         def _sample_from_covariance(self, cov_matrix: torch.Tensor, 
                                    sigma_delta: torch.Tensor) -> torch.Tensor:
             """
-            從協方差矩陣採樣，具有多種fallback機制
+            從協方差矩陣採樣，具有多種fallback機制；加入 NaN/Inf 清理與對角保護。
             """
+            # 清理 NaN/Inf 並對角保護
+            cov_matrix = torch.nan_to_num(cov_matrix, nan=0.0, posinf=0.0, neginf=0.0)
+            eps_pd = torch.clamp(sigma_delta**2 * 1e-4, min=1e-8, max=1e-3)
+            cov_matrix = cov_matrix + eps_pd * torch.eye(self.n_hospitals, device=cov_matrix.device)
             try:
-                # 第一步：嘗試直接Cholesky分解
                 mvn = torch.distributions.MultivariateNormal(
                     torch.zeros(self.n_hospitals, device=cov_matrix.device), 
                     covariance_matrix=cov_matrix
                 )
                 return mvn.sample()
-                
             except RuntimeError:
                 try:
-                    # 第二步：嘗試添加更大的nugget
-                    print("⚠️ Cholesky失敗，嘗試增加nugget效應")
-                    nugget_enhanced = sigma_delta**2 * 1e-2
+                    # 第二步：增大 nugget
+                    nugget_enhanced = torch.clamp(sigma_delta**2 * 1e-2, min=1e-6, max=1e-1)
                     cov_matrix_stable = cov_matrix + nugget_enhanced * torch.eye(
                         self.n_hospitals, device=cov_matrix.device
                     )
+                    cov_matrix_stable = torch.nan_to_num(cov_matrix_stable, nan=0.0, posinf=0.0, neginf=0.0)
                     mvn = torch.distributions.MultivariateNormal(
                         torch.zeros(self.n_hospitals, device=cov_matrix.device), 
                         covariance_matrix=cov_matrix_stable
                     )
                     return mvn.sample()
-                    
                 except RuntimeError:
-                    # 第三步：使用對角化近似 (保留方差但忽略相關性)
-                    print("⚠️ 協方差採樣完全失敗，使用對角近似")
-                    diagonal_std = torch.sqrt(torch.diag(cov_matrix))
+                    # 第三步：使用對角近似（保護對角）
+                    diag = torch.clamp(torch.diag(cov_matrix), min=1e-12)
+                    diagonal_std = torch.sqrt(diag)
+                    diagonal_std = torch.nan_to_num(diagonal_std, nan=0.0, posinf=0.0, neginf=0.0)
                     return torch.randn(self.n_hospitals, device=sigma_delta.device) * diagonal_std
     
         def _compute_vulnerability_parameters(self, region_effects: torch.Tensor,
@@ -805,8 +815,14 @@ class DifferentiableHierarchicalBayesianModel(nn.Module):
             else:
                 std_loss = sigma_obs.unsqueeze(1).unsqueeze(2).expand_as(mu_loss_clamped)  # (batch, H, E)
             m = torch.clamp(mu_loss_clamped, min=1e3)
-            cv2 = torch.clamp((std_loss / m) ** 2, min=0.0, max=1e6)
-            sigma_log = torch.sqrt(torch.log1p(cv2)).clamp(1e-3, 2.5)
+            cv2 = (std_loss / m) ** 2
+            cv2 = torch.nan_to_num(cv2, nan=0.0, posinf=1e6, neginf=0.0)
+            cv2 = torch.clamp(cv2, min=0.0, max=1e6)
+            sigma_log = torch.sqrt(torch.clamp(torch.log1p(cv2), min=1e-12))
+            sigma_log = torch.nan_to_num(sigma_log, nan=1e-3, posinf=2.5, neginf=1e-3)
+            sigma_log = torch.clamp(sigma_log, 1e-3, 2.5)
+            # 進一步保護 mu_log（避免極端時的 NaN/Inf）
+            mu_log = torch.nan_to_num(mu_log, nan=7.0, posinf=20.0, neginf=-60.0)
             
             return {
                 'mu_log': mu_log,         # 對數正態分佈的位置參數
@@ -1452,6 +1468,10 @@ class PriorLikelihoodProcessor:
                 # 對數正態似然: Loss ~ LogNormal(μ_log, σ_log²)
                 mu_log = predicted_params['mu_log']  # (batch, hospitals, events)
                 sigma_log = predicted_params['sigma_log']
+                # 最後一道安全閘：清理 NaN/Inf 與合理範圍
+                mu_log = torch.nan_to_num(mu_log, nan=0.0, posinf=20.0, neginf=-60.0)
+                sigma_log = torch.nan_to_num(sigma_log, nan=1e-3, posinf=2.5, neginf=1e-3)
+                sigma_log = torch.clamp(sigma_log, 1e-6, 5.0)
                 
                 dist = LogNormal(mu_log, sigma_log)
                 eps = 1e-3
