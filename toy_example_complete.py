@@ -1130,7 +1130,8 @@ class UnifiedEndToEndVIModel(nn.Module):
             if obs.dim() == 2:           # (H,E) -> (1,H,E)
                 obs = obs.unsqueeze(0)
                 obs = obs.clamp_min(1e3)     # 避免 log(0) 尾部問題
-            y_payout_bhe = self.payout_function._compute_sigmoid_payout(obs)  # (1,H,E) 或 (B?,H,E)
+            # 使用同一合約函數取得觀測損失對應的賠付 g(obs)
+            y_payout_bhe, _ = self.payout_function._payout_and_derivative(obs)  # (1,H,E) 或 (B?,H,E)
             # 將實際賠付在 batch 維度上複製成 (B,H,E)，對應 θ 的混合抽樣
             if y_payout_bhe.shape[0] == 1 and B > 1:
                 y_payout_bhe = y_payout_bhe.expand(B, -1, -1)
