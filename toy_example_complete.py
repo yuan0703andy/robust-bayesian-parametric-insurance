@@ -622,6 +622,11 @@ class DifferentiableHierarchicalBayesianModel(nn.Module):
             else:
                 # 確保區域分配在有效範圍內
                 region_assignments = torch.clamp(region_assignments.to(region_effects.device), 0, self.n_regions - 1)
+                if region_assignments.numel() != self.n_hospitals:
+                    raise RuntimeError(
+                        f"region_assignments 長度為 {region_assignments.numel()}，但 n_hospitals={self.n_hospitals}。"
+                        " 請確認提供正確的醫院對應區域索引。"
+                    )
                 if self.verbose:
                     print(f"✅ 使用真實區域分配 - {len(torch.unique(region_assignments))}個不同區域")
             
@@ -629,11 +634,16 @@ class DifferentiableHierarchicalBayesianModel(nn.Module):
             
             # 計算層次結構: β_i = α_{r(i)} + δ_i + γ_i
             for b in range(batch_size):
-                vulnerability_params[b] = (
-                    region_effects[b, region_assignments] +      # 區域效應 α_{r(i)}
-                    spatial_effects[b] +                         # 空間效應 δ_i
-                    individual_effects[b]                        # 個體效應 γ_i
-                )
+                # 將所有項目對齊到醫院層
+                re_h = region_effects[b, region_assignments]  # (n_hospitals,)
+                sp_b = spatial_effects[b]
+                if sp_b.numel() != self.n_hospitals:
+                    # 若意外為區域層，映射到醫院層
+                    sp_b = sp_b.index_select(0, region_assignments)
+                ind_b = individual_effects[b]
+                if ind_b.numel() != self.n_hospitals:
+                    ind_b = ind_b.index_select(0, region_assignments)
+                vulnerability_params[b] = re_h + sp_b + ind_b
             
             return vulnerability_params
     
