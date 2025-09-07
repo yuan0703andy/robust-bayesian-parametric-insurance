@@ -494,23 +494,24 @@ class DifferentiableHierarchicalBayesianModel(nn.Module):
             """
             # 基礎參數 (使用softplus確保正值)
             parsed_params = {
-                'sigma_alpha': F.softplus(theta_samples[:, 0]),      # 區域效應標準差
-                'sigma_gamma': F.softplus(theta_samples[:, 1]),      # 個體效應標準差  
-                'sigma_delta': F.softplus(theta_samples[:, 2]),      # 空間效應標準差
-                'rho_spatial': torch.clamp(F.softplus(theta_samples[:, 3]), min=1e-3),      # 空間相關範圍（加下限）
-                # 控制 Emanuel 參數範圍避免爆炸
-                'vulnerability_a': torch.clamp(F.softplus(theta_samples[:, 4]), max=1.0),  # a ≤ 1.0
-                'vulnerability_b': torch.clamp(F.softplus(theta_samples[:, 5]), max=5.0),  # b ≤ 5.0
-                'sigma_obs_base': F.softplus(theta_samples[:, 6])    # 基礎觀測誤差
+                # 這三個是標準差，維持 softplus 沒問題
+                'sigma_alpha': F.softplus(theta_samples[:, 0]),
+                'sigma_gamma': F.softplus(theta_samples[:, 1]),
+                'sigma_delta': F.softplus(theta_samples[:, 2]),
+                # 範圍參數保持正值
+                'rho_spatial': torch.clamp(F.softplus(theta_samples[:, 3]), min=1e-3),
+
+                # 與先驗一致：這些參數在先驗是「log 空間」，所以用 exp 還原
+                'vulnerability_a': torch.clamp(torch.exp(theta_samples[:, 4]), max=1.0),
+                'vulnerability_b': torch.clamp(torch.exp(theta_samples[:, 5]), max=5.0),
+
+                # 觀測誤差的基準尺度用 exp（亦可用 softplus，但要與先驗一致）
+                'sigma_obs_base': torch.exp(theta_samples[:, 6]),
             }
-            
-            # 可學習的閾值風速v₀ (如果參數空間足夠大)
             if theta_samples.shape[1] > 7:
-                parsed_params['v_threshold'] = F.softplus(theta_samples[:, 7])
-                
-            # 觀測誤差異質性縮放 (如果參數空間足夠大)
+                parsed_params['v_threshold'] = torch.exp(theta_samples[:, 7])
             if theta_samples.shape[1] > 8:
-                parsed_params['sigma_obs_scale'] = F.softplus(theta_samples[:, 8])
+                parsed_params['sigma_obs_scale'] = torch.exp(theta_samples[:, 8])
                 
             # 構建異質觀測誤差
             parsed_params['sigma_obs'] = self._compute_heteroscedastic_sigma_obs(
@@ -967,10 +968,12 @@ class UnifiedEndToEndVIModel(nn.Module):
         prior_params = PriorLikelihoodProcessor.get_prior_parameters(prior_scenario, n_hbm_params)
         
         # 變分參數 φ = (μ_θ, log_σ_θ) - 使用適應性初始化
-        self.mu_theta = nn.Parameter(prior_params['mu_prior'].clone() * 0.05)
-        self.log_sigma_theta = nn.Parameter(
-            torch.clamp(torch.log(prior_params['sigma_prior'] * 0.1), -4.0, 4.0)
-)
+        # 讓 q(θ) 的均值就落在 p(θ) 的中心，避免一開始爆尺度
+        self.mu_theta = nn.Parameter(prior_params['mu_prior'].clone())
+
+        # 後驗初始標準差保守一點（例如 0.3），避免過度抖動
+        init_sigma = torch.full_like(prior_params['sigma_prior'], 0.3)
+        self.log_sigma_theta = nn.Parameter(torch.log(init_sigma))
         
         # 註冊先驗參數為buffer（不可訓練）
         self.register_buffer('prior_mu', prior_params['mu_prior'])
@@ -1656,7 +1659,7 @@ class ModelConfiguration:
 class EndToEndTrainer:
     """端到端訓練器 - GPU-Accelerated Version"""
         
-    def __init__(self, model: UnifiedEndToEndVIModel, learning_rate: float = 0.001,
+    def __init__(self, model: UnifiedEndToEndVIModel, learning_rate: float = 0.0001,
                     enable_multi_gpu: bool = False, verbose: bool = False):
         self.original_model = model
         # 暫時停用多卡，避免DataParallel沿H維切片導致維度不一致
@@ -2506,14 +2509,15 @@ def stage3_run_model_matrix(generator: ToyDataGenerator,
         model.to_multi_gpu()
         print(f"✅ 模型已移動到設備: {device}")
         
-        trainer = EndToEndTrainer(model, learning_rate=0.001)
+        trainer = EndToEndTrainer(model, learning_rate=0.0001)
         print(f"🏋️ 開始訓練 ({n_epochs} epochs)...")
         best_test_elbo = float('-inf')
         for epoch in range(n_epochs):
             _ = trainer.train_epoch(train_hazards, exposure_tensor, train_losses, n_samples=8, spatial_data=spatial_data)
             if (epoch + 1) % 10 == 0:
                 test_losses_dict = trainer.evaluate(test_hazards, exposure_tensor, test_losses, n_samples=15, spatial_data=spatial_data)
-                print(f"   Epoch {epoch+1:2d}: Test ELBO={test_losses_dict['elbo']:.3f}")
+                print(f"   Epoch {epoch+1:2d}: Test ELBO={test_losses_dict['elbo']:.3f} "
+                      f"(CRPS={test_losses_dict['crps_term']:.1f}, KL={test_losses_dict['kl_term']:.3f})")
                 best_test_elbo = max(best_test_elbo, test_losses_dict['elbo'])
         final_test = trainer.evaluate(test_hazards, exposure_tensor, test_losses, n_samples=30, spatial_data=spatial_data)
         config_results[product_config['name']] = {
