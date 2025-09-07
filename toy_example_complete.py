@@ -832,60 +832,62 @@ class DifferentiablePayoutFunction(nn.Module):
         def forward(self, loss_distribution_params: Dict[str, torch.Tensor]
                    ) -> Dict[str, torch.Tensor]:
             """
-            將損失預測轉換為賠付預測
-            
-            使用Sigmoid函數逼近Steinmann階梯函數：
-            Payout(x) = MaxPayout * Σ[(r_i - r_{i-1}) * sigmoid((x - T_i) / k)]
+            使用 delta method 將損失的 LogNormal 分佈推至賠付的 LogNormal 近似。
             """
-            mu_loss = loss_distribution_params['mu_loss']  # (batch, hospitals, events)
-            
-            # 計算Sigmoid逼近的階梯賠付
-            payout_values = self._compute_sigmoid_payout(mu_loss)
-            
-            # 賠付分佈參數（假設對數正態）
-            payout_clamped = torch.clamp(payout_values, min=1e3)  # 避免log(0)
-            mu_payout_log = torch.log(payout_clamped)
-            
-            # 賠付的不確定性相對較小
-            sigma_payout_log = torch.full_like(mu_payout_log, 0.6)
-            
+            mu_log = loss_distribution_params['mu_log']   # (B,H,E)
+            sigma_log = loss_distribution_params['sigma_log']
+
+            # 代表點：E[X] for LogNormal
+            EX = torch.exp(mu_log + 0.5 * sigma_log**2)
+
+            # g(EX) 與 g'(EX)
+            payout_det, gprime = self._payout_and_derivative(EX)
+
+            # Var[X] for LogNormal
+            varX = (torch.exp(sigma_log**2) - 1.0) * torch.exp(2*mu_log + sigma_log**2)
+
+            # Delta method: Var[Y] ≈ (g'(E[X]))^2 Var[X]
+            varY = (gprime**2) * varX
+
+            # 以匹配一二矩方式近似 Y ~ LogNormal(mu_Y, sigma_Y)
+            EY = torch.clamp(payout_det, min=1e-6)
+            cv2 = torch.clamp(varY / (EY**2), min=0.0)
+            sigma_payout_log = torch.sqrt(torch.log1p(cv2))
+            mu_payout_log = torch.log(EY) - 0.5 * sigma_payout_log**2
+
             return {
                 'mu_payout_log': mu_payout_log,
                 'sigma_payout_log': sigma_payout_log,
-                'payout_values': payout_values
+                'payout_values': payout_det
             }
         
-        def _compute_sigmoid_payout(self, loss_values: torch.Tensor) -> torch.Tensor:
-            """使用Sigmoid函數計算平滑的階梯賠付"""
-            batch_size, n_hospitals, n_events = loss_values.shape
-            
-            # 將損失值轉換為百萬美元單位以便計算
+        def _payout_and_derivative(self, loss_values: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+            """
+            計算合約賠付 g(x) 與對損失的一階導數 g'(x)。
+            內部以百萬美元為Sigmoid入參，導數需乘 1e-6 還原到美元尺度。
+            返回:
+              payout_values: g(x)
+              gprime: dg/dx
+            """
             loss_millions = loss_values / 1e6
-            
-            # 計算每個閾值的貢獻
             total_payout = torch.zeros_like(loss_values)
-            
+            slope_sum = torch.zeros_like(loss_values)  # 累積 ∑ Δr_i * s_i(1-s_i) / k
+
             prev_ratio = 0.0
-            for i, (threshold_m, ratio) in enumerate(zip(self.thresholds, self.ratios)):
-                ratio_val = float(ratio)
-                if ratio_val > prev_ratio:  # 只有當比例增加時才添加
-                    threshold_millions = float(threshold_m) / 1e6
-                    
-                    # Sigmoid激活: sigmoid((x - T_i) / k)
-                    sigmoid_activation = torch.sigmoid(
-                        (loss_millions - threshold_millions) / self.steepness
-                    )
-                    
-                    # 增量賠付
-                    increment_payout = (ratio_val - prev_ratio) * sigmoid_activation
-                    total_payout += increment_payout
-                    
-                    prev_ratio = ratio_val
-            
-            # 乘以最大賠付金額
-            final_payout = total_payout * self.max_payout
-            
-            return final_payout
+            for thr, ratio in zip(self.thresholds, self.ratios):
+                dr = float(ratio) - prev_ratio
+                if dr <= 0:
+                    prev_ratio = float(ratio)
+                    continue
+                thr_m = float(thr) / 1e6
+                s = torch.sigmoid((loss_millions - thr_m) / self.steepness)  # s_i
+                total_payout += dr * s
+                slope_sum += dr * s * (1 - s) / self.steepness              # s_i(1-s_i)/k
+                prev_ratio = float(ratio)
+
+            payout_values = total_payout * self.max_payout                  # g(x)
+            gprime = slope_sum * (self.max_payout / 1e6)                    # dg/dx 還原到美元尺度
+            return payout_values, gprime
 
 print("✅ 可微分保險賠付函數定義完成")
 
@@ -2065,16 +2067,10 @@ class RobustnessStressTester:
         
         for model_config in test_models:
             # 2. 創建不同的模型配置（如果epsilon真的要影響模型）
-            # 選項A：如果epsilon影響數據預處理
-            if model_config['epsilon_prior'] > 0:
-                # 對訓練數據進行額外的穩健化處理
-                train_losses_robust = apply_robust_preprocessing(
-                    train_losses, epsilon=model_config['epsilon_prior']
-                )
-            else:
-                train_losses_robust = train_losses
+            # 訓練資料：此處不做額外預處理，直接使用輸入損失
+            train_losses_robust = train_losses
                 
-            # 選項B：如果epsilon影響模型架構
+            # 建立模型並正確傳遞 ε 參數
             model = UnifiedEndToEndVIModel(
                 n_hospitals=train_hazards.shape[0],
                 n_regions=spatial_data.n_regions,
@@ -2082,9 +2078,10 @@ class RobustnessStressTester:
                 distance_matrix=spatial_data.distance_matrix,
                 product_config=product_config,
                 n_hbm_params=9,
-                # 這些參數可能用於其他目的（不是ELBO）
-                robust_sampling=model_config.get('robust_sampling', False),
-                outlier_detection=model_config.get('outlier_detection', False)
+                epsilon_prior=model_config.get('epsilon_prior', 0.0),
+                epsilon_likelihood=model_config.get('epsilon_likelihood', 0.0),
+                prior_scenario=PriorScenario.WEAK_INFORMATIVE,
+                likelihood_family=LikelihoodFamily.LOGNORMAL
             )
             
             # 移動模型到正確的設備
@@ -2097,7 +2094,7 @@ class RobustnessStressTester:
             n_epochs = 200
             
             train_hazards_tensor = torch.tensor(train_hazards, dtype=torch.float32)
-            train_losses_tensor = torch.tensor(train_losses, dtype=torch.float32)
+            train_losses_tensor = torch.tensor(train_losses_robust, dtype=torch.float32)
             val_hazards_tensor = torch.tensor(val_hazards, dtype=torch.float32)
             val_losses_tensor = torch.tensor(val_losses_for_testing, dtype=torch.float32)
             exposure_tensor = torch.tensor(exposure_values, dtype=torch.float32)
@@ -2761,4 +2758,46 @@ def demonstrate_prior_likelihood_combinations():
     print("   每種組合針對不同的風險預期和建模假設")
     print("   ε-contamination提供對模型誤指定的保護")
 
-# 已整合到上方單一 __main__ 入口
+    # 已整合到上方單一 __main__ 入口
+
+
+def verify_robust_statistics_implementation():
+    """驗證 robust Bayesian ε-contamination 是否生效的簡易診斷。"""
+    print("\n🧪 驗證 Robust Statistics 實作 (KL 對比)")
+    H, R, E = 10, 2, 5
+    dist_mat = np.abs(np.random.randn(H, H)).astype(np.float32)
+    dist_mat = (dist_mat + dist_mat.T) / 2
+    np.fill_diagonal(dist_mat, 0.0)
+    product = {
+        'name': 'Diagnostic Single',
+        'thresholds': [1e6, 999e6, 999e6, 999e6],
+        'ratios': [1.0, 0.0, 0.0, 0.0],
+        'max_payout': 2e6,
+        'steepness': 0.1
+    }
+    model_standard = UnifiedEndToEndVIModel(
+        n_hospitals=H, n_regions=R, n_events=E,
+        distance_matrix=dist_mat, product_config=product,
+        epsilon_prior=0.0, epsilon_likelihood=0.0,
+        prior_scenario=PriorScenario.WEAK_INFORMATIVE,
+        likelihood_family=LikelihoodFamily.LOGNORMAL
+    )
+    model_robust = UnifiedEndToEndVIModel(
+        n_hospitals=H, n_regions=R, n_events=E,
+        distance_matrix=dist_mat, product_config=product,
+        epsilon_prior=0.1, epsilon_likelihood=0.15,
+        prior_scenario=PriorScenario.WEAK_INFORMATIVE,
+        likelihood_family=LikelihoodFamily.LOGNORMAL
+    )
+    theta_standard = model_standard._sample_theta(100)
+    theta_robust = model_robust._sample_theta(100)
+    kl_standard = model_standard._compute_kl_divergence_with_prior(theta_standard)
+    kl_robust = model_robust._compute_kl_divergence_with_prior(theta_robust)
+    diff = torch.abs(kl_robust - kl_standard).item()
+    print(f"   KL(standard) = {kl_standard:.3f}")
+    print(f"   KL(robust)   = {kl_robust:.3f}")
+    print(f"   |Δ|          = {diff:.3f}")
+    if diff < 1e-2:
+        print("⚠️  KL 幾乎無差，檢查 epsilon 是否正確傳遞或先驗方差設置是否過大")
+    else:
+        print("✅  Epsilon 已影響 KL，robust 先驗生效")
