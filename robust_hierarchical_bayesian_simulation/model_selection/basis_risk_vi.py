@@ -326,7 +326,8 @@ class BasisRiskAwareVI:
                  device: str = 'auto',
                  learning_rate: float = 0.01,
                  objective: str = 'crps_basis_risk',
-                 n_params: int = None):
+                 n_params: int = None,
+                 hierarchical_model = None):
         """
         初始化基差風險導向 VI
         
@@ -338,7 +339,9 @@ class BasisRiskAwareVI:
             objective: 目標函數類型
                 - 'traditional_elbo': 傳統ELBO (第二層比較)
                 - 'crps_basis_risk': CRPS-based ELBO創新 (第三層比較)
+                - 'hbm_two_step': 兩步法 - 先優化G(θ)再評估F_k(θ)
             n_params: 參數維度 (None=自動計算, 2=向後兼容, 350=完整產品選擇)
+            hierarchical_model: 外部HBM模型實例 (用於two_step模式)
         """
         if epsilon_values is None:
             epsilon_values = [0.0, 0.05, 0.10, 0.15, 0.20]
@@ -355,6 +358,7 @@ class BasisRiskAwareVI:
         self.epsilon_values = epsilon_values
         self.basis_risk_types = basis_risk_types
         self.objective = objective
+        self.hierarchical_model = hierarchical_model  # 外部HBM實例
         
         # 雙GPU配置 - 支持並行計算
         self.use_gpu = use_gpu and TORCH_AVAILABLE
@@ -801,11 +805,12 @@ class BasisRiskAwareVI:
     
     def _compute_elbo_batch_gpu(self, X_tensor, y_tensor, theta_samples, epsilon, 
                                basis_risk_type, mu_theta, sigma_theta):
-        """GPU上批次計算ELBO - 支援兩種模式
+        """GPU上批次計算ELBO - 支援三種模式
         
         根據self.objective選擇:
         - 'traditional_elbo': 傳統ELBO (第二層比較)
         - 'crps_basis_risk': CRPS-based ELBO創新 (第三層比較)
+        - 'hbm_two_step': HBM兩步法 - 直接優化G(θ)的CRPS
         """
         if self.objective == 'traditional_elbo':
             # 第二層：使用傳統ELBO
@@ -816,6 +821,11 @@ class BasisRiskAwareVI:
             # 第三層：使用創新的CRPS-based ELBO
             return self._compute_crps_based_elbo_batch_gpu(
                 X_tensor, y_tensor, theta_samples, epsilon, mu_theta, sigma_theta
+            )
+        elif self.objective == 'hbm_two_step':
+            # HBM兩步法：Step 1 - 直接優化G(θ)的CRPS
+            return self._compute_hbm_two_step_elbo_batch_gpu(
+                X_tensor, y_tensor, theta_samples, mu_theta, sigma_theta
             )
         else:
             raise ValueError(f"不支持的目標函數: {self.objective}")
@@ -852,6 +862,71 @@ class BasisRiskAwareVI:
         
         # Basis-Risk-Aware ELBO = -E[CRPS] - KL
         # 注意：我們要最大化這個值，所以最小化CRPS，最小化KL
+        elbo = crps_term - kl_divergence
+        
+        return elbo
+    
+    def _compute_hbm_two_step_elbo_batch_gpu(self, X_tensor, y_tensor, theta_samples, 
+                                           mu_theta, sigma_theta):
+        """HBM兩步法Step 1: 直接優化G(θ)的CRPS - 無參數保險產品
+        
+        實現公式: ℒHBM(φ) = -E_qφ(θ)[CRPS(y, G(θ))] - KL(qφ(θ)||p(θ))
+        
+        G(θ)是外部提供的層次貝葉斯模型，直接預測損失分布
+        """
+        if self.hierarchical_model is None:
+            raise ValueError("HBM兩步法需要提供 hierarchical_model 實例")
+            
+        batch_size = theta_samples.shape[0]
+        
+        # *** 核心：使用外部HBM G(θ)預測損失分布 ***
+        # 將GPU張量轉為numpy供HBM使用
+        X_np = X_tensor.detach().cpu().numpy()
+        theta_np = theta_samples.detach().cpu().numpy()
+        
+        # 批次調用HBM預測
+        hbm_predictions = []
+        for i in range(batch_size):
+            # 調用外部HBM的predict_distribution方法
+            pred_samples = self.hierarchical_model.predict_distribution(
+                theta_np[i], X_np, n_samples=50
+            )
+            hbm_predictions.append(pred_samples)
+        
+        # 轉回GPU張量 [batch_size, n_data, n_samples]
+        hbm_tensor = torch.from_numpy(np.array(hbm_predictions)).float().to(self.device)
+        
+        # 計算CRPS(y_observed, G(θ))
+        crps_scores = []
+        for i in range(batch_size):
+            # 對每個θ樣本計算CRPS
+            pred_samples = hbm_tensor[i]  # [n_data, n_samples]
+            crps_batch = []
+            for j in range(pred_samples.shape[0]):
+                # 使用ensemble CRPS計算
+                y_obs = y_tensor[j:j+1]  # [1]
+                forecast = pred_samples[j]  # [n_samples]
+                
+                # 簡化CRPS計算
+                crps_val = torch.mean(torch.abs(forecast - y_obs)) - 0.5 * torch.mean(
+                    torch.abs(forecast.unsqueeze(0) - forecast.unsqueeze(1))
+                )
+                crps_batch.append(crps_val)
+            
+            crps_scores.append(torch.stack(crps_batch).mean())
+        
+        crps_term = -torch.stack(crps_scores)  # 負號使CRPS最小化等效ELBO最大化
+        
+        # KL散度正則化項
+        log_prior = -0.5 * torch.sum(theta_samples**2, dim=1) - \
+                    0.5 * self.n_params * torch.log(torch.tensor(2 * np.pi, device=self.device))
+        
+        log_q = -0.5 * torch.sum((theta_samples - mu_theta)**2 / sigma_theta**2, dim=1) - \
+                0.5 * torch.sum(torch.log(2 * np.pi * sigma_theta**2))
+        
+        kl_divergence = log_q - log_prior
+        
+        # HBM ELBO = -E[CRPS(y,G(θ))] - KL
         elbo = crps_term - kl_divergence
         
         return elbo
@@ -1385,3 +1460,196 @@ class BasisRiskAwareVI:
             'best_models': all_results[:3],
             'best_model': all_results[0]
         }
+    
+    def run_hbm_two_step_optimization(self, X: np.ndarray, y: np.ndarray,
+                                     prior_likelihood_configs: List[Dict],
+                                     X_val: np.ndarray = None, y_val: np.ndarray = None) -> Dict:
+        """
+        執行HBM兩步法優化 - 接入階段3的Prior/Likelihood配置
+        
+        Step 1: 對每個Prior/Likelihood組合優化G(θ)的CRPS
+        Step 2: 用最佳θ評估350個Steinmann產品的F_k(θ)
+        
+        Args:
+            X: 輸入特徵 (風速等)
+            y: 真實損失
+            prior_likelihood_configs: 階段3定義的測試配置列表
+                格式: [{'name': '配置名', 'prior': PriorScenario, 'likelihood': LikelihoodFamily, 'epsilon': float}, ...]
+            X_val, y_val: 驗證集 (可選)
+            
+        Returns:
+            {'step1_results': {...}, 'step2_results': {...}, 'best_config': {...}}
+        """
+        print("🚀 啟動HBM兩步法優化")
+        print(f"   📊 測試{len(prior_likelihood_configs)}種Prior/Likelihood組合")
+        
+        if self.hierarchical_model is None:
+            raise ValueError("兩步法需要先提供 hierarchical_model 實例")
+            
+        # === Step 1: 優化G(θ)的CRPS ===
+        print("\n=== Step 1: 優化層次貝葉斯模型G(θ) ===")
+        step1_results = []
+        
+        # 暫時切換到HBM模式
+        original_objective = self.objective
+        self.objective = 'hbm_two_step'
+        
+        try:
+            for config_idx, config in enumerate(prior_likelihood_configs):
+                print(f"\n🧪 測試配置 {config_idx+1}/{len(prior_likelihood_configs)}: {config['name']}")
+                
+                # 更新HBM的先驗和似然配置
+                self.hierarchical_model.update_configuration(
+                    prior_scenario=config['prior'],
+                    likelihood_family=config['likelihood']
+                )
+                
+                # 訓練當前配置
+                result = self.train_single_model(
+                    X, y, epsilon=config['epsilon'], 
+                    basis_risk_type='absolute',  # Step1用absolute
+                    n_iterations=1000,
+                    X_val=X_val, y_val=y_val
+                )
+                
+                # 添加配置信息
+                result.update({
+                    'config_name': config['name'],
+                    'prior': config['prior'],
+                    'likelihood': config['likelihood'],
+                    'step': 1
+                })
+                
+                step1_results.append(result)
+                print(f"   ✅ {config['name']}: CRPS={result['final_basis_risk']/1e6:.1f}M")
+                
+        finally:
+            # 恢復原始objective
+            self.objective = original_objective
+        
+        # 按CRPS排序，選擇最佳配置
+        step1_results = sorted(step1_results, key=lambda x: x['final_basis_risk'])
+        best_config = step1_results[0]
+        
+        print(f"\n🏆 Step 1最佳配置: {best_config['config_name']}")
+        print(f"   CRPS: {best_config['final_basis_risk']/1e6:.1f}M")
+        
+        # === Step 2: 評估350個Steinmann產品 ===
+        print(f"\n=== Step 2: 評估350個參數保險產品F_k(θ*) ===")
+        
+        # 使用最佳θ*配置HBM
+        self.hierarchical_model.update_configuration(
+            prior_scenario=best_config['prior'],
+            likelihood_family=best_config['likelihood']
+        )
+        
+        # 用最佳θ*評估所有產品
+        step2_results = self._evaluate_steinmann_products_with_hbm(
+            X, y, best_config['best_theta'], X_val, y_val
+        )
+        
+        return {
+            'step1_results': step1_results,
+            'step2_results': step2_results,
+            'best_config': best_config,
+            'method': 'hbm_two_step'
+        }
+    
+    def _evaluate_steinmann_products_with_hbm(self, X: np.ndarray, y: np.ndarray, 
+                                             best_theta: np.ndarray,
+                                             X_val: np.ndarray = None, y_val: np.ndarray = None) -> Dict:
+        """
+        Step 2: 用最佳θ*評估350個Steinmann產品的CRPS(y, F_k(θ*))
+        """
+        print("   📊 計算350個產品的F_k(θ*)...")
+        
+        # 使用最佳θ*生成損失預測
+        hbm_loss_samples = self.hierarchical_model.predict_distribution(
+            best_theta, X, n_samples=100
+        )
+        
+        product_results = []
+        
+        # 載入350個Steinmann產品定義
+        steinmann_thresholds = self._get_steinmann_products_tensor().detach().cpu().numpy()
+        steinmann_ratios = self._get_steinmann_ratios_tensor().detach().cpu().numpy() 
+        steinmann_max_payouts = self._get_steinmann_max_payouts().detach().cpu().numpy()
+        
+        print("   🔄 評估每個產品的CRPS...")
+        
+        for k in range(350):  # 350個產品
+            if (k + 1) % 50 == 0:
+                print(f"       進度: {k+1}/350")
+            
+            # 計算產品k的賠付F_k(θ*)
+            product_payouts = self._compute_single_product_payout(
+                hbm_loss_samples, k, 
+                steinmann_thresholds[k], steinmann_ratios[k], steinmann_max_payouts[k]
+            )
+            
+            # 計算CRPS(y, F_k(θ*))
+            crps_scores = []
+            for i in range(len(y)):
+                y_obs = y[i]
+                payout_samples = product_payouts[i]  # 該事件的賠付分布
+                
+                # Ensemble CRPS
+                crps = np.mean(np.abs(payout_samples - y_obs)) - 0.5 * np.mean(
+                    np.abs(payout_samples[:, None] - payout_samples[None, :])
+                )
+                crps_scores.append(crps)
+            
+            mean_crps = np.mean(crps_scores)
+            
+            product_results.append({
+                'product_id': k,
+                'crps': mean_crps,
+                'thresholds': steinmann_thresholds[k].tolist(),
+                'ratios': steinmann_ratios[k].tolist(),
+                'max_payout': float(steinmann_max_payouts[k])
+            })
+        
+        # 按CRPS排序
+        product_results = sorted(product_results, key=lambda x: x['crps'])
+        
+        print(f"   🏆 最佳產品: ID={product_results[0]['product_id']}, CRPS={product_results[0]['crps']/1e6:.1f}M")
+        
+        return {
+            'all_products': product_results,
+            'best_products': product_results[:10],
+            'best_product': product_results[0]
+        }
+    
+    def _compute_single_product_payout(self, loss_samples: np.ndarray, product_id: int,
+                                     thresholds: np.ndarray, ratios: np.ndarray, 
+                                     max_payout: float) -> np.ndarray:
+        """
+        計算單個Steinmann產品的賠付分布
+        
+        Args:
+            loss_samples: HBM損失預測 [n_events, n_samples]
+            product_id: 產品ID
+            thresholds: 產品閾值 [4]
+            ratios: 賠付比例 [4] 
+            max_payout: 最大賠付
+            
+        Returns:
+            產品賠付樣本 [n_events, n_samples]
+        """
+        n_events, n_samples = loss_samples.shape
+        payout_samples = np.zeros_like(loss_samples)
+        
+        for event_idx in range(n_events):
+            for sample_idx in range(n_samples):
+                loss_value = loss_samples[event_idx, sample_idx]
+                
+                # Steinmann階梯式賠付邏輯
+                total_payout = 0.0
+                for thresh_idx in range(4):
+                    if thresholds[thresh_idx] < 999:  # 有效閾值
+                        if loss_value >= thresholds[thresh_idx]:
+                            total_payout = max_payout * ratios[thresh_idx]
+                
+                payout_samples[event_idx, sample_idx] = min(total_payout, max_payout)
+        
+        return payout_samples
