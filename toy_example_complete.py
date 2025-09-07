@@ -166,12 +166,21 @@ print("✅ 數據結構定義完成")
 # ============================================================================
 
 class ToyDataGenerator:
-    """玩具數據生成器"""
+    """玩具數據生成器（支援極端事件）"""
     
-    def __init__(self, n_hospitals=20, n_events=50, n_regions=4):
+    def __init__(self, n_hospitals=20, n_events=120, n_regions=4,
+                 extreme_event_ratio: float = 0.10,
+                 extreme_hazard_multiplier: float = 2.5,
+                 extreme_event_hospital_fraction: float = 0.7,
+                 max_wind_speed: float = 120.0):
         self.n_hospitals = n_hospitals
         self.n_events = n_events
         self.n_regions = n_regions
+        # 極端事件控制
+        self.extreme_event_ratio = float(extreme_event_ratio)
+        self.extreme_hazard_multiplier = float(extreme_hazard_multiplier)
+        self.extreme_event_hospital_fraction = float(extreme_event_hospital_fraction)
+        self.max_wind_speed = float(max_wind_speed)
         
     def generate_climada_data(self) -> SimulatedCLIMADAData:
         """生成模擬的CLIMADA數據"""
@@ -194,7 +203,17 @@ class ToyDataGenerator:
         coastiness = np.clip((lon - min_lon) / (max_lon - min_lon), 0.0, 1.0)  # 0(西)→1(東)
         coastal_factor = 1.0 + 0.6 * coastiness  # 1.0~1.6，線性放大，不會把事件全夾到80
         hazard_intensities = base_intensities * coastiness.reshape(-1, 1) * 0 + base_intensities * coastal_factor.reshape(-1, 1)
-        hazard_intensities = np.clip(hazard_intensities, 10, 80)  # 10–80 m/s 合理範圍
+        hazard_intensities = np.clip(hazard_intensities, 10, 80)  # 10–80 m/s 合理範圍（常規）
+        
+        # 2.1 注入極端事件：放大部分事件的風速並以更高上限截斷
+        n_extreme_events = max(1, int(self.n_events * self.extreme_event_ratio))
+        extreme_event_indices = np.random.choice(self.n_events, n_extreme_events, replace=False)
+        n_affected = max(1, int(self.extreme_event_hospital_fraction * self.n_hospitals))
+        for e_idx in extreme_event_indices:
+            affected = np.random.choice(self.n_hospitals, n_affected, replace=False)
+            hazard_intensities[affected, e_idx] *= self.extreme_hazard_multiplier
+        # 允許極端更高風速
+        hazard_intensities = np.clip(hazard_intensities, 10, self.max_wind_speed)
         
         # 3. 暴露價值（醫院資產價值，單位：美元）
         # 醫院級資產：中位 ~ 2.5e8，離散度稍大（更貼近大型綜合醫院/醫學中心）
@@ -210,7 +229,10 @@ class ToyDataGenerator:
             'track_ids': [f'track_{i:03d}' for i in range(self.n_events)],
             'years': np.random.choice(range(2000, 2024), self.n_events),
             'max_sustained_winds': np.max(hazard_intensities, axis=0),
-            'categories': self._classify_hurricane_categories(hazard_intensities)
+            'categories': self._classify_hurricane_categories(hazard_intensities),
+            'extreme_event_indices': extreme_event_indices.tolist(),
+            'extreme_event_ratio': self.extreme_event_ratio,
+            'extreme_hazard_multiplier': self.extreme_hazard_multiplier
         }
         
         # 6. 影響數據
@@ -2317,13 +2339,23 @@ def main():
     print("="*80)
     return run_complete_analysis()
 
-def stage1_generate_data(n_hospitals: int = 15, n_events: int = 30, n_regions: int = 3):
+def stage1_generate_data(n_hospitals: int = 15, n_events: int = 120, n_regions: int = 3,
+                         extreme_event_ratio: float = 0.10,
+                         extreme_hazard_multiplier: float = 2.5,
+                         extreme_event_hospital_fraction: float = 0.7,
+                         max_wind_speed: float = 120.0):
     """階段1：生成模擬數據（Notebook友好）。
     Returns: (generator, climada_data, spatial_data)
     """
     print("\n📊 階段1: 生成模擬數據")
     print("-"*50)
-    generator = ToyDataGenerator(n_hospitals=n_hospitals, n_events=n_events, n_regions=n_regions)
+    generator = ToyDataGenerator(
+        n_hospitals=n_hospitals, n_events=n_events, n_regions=n_regions,
+        extreme_event_ratio=extreme_event_ratio,
+        extreme_hazard_multiplier=extreme_hazard_multiplier,
+        extreme_event_hospital_fraction=extreme_event_hospital_fraction,
+        max_wind_speed=max_wind_speed
+    )
     climada_data = generator.generate_climada_data()
     print(f"✅ CLIMADA數據: {climada_data.hazard_intensities.shape}")
     print(f"   風速範圍: {climada_data.hazard_intensities.min():.1f}-{climada_data.hazard_intensities.max():.1f} m/s")
