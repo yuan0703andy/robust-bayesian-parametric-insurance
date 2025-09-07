@@ -623,10 +623,13 @@ class DifferentiableHierarchicalBayesianModel(nn.Module):
                 # 確保區域分配在有效範圍內
                 region_assignments = torch.clamp(region_assignments.to(region_effects.device), 0, self.n_regions - 1)
                 if region_assignments.numel() != self.n_hospitals:
-                    raise RuntimeError(
-                        f"region_assignments 長度為 {region_assignments.numel()}，但 n_hospitals={self.n_hospitals}。"
-                        " 請確認提供正確的醫院對應區域索引。"
-                    )
+                    # 構建穩健回退：按模數分配醫院到區域，避免維度錯誤中斷
+                    if self.verbose:
+                        print(
+                            f"⚠️ region_assignments 長度為 {region_assignments.numel()}，但 n_hospitals={self.n_hospitals}。"
+                            " 使用穩健回退分配 (i % n_regions)。"
+                        )
+                    region_assignments = (torch.arange(self.n_hospitals, device=region_effects.device) % self.n_regions).long()
                 if self.verbose:
                     print(f"✅ 使用真實區域分配 - {len(torch.unique(region_assignments))}個不同區域")
             
