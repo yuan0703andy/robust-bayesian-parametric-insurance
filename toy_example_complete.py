@@ -1125,6 +1125,9 @@ class UnifiedEndToEndVIModel(nn.Module):
             obs = observed_losses.to(device)
             if obs.dim() == 2:           # (H,E) -> (1,H,E)
                 obs = obs.unsqueeze(0)
+            # 若預測分佈包含多個 θ 樣本 (B>1)，將 y 在 batch 維度上擴展對齊
+            if obs.shape[0] == 1 and B > 1:
+                obs = obs.expand(B, -1, -1)
             y = obs.reshape(1, N)  # (1,N)
         # term1 = E|X - y|
         term1 = torch.mean(torch.abs(Xf - y), dim=0)        # (N,)
