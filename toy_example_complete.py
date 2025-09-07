@@ -605,8 +605,9 @@ class DifferentiableHierarchicalBayesianModel(nn.Module):
                 rho = rho_spatial[b]
                 # 距離衰減權重
                 W = torch.exp(- D / rho).to(device)
-                # 主對角保底（自身權重）
-                W.fill_diagonal_(1.0)
+                # 主對角保底（自身權重）- 非就地操作以保留梯度
+                I = torch.eye(H, device=device, dtype=W.dtype)
+                W = W * (1.0 - I) + I
                 # 列和歸一化
                 row_sum = W.sum(dim=1, keepdim=True).clamp_min(1e-8)
                 Wn = W / row_sum
