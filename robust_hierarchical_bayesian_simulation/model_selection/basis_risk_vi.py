@@ -218,6 +218,262 @@ class ParametricPayoutFunction:
         return best_config
 
 
+class SigmoidPayoutProxy:
+    """
+    Sigmoid 代理賠付函數 - 兩階段優化的核心
+    
+    階段一：訓練時使用平滑Sigmoid函數作為階梯函數的代理，提供梯度信號
+    階段二：評估時切換回真實階梯函數，確保結果實用性
+    
+    This is the key to surrogate optimization:
+    - Training: Smooth, differentiable Sigmoid approximation
+    - Evaluation: Original step function for realistic assessment
+    """
+    
+    def __init__(self, 
+                 steinmann_thresholds: List[float] = None,
+                 steinmann_ratios: List[float] = None,
+                 max_payout: float = 20e6,
+                 k: float = 0.1,
+                 training_mode: bool = True):
+        """
+        初始化Sigmoid代理賠付函數
+        
+        Args:
+            steinmann_thresholds: Steinmann產品的閾值定義 [t1, t2, t3, t4]
+            steinmann_ratios: 對應的賠付比例 [r1, r2, r3, r4]  
+            max_payout: 最大賠付金額
+            k: Sigmoid陡峭度參數 (越大越接近階梯)
+            training_mode: True=使用Sigmoid, False=使用階梯
+        """
+        # 默認Steinmann產品配置 (四閾值產品示例)
+        if steinmann_thresholds is None:
+            steinmann_thresholds = [33.0, 43.0, 58.0, 999.0]  # Cat1, Cat2, Cat3, 無效
+        if steinmann_ratios is None:
+            steinmann_ratios = [0.25, 0.5, 0.75, 1.0]  # 25%遞增
+        
+        self.thresholds = np.array(steinmann_thresholds, dtype=np.float32)
+        self.ratios = np.array(steinmann_ratios, dtype=np.float32)
+        self.max_payout = float(max_payout)
+        self.k = float(k)  # Sigmoid陡峭度
+        self.training_mode = training_mode
+        
+        # PyTorch tensor版本 (用於GPU加速)
+        if TORCH_AVAILABLE:
+            self.thresholds_tensor = torch.tensor(self.thresholds, dtype=torch.float32)
+            self.ratios_tensor = torch.tensor(self.ratios, dtype=torch.float32)
+            self.max_payout_tensor = torch.tensor(self.max_payout, dtype=torch.float32)
+            self.k_tensor = torch.tensor(self.k, dtype=torch.float32)
+        
+        print(f"🎯 Sigmoid代理函數初始化:")
+        print(f"   閾值: {self.thresholds}")  
+        print(f"   比例: {self.ratios}")
+        print(f"   最大賠付: ${self.max_payout/1e6:.1f}M")
+        print(f"   陡峭度k: {self.k}")
+        print(f"   模式: {'訓練(Sigmoid)' if training_mode else '評估(階梯)'}")
+    
+    @classmethod  
+    def from_steinmann_product(cls, 
+                              product_index: int,
+                              steinmann_data: Dict = None,
+                              k: float = 0.1,
+                              training_mode: bool = True):
+        """
+        從Steinmann產品定義創建代理函數
+        
+        Args:
+            product_index: Steinmann產品索引 (0-349)
+            steinmann_data: 包含thresholds, ratios, max_payouts的字典
+            k: Sigmoid陡峭度
+            training_mode: 訓練模式標誌
+        
+        Returns:
+            SigmoidPayoutProxy實例
+        """
+        if steinmann_data is None:
+            # 使用默認數據 (需要從BasisRiskAwareVI實例獲取)
+            print("⚠️ 警告: 使用默認Steinmann數據，實際使用請傳入真實數據")
+            return cls(k=k, training_mode=training_mode)
+        
+        thresholds = steinmann_data['thresholds'][product_index]
+        ratios = steinmann_data['ratios'][product_index] 
+        max_payout = steinmann_data['max_payouts'][product_index]
+        
+        return cls(
+            steinmann_thresholds=thresholds.tolist() if hasattr(thresholds, 'tolist') else thresholds,
+            steinmann_ratios=ratios.tolist() if hasattr(ratios, 'tolist') else ratios,
+            max_payout=float(max_payout),
+            k=k,
+            training_mode=training_mode
+        )
+    
+    def set_mode(self, training_mode: bool):
+        """切換訓練/評估模式"""
+        self.training_mode = training_mode
+        mode_name = "訓練(Sigmoid)" if training_mode else "評估(階梯)"
+        print(f"🔄 代理函數切換至: {mode_name}")
+    
+    def calculate_payout_sigmoid(self, 
+                               loss_samples: np.ndarray) -> np.ndarray:
+        """
+        計算Sigmoid代理賠付 - 訓練階段使用
+        
+        使用平滑Sigmoid函數近似階梯式賠付：
+        Payout(x) = max_payout * Σ[(rᵢ - rᵢ₋₁) * sigmoid(k*(x - tᵢ))]
+        
+        Args:
+            loss_samples: 損失樣本 [N, M] 或 [N]
+            
+        Returns:
+            平滑的賠付樣本 [N, M] 或 [N]
+        """
+        if len(loss_samples.shape) == 1:
+            loss_samples = loss_samples.reshape(-1, 1)
+            squeeze_output = True
+        else:
+            squeeze_output = False
+            
+        N, M = loss_samples.shape
+        payout_samples = np.zeros_like(loss_samples, dtype=np.float32)
+        
+        # 向量化Sigmoid計算
+        for i, (threshold, ratio) in enumerate(zip(self.thresholds, self.ratios)):
+            if threshold < 999:  # 有效閾值
+                # 計算當前閾值的增量賠付比例
+                prev_ratio = self.ratios[i-1] if i > 0 else 0.0
+                delta_ratio = ratio - prev_ratio
+                
+                # Sigmoid函數: 1 / (1 + exp(-k*(x - threshold)))
+                sigmoid_values = 1.0 / (1.0 + np.exp(-self.k * (loss_samples - threshold)))
+                payout_samples += delta_ratio * sigmoid_values
+        
+        # 應用最大賠付限制
+        payout_samples *= self.max_payout
+        payout_samples = np.minimum(payout_samples, self.max_payout)
+        
+        return payout_samples.squeeze() if squeeze_output else payout_samples
+    
+    def calculate_payout_step(self, 
+                            loss_samples: np.ndarray) -> np.ndarray:
+        """
+        計算真實階梯賠付 - 評估階段使用
+        
+        使用原始Steinmann階梯式邏輯：
+        對每個損失值，找到觸發的最高閾值，返回對應賠付
+        
+        Args:
+            loss_samples: 損失樣本 [N, M] 或 [N]
+            
+        Returns:
+            階梯式賠付樣本 [N, M] 或 [N]
+        """
+        if len(loss_samples.shape) == 1:
+            loss_samples = loss_samples.reshape(-1, 1)
+            squeeze_output = True
+        else:
+            squeeze_output = False
+            
+        N, M = loss_samples.shape
+        payout_samples = np.zeros_like(loss_samples, dtype=np.float32)
+        
+        # 原始階梯邏輯 - 與Steinmann標準完全一致
+        for i in range(N):
+            for j in range(M):
+                loss_value = loss_samples[i, j]
+                total_payout = 0.0
+                
+                # 找到觸發的最高閾值
+                for thresh_idx in range(len(self.thresholds)):
+                    threshold = self.thresholds[thresh_idx]
+                    if threshold < 999 and loss_value >= threshold:  # 有效閾值且觸發
+                        total_payout = self.max_payout * self.ratios[thresh_idx]
+                
+                payout_samples[i, j] = min(total_payout, self.max_payout)
+        
+        return payout_samples.squeeze() if squeeze_output else payout_samples
+    
+    def calculate_payout_distribution(self, 
+                                    loss_samples: np.ndarray) -> np.ndarray:
+        """
+        統一賠付計算接口 - 自動根據模式選擇Sigmoid或階梯
+        
+        Args:
+            loss_samples: 損失分布樣本
+            
+        Returns:
+            賠付分布樣本
+        """
+        if self.training_mode:
+            return self.calculate_payout_sigmoid(loss_samples)
+        else:
+            return self.calculate_payout_step(loss_samples)
+    
+    def calculate_payout_tensor(self, 
+                              loss_samples: torch.Tensor) -> torch.Tensor:
+        """
+        PyTorch張量版本的賠付計算 - 支援GPU加速和自動微分
+        
+        這是確保參數能夠傳遞到HBM並影響基差風險的關鍵方法！
+        
+        Args:
+            loss_samples: PyTorch損失張量 [N, M]
+            
+        Returns:
+            PyTorch賠付張量 [N, M]
+        """
+        if not TORCH_AVAILABLE:
+            raise ImportError("PyTorch not available for tensor operations")
+        
+        device = loss_samples.device
+        self.thresholds_tensor = self.thresholds_tensor.to(device)
+        self.ratios_tensor = self.ratios_tensor.to(device)
+        self.max_payout_tensor = self.max_payout_tensor.to(device)
+        self.k_tensor = self.k_tensor.to(device)
+        
+        if self.training_mode:
+            # Sigmoid模式 - 保持可微分性
+            payout_samples = torch.zeros_like(loss_samples, dtype=torch.float32)
+            
+            for i, (threshold, ratio) in enumerate(zip(self.thresholds_tensor, self.ratios_tensor)):
+                if threshold < 999:  # 有效閾值
+                    prev_ratio = self.ratios_tensor[i-1] if i > 0 else 0.0
+                    delta_ratio = ratio - prev_ratio
+                    
+                    # 可微分的Sigmoid
+                    sigmoid_values = torch.sigmoid(self.k_tensor * (loss_samples - threshold))
+                    payout_samples += delta_ratio * sigmoid_values
+            
+            payout_samples *= self.max_payout_tensor
+            payout_samples = torch.clamp(payout_samples, 0, self.max_payout_tensor)
+            
+        else:
+            # 階梯模式 - 使用不可微但精確的階梯邏輯
+            payout_samples = torch.zeros_like(loss_samples, dtype=torch.float32)
+            
+            for i, (threshold, ratio) in enumerate(zip(self.thresholds_tensor, self.ratios_tensor)):
+                if threshold < 999:
+                    # 階梯函數：loss >= threshold 時賠付ratio * max_payout
+                    triggered = (loss_samples >= threshold).float()
+                    payout_samples = torch.maximum(
+                        payout_samples, 
+                        triggered * ratio * self.max_payout_tensor
+                    )
+        
+        return payout_samples
+    
+    def get_configuration_summary(self) -> Dict:
+        """獲取配置摘要"""
+        return {
+            'thresholds': self.thresholds.tolist(),
+            'ratios': self.ratios.tolist(), 
+            'max_payout': self.max_payout,
+            'k': self.k,
+            'training_mode': self.training_mode,
+            'valid_thresholds': sum(1 for t in self.thresholds if t < 999),
+            'payout_type': 'sigmoid' if self.training_mode else 'step'
+        }
+
+
 class EpsilonContaminationModel:
     """ε-contamination 模型"""
     
@@ -327,7 +583,11 @@ class BasisRiskAwareVI:
                  learning_rate: float = 0.01,
                  objective: str = 'crps_basis_risk',
                  n_params: int = None,
-                 hierarchical_model = None):
+                 hierarchical_model = None,
+                 # 新增: Sigmoid代理優化參數
+                 use_sigmoid_proxy: bool = True,
+                 sigmoid_steepness: float = 0.1,
+                 training_mode: bool = True):
         """
         初始化基差風險導向 VI
         
@@ -342,6 +602,9 @@ class BasisRiskAwareVI:
                 - 'hbm_two_step': 兩步法 - 先優化G(θ)再評估F_k(θ)
             n_params: 參數維度 (None=自動計算, 2=向後兼容, 350=完整產品選擇)
             hierarchical_model: 外部HBM模型實例 (用於two_step模式)
+            use_sigmoid_proxy: 是否使用Sigmoid代理函數進行可微分優化
+            sigmoid_steepness: Sigmoid陡峭度參數k (越大越接近階梯函數)
+            training_mode: True=訓練模式(Sigmoid), False=評估模式(階梯)
         """
         if epsilon_values is None:
             epsilon_values = [0.0, 0.05, 0.10, 0.15, 0.20]
@@ -359,6 +622,11 @@ class BasisRiskAwareVI:
         self.basis_risk_types = basis_risk_types
         self.objective = objective
         self.hierarchical_model = hierarchical_model  # 外部HBM實例
+        
+        # Sigmoid代理優化相關參數
+        self.use_sigmoid_proxy = use_sigmoid_proxy
+        self.sigmoid_steepness = sigmoid_steepness
+        self.training_mode = training_mode
         
         # 雙GPU配置 - 支持並行計算
         self.use_gpu = use_gpu and TORCH_AVAILABLE
@@ -407,14 +675,73 @@ class BasisRiskAwareVI:
         if self.use_gpu and TORCH_AVAILABLE:
             print(f"   GPU設備: {torch.cuda.get_device_name(self.device)}")
         
-        # 賠付函數
-        self.payout_function = ParametricPayoutFunction()
+        # 🎯 賠付函數 - 支援Sigmoid代理優化
+        if self.use_sigmoid_proxy:
+            # 使用Sigmoid代理函數 - 支援兩階段優化
+            self.payout_function = SigmoidPayoutProxy(
+                k=self.sigmoid_steepness,
+                training_mode=self.training_mode
+            )
+            print(f"🎯 啟用Sigmoid代理優化: k={self.sigmoid_steepness}, mode={'訓練' if self.training_mode else '評估'}")
+        else:
+            # 使用傳統階梯函數 - 僅評估模式
+            self.payout_function = ParametricPayoutFunction()
+            print("📊 使用傳統階梯函數")
         
         # CRPS 計算器
         self.crps_calculator = DifferentiableCRPS()
         
         # 存儲結果
         self.vi_results = {}
+    
+    def set_optimization_mode(self, training_mode: bool):
+        """
+        設置優化模式 - 兩階段代理優化的核心控制
+        
+        Args:
+            training_mode: True=訓練模式(使用Sigmoid代理), False=評估模式(使用真實階梯)
+        """
+        self.training_mode = training_mode
+        
+        if hasattr(self.payout_function, 'set_mode'):
+            self.payout_function.set_mode(training_mode)
+            mode_name = "訓練(Sigmoid)" if training_mode else "評估(階梯)"
+            print(f"🔄 優化模式切換: {mode_name}")
+        else:
+            print("⚠️ 當前賠付函數不支援模式切換")
+    
+    def get_steinmann_payout_proxy(self, product_index: int) -> SigmoidPayoutProxy:
+        """
+        為指定的Steinmann產品創建Sigmoid代理函數
+        
+        這是確保參數能夠正確傳遞到HBM模型的關鍵方法！
+        
+        Args:
+            product_index: Steinmann產品索引 (0-349)
+            
+        Returns:
+            配置好的SigmoidPayoutProxy實例
+        """
+        if not self.use_sigmoid_proxy:
+            print("⚠️ 當前未啟用Sigmoid代理，無法創建產品代理")
+            return None
+        
+        # 獲取Steinmann產品數據
+        steinmann_data = {
+            'thresholds': self._get_steinmann_products_tensor().detach().cpu().numpy(),
+            'ratios': self._get_steinmann_ratios_tensor().detach().cpu().numpy(),
+            'max_payouts': self._get_steinmann_max_payouts().detach().cpu().numpy()
+        }
+        
+        # 為特定產品創建代理
+        proxy = SigmoidPayoutProxy.from_steinmann_product(
+            product_index=product_index,
+            steinmann_data=steinmann_data,
+            k=self.sigmoid_steepness,
+            training_mode=self.training_mode
+        )
+        
+        return proxy
     
     def predict_distribution(self, theta: np.ndarray, X: np.ndarray, n_samples: int = 100) -> np.ndarray:
         """
@@ -933,7 +1260,11 @@ class BasisRiskAwareVI:
     
     def _compute_basis_risk_batch_gpu(self, X_tensor, y_tensor, theta_samples, epsilon, basis_risk_type):
         """
-        雙GPU並行計算350維VI基差風險
+        雙GPU並行計算350維VI基差風險 - 支援Sigmoid代理優化
+        
+        🎯 兩階段代理優化：
+        - 訓練模式：使用Sigmoid代理函數，保持可微分性
+        - 評估模式：使用原始階梯函數，確保真實性
         
         GPU0: 處理前175個產品 (0-174)  
         GPU1: 處理後175個產品 (175-349)
@@ -1050,7 +1381,11 @@ class BasisRiskAwareVI:
         return {'gpu0': gpu0_data, 'gpu1': gpu1_data}
     
     def _compute_products_subset_gpu(self, wind_speeds, product_weights, steinmann_data, start_idx, end_idx):
-        """恢復到固定產品定義 - 重新簡化為純產品選擇"""
+        """
+        🎯 代理優化核心：根據模式選擇Sigmoid或階梯函數
+        
+        確保θ參數變化能夠正確反映到基差風險計算中！
+        """
         batch_size = wind_speeds.shape[0]
         n_data = wind_speeds.shape[1]
         n_products = end_idx - start_idx
@@ -1061,24 +1396,97 @@ class BasisRiskAwareVI:
         ratios = steinmann_data['ratios']          # [n_products, 4]
         max_payouts = steinmann_data['max_payouts'] # [n_products]
         
-        # 向量化計算所有產品
+        # 🔄 根據代理優化模式選擇計算方法
+        if self.use_sigmoid_proxy and self.training_mode:
+            # === 訓練模式：Sigmoid代理函數 ===
+            print(f"🎯 使用Sigmoid代理函數計算賠付 (k={self.sigmoid_steepness})")
+            payouts = self._compute_sigmoid_payout_gpu(
+                wind_speeds, product_weights, thresholds, ratios, max_payouts, n_products
+            )
+        else:
+            # === 評估模式：原始階梯函數 ===
+            print(f"📊 使用原始階梯函數計算賠付")
+            payouts = self._compute_step_payout_gpu(
+                wind_speeds, product_weights, thresholds, ratios, max_payouts, n_products
+            )
+        
+        return payouts
+    
+    def _compute_sigmoid_payout_gpu(self, wind_speeds, product_weights, thresholds, ratios, max_payouts, n_products):
+        """
+        🎯 Sigmoid代理賠付計算 - 可微分的平滑近似
+        
+        實現公式: Payout(x) = max_payout * Σ[(rᵢ - rᵢ₋₁) * sigmoid(k*(x - tᵢ))]
+        """
+        batch_size = wind_speeds.shape[0]
+        n_data = wind_speeds.shape[1]
+        payouts = torch.zeros(batch_size, n_data, device=wind_speeds.device, dtype=torch.float32)
+        
+        # 向量化計算所有產品的Sigmoid賠付
         for prod_idx in range(n_products):
             product_thresholds = thresholds[prod_idx]  # [4]
             product_ratios = ratios[prod_idx]          # [4]
             product_max_payout = max_payouts[prod_idx] # scalar
             
-            # 計算此產品的平滑賠付
+            # 為每個產品計算Sigmoid賠付
             product_payouts = torch.zeros_like(wind_speeds, dtype=torch.float32)
             
             for threshold_idx in range(4):
-                base_threshold = float(product_thresholds[threshold_idx].item())
-                if base_threshold < 999:
+                threshold = float(product_thresholds[threshold_idx].item())
+                if threshold < 999:  # 有效閾值
                     ratio = float(product_ratios[threshold_idx].item())
-                    if ratio > 0:
-                        temperature = 2.0
-                        smooth_activation = torch.sigmoid((wind_speeds - base_threshold) / temperature)
-                        payout_value = product_max_payout * ratio
-                        product_payouts += smooth_activation * payout_value
+                    
+                    # 計算增量賠付比例 (Steinmann階梯式邏輯)
+                    prev_ratio = float(product_ratios[threshold_idx-1].item()) if threshold_idx > 0 else 0.0
+                    delta_ratio = ratio - prev_ratio
+                    
+                    if delta_ratio > 0:
+                        # 🎯 可微分的Sigmoid函數
+                        sigmoid_values = torch.sigmoid(self.sigmoid_steepness * (wind_speeds - threshold))
+                        product_payouts += delta_ratio * sigmoid_values
+            
+            # 應用最大賠付限制
+            product_payouts *= product_max_payout
+            product_payouts = torch.clamp(product_payouts, 0, product_max_payout)
+            
+            # 加權累積 - θ參數的變化在這裡體現！
+            weight = product_weights[:, prod_idx:prod_idx+1]  # [batch_size, 1]
+            payouts += weight * product_payouts
+        
+        return payouts
+    
+    def _compute_step_payout_gpu(self, wind_speeds, product_weights, thresholds, ratios, max_payouts, n_products):
+        """
+        📊 原始階梯賠付計算 - 精確但不可微分
+        
+        使用真實的Steinmann階梯函數邏輯
+        """
+        batch_size = wind_speeds.shape[0]
+        n_data = wind_speeds.shape[1]
+        payouts = torch.zeros(batch_size, n_data, device=wind_speeds.device, dtype=torch.float32)
+        
+        # 向量化計算所有產品的階梯賠付
+        for prod_idx in range(n_products):
+            product_thresholds = thresholds[prod_idx]  # [4]
+            product_ratios = ratios[prod_idx]          # [4]
+            product_max_payout = max_payouts[prod_idx] # scalar
+            
+            # 為每個產品計算階梯賠付
+            product_payouts = torch.zeros_like(wind_speeds, dtype=torch.float32)
+            
+            # Steinmann階梯邏輯：找到觸發的最高閾值
+            for i in range(batch_size):
+                for j in range(n_data):
+                    wind_value = wind_speeds[i, j].item()
+                    max_triggered_ratio = 0.0
+                    
+                    for threshold_idx in range(4):
+                        threshold = float(product_thresholds[threshold_idx].item())
+                        if threshold < 999 and wind_value >= threshold:
+                            ratio = float(product_ratios[threshold_idx].item())
+                            max_triggered_ratio = max(max_triggered_ratio, ratio)
+                    
+                    product_payouts[i, j] = product_max_payout * max_triggered_ratio
             
             # 加權累積
             weight = product_weights[:, prod_idx:prod_idx+1]  # [batch_size, 1]
