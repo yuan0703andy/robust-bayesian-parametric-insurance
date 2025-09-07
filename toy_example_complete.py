@@ -733,7 +733,7 @@ print("✅ 四層階層貝氏模型定義完成")
 class DifferentiablePayoutFunction(nn.Module):
         """可微分的保險賠付函數 - 「合約引擎」"""
         
-        def __init__(self, product_config: Dict):
+        def __init__(self, product_config: Dict, verbose: bool = False):
             super().__init__()
             
             # Steinmann產品配置
@@ -747,9 +747,11 @@ class DifferentiablePayoutFunction(nn.Module):
             self.register_buffer('ratios', ratios)
             self.max_payout = max_payout
             self.steepness = steepness
+            self.verbose = verbose
             
-            print(f"💰 初始化保險產品: 閾值={thresholds.tolist()}, 比例={ratios.tolist()}")
-            print(f"   最大賠付: ${max_payout/1e6:.1f}M, 陡峭度: {steepness}")
+            if self.verbose:
+                print(f"💰 初始化保險產品: 閾值={thresholds.tolist()}, 比例={ratios.tolist()}")
+                print(f"   最大賠付: ${max_payout/1e6:.1f}M, 陡峭度: {steepness}")
         
         def forward(self, loss_distribution_params: Dict[str, torch.Tensor]
                    ) -> Dict[str, torch.Tensor]:
