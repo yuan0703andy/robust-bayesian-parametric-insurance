@@ -749,19 +749,19 @@ class DifferentiableHierarchicalBayesianModel(nn.Module):
                 # 使用該批次的標準化風速超量
                 normalized_excess_b = normalized_excess_batch[b]
                 
-                # 基礎Emanuel脆弱度: V_base = a * [(v-v₀)/v₀]^b
-                base_vulnerability = vulnerability_a[b] * (normalized_excess_b ** vulnerability_b[b])
-                
-                # 層次修正因子: exp(β_i) - 每個位置的特定風險調整
-                hierarchical_multiplier = torch.exp(vulnerability_params[b]).unsqueeze(1)
-                
-                # 最終脆弱度: V(v; β_i) = V_base × exp(β_i)
-                vulnerability = base_vulnerability * hierarchical_multiplier
-                if VERBOSE:
-                    print(f"[HBM:L1] base_vuln={base_vulnerability.shape}, hier_mult={hierarchical_multiplier.shape}, vuln={vulnerability.shape}")
-                
-                # 飽和效應: V ≤ 1.0
-                vulnerability = torch.clamp(vulnerability, max=1.0)
+                # 數值安全版：在 log 域相加，並夾範圍避免溢出/NaN
+                eps_v = 1e-30
+
+                # log base: a + b*log(excess)，excess=0 時 -> log(eps) 使得值趨近 0 而不 NaN
+                log_base = torch.log(torch.clamp(normalized_excess_b, min=eps_v)) * vulnerability_b[b] \
+                        + torch.log(torch.clamp(vulnerability_a[b], min=eps_v))
+
+                # 夾住層級效應，避免 exp 爆炸
+                beta = torch.clamp(vulnerability_params[b], -12.0, 12.0).unsqueeze(1)
+
+                # log v = log_base + beta；再夾到 ≤0，確保 vulnerability ≤ 1
+                log_v = torch.clamp(log_base + beta, max=0.0, min=-60.0)
+                vulnerability = torch.exp(log_v)
                 
                 # 期望損失 = V(v; β_i) × E_i
                 expected_loss = vulnerability * exposure_values
@@ -776,20 +776,15 @@ class DifferentiableHierarchicalBayesianModel(nn.Module):
             mu_loss_clamped = torch.clamp(mu_loss, min=1e3)  # 最小損失 $1K
             mu_log = torch.log(mu_loss_clamped)
             
-            # 觀測誤差的對數標準差 - 支持異質性
-            # sigma_obs現在是 (batch_size, n_hospitals) 或 (batch_size,)
-            sigma_obs = params['sigma_obs']
-            
-            if sigma_obs.dim() == 2:  # 異質觀測誤差 (batch_size, n_hospitals)
-                # 擴展到 (batch_size, n_hospitals, n_events)
-                sigma_log = torch.log(sigma_obs.unsqueeze(2).expand_as(mu_loss_clamped))
-                if self.verbose:
-                    print(f"✅ 使用異質觀測誤差 - 每家醫院獨立: {sigma_obs.shape}")
-            else:  # 同質觀測誤差 (batch_size,)
-                # 擴展到 (batch_size, n_hospitals, n_events) 
-                sigma_log = torch.log(sigma_obs.unsqueeze(1).unsqueeze(2).expand_as(mu_loss_clamped))
-                if self.verbose:
-                    print(f"⚠️ 使用同質觀測誤差: {sigma_obs.shape}")
+            # === 用 CV 公式把「美元尺度的不確定度」轉成 LogNormal 的 sigma_log ===
+            sigma_obs = params['sigma_obs']  # 可能為 (batch, H) 或 (batch,)
+            if sigma_obs.dim() == 2:
+                std_loss = sigma_obs.unsqueeze(2).expand_as(mu_loss_clamped)     # (batch, H, E)
+            else:
+                std_loss = sigma_obs.unsqueeze(1).unsqueeze(2).expand_as(mu_loss_clamped)  # (batch, H, E)
+            m = torch.clamp(mu_loss_clamped, min=1e3)
+            cv2 = torch.clamp((std_loss / m) ** 2, min=0.0, max=1e6)
+            sigma_log = torch.sqrt(torch.log1p(cv2)).clamp(1e-3, 2.5)
             
             return {
                 'mu_log': mu_log,         # 對數正態分佈的位置參數
@@ -1126,16 +1121,11 @@ class UnifiedEndToEndVIModel(nn.Module):
         Xf = X.reshape(S, N)                                # (S,N)
         # 將 observed_losses 透過同一保單函數映射成實際賠付 y_payout
         with torch.no_grad():
+            # 基差風險版本：直接以觀測「損失」作為 y
             obs = observed_losses.to(device)
             if obs.dim() == 2:           # (H,E) -> (1,H,E)
                 obs = obs.unsqueeze(0)
-                obs = obs.clamp_min(1e3)     # 避免 log(0) 尾部問題
-            # 使用同一合約函數取得觀測損失對應的賠付 g(obs)
-            y_payout_bhe, _ = self.payout_function._payout_and_derivative(obs)  # (1,H,E) 或 (B?,H,E)
-            # 將實際賠付在 batch 維度上複製成 (B,H,E)，對應 θ 的混合抽樣
-            if y_payout_bhe.shape[0] == 1 and B > 1:
-                y_payout_bhe = y_payout_bhe.expand(B, -1, -1)
-            y = y_payout_bhe.reshape(1, N)  # (1,N)
+            y = obs.reshape(1, N)  # (1,N)
         # term1 = E|X - y|
         term1 = torch.mean(torch.abs(Xf - y), dim=0)        # (N,)
         # term2 = 0.5 * E|X - X'|
@@ -1582,29 +1572,28 @@ class ModelConfiguration:
     
     @staticmethod
     def get_steinmann_product_configs() -> List[Dict]:
-        """獲取Steinmann保險產品配置"""
+        """獲取Steinmann保險產品配置（與資料量級對齊）"""
         return [
             {
-                # 將第一個產品改為與資料量級匹配的多階梯版本（與 Stage3 的預設 product_configs[0] 相容）
                 'name': 'Standard Multi-Level (scaled)',
-                'thresholds': [5e6, 15e6, 30e6, 60e6],   
-                'ratios':     [0.25,  0.5,   0.75,  1.0],     # 25%、50%、75%、100%
-                'max_payout': 50e6,                            # 上限 300 萬
-                'steepness':  5                             # 平滑些，避免過硬的階梯
+                'thresholds': [0.2e6, 0.4e6, 0.6e6, 0.8e6],  # 20萬~80萬
+                'ratios':     [0.25,  0.5,   0.75,  1.0],
+                'max_payout': 2e6,                            # 上限 200 萬
+                'steepness':  0.2                              # 較平滑，避免梯度硬切
             },
             {
-                'name': 'Dual Threshold Product', 
-                'thresholds': [30e6, 60e6, 999e6, 999e6],   # 兩個閾值
-                'ratios': [0.5, 1.0, 0.0, 0.0],             # 50%, 100%賠付
-                'max_payout': 20e6,
-                'steepness': 5
+                'name': 'Dual Threshold Product (scaled)', 
+                'thresholds': [0.3e6, 0.6e6, 999e6, 999e6],
+                'ratios': [0.5, 1.0, 0.0, 0.0],
+                'max_payout': 2e6,
+                'steepness': 0.2
             },
             {
-                'name': 'Multi-Level Product',
-                'thresholds': [20e6, 40e6, 60e6, 80e6],     # 四個閾值 
-                'ratios': [0.25, 0.5, 0.75, 1.0],           # 25%, 50%, 75%, 100%賠付
-                'max_payout': 20e6,
-                'steepness': 5
+                'name': 'Multi-Level Product (wide)',
+                'thresholds': [0.1e6, 0.3e6, 0.5e6, 0.7e6],
+                'ratios': [0.25, 0.5, 0.75, 1.0],
+                'max_payout': 2e6,
+                'steepness': 0.2
             }
         ]
 
@@ -2056,14 +2045,13 @@ class RobustnessStressTester:
         else:
             val_losses_for_testing = val_losses
             
-        # 使用固定的保險產品配置
+        # 使用固定的保險產品配置（與資料量級對齊）
         product_config = {
             'name': 'Standard Multi-Level (scaled)',
-            # 與 Stage3 同步：醫院量級門檻 + 寬平滑帶，避免梯度消失
-            'thresholds': [0.5e6, 1e6, 2e6, 4e6],
+            'thresholds': [0.2e6, 0.4e6, 0.6e6, 0.8e6],
             'ratios':     [0.25, 0.5, 0.75, 1.0],
-            'max_payout': 50e6,
-            'steepness':  5.0
+            'max_payout': 2e6,
+            'steepness':  0.2
         }
         
         for model_config in test_models:
