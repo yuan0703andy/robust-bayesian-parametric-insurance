@@ -94,6 +94,9 @@ class DifferentiableHierarchicalBayesianModel(nn.Module):
             - theta[9+]: 異質觀測誤差 (可選，每家醫院)
             """
             # 基礎參數 (使用softplus確保正值)
+            # 觀測誤差的金額單位，以美元為基準（放大到百萬美元尺度）
+            OBS_UNIT = 1e6  # 觀測誤差的金額單位，以美元
+            
             parsed_params = {
                 # 這三個是標準差，維持 softplus 沒問題
                 'sigma_alpha': F.softplus(theta_samples[:, 0]),
@@ -106,8 +109,8 @@ class DifferentiableHierarchicalBayesianModel(nn.Module):
                 'vulnerability_a': torch.clamp(torch.exp(theta_samples[:, 4]), max=1.0),
                 'vulnerability_b': torch.clamp(torch.exp(theta_samples[:, 5]), max=5.0),
 
-                # 觀測誤差的基準尺度用 exp（亦可用 softplus，但要與先驗一致）
-                'sigma_obs_base': torch.exp(theta_samples[:, 6]),
+                # 觀測誤差的基準尺度用 exp，並放大到適當的金額尺度（百萬美元）
+                'sigma_obs_base': OBS_UNIT * torch.exp(theta_samples[:, 6]),
             }
             if theta_samples.shape[1] > 7:
                 parsed_params['v_threshold'] = torch.exp(theta_samples[:, 7])

@@ -96,9 +96,16 @@ class UnifiedEndToEndVIModel(nn.Module):
         except Exception:
             self.param_target = None
 
-        # payout 尺度：預設用 H * max_payout（事件層合計的尺寸）
+        # payout 尺度：使用事件層可達的合計限額，避免過度縮放CRPS
         if payout_scale is None:
-            self.payout_scale = float(product_config.get('max_payout', 1.0)) * float(n_hospitals)
+            if self.param_target is not None and hasattr(self.param_target, 'site_limits'):
+                # 事件層上限 = 各 site 限額加總；若有 cap 就取 cap
+                cap = float(self.param_target.payout_cap) if self.param_target.payout_cap is not None else None
+                limit_sum = float(self.param_target.site_limits.sum().item())
+                self.payout_scale = cap if cap is not None else limit_sum
+            else:
+                # 後備：單院上限
+                self.payout_scale = float(product_config.get('max_payout', 1.0))
         else:
             self.payout_scale = float(payout_scale)
         

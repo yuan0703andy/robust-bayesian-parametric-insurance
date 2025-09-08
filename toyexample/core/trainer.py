@@ -81,7 +81,8 @@ class EndToEndTrainer:
         # 遮罩：只保留圓內站點，其餘置極小
         masked = winds_ms.unsqueeze(0).expand(H, -1, -1).clone()     # [H, H, E]
         mask3 = pt.mask.unsqueeze(-1).bool()                         # [H, H, 1]
-        masked = masked.masked_fill(~mask3, -1e9)
+        big_neg = torch.tensor(-1e9, device=winds_ms.device, dtype=winds_ms.dtype)
+        masked = masked.masked_fill(~mask3, big_neg)
 
         # 硬 max：每個 site 對圓內的站點取最大風速
         I_site = masked.max(dim=1).values                            # [H, E]
@@ -100,13 +101,14 @@ class EndToEndTrainer:
 
     def _indemnity_hard(self, base_model, observed_losses: torch.Tensor) -> torch.Tensor:
         """
-        事件層「實際理賠」（硬條款）：把觀測損失丟入硬分層線性條款，沿醫院加總 → [E]
-        支援輸入形狀：[E]、[H,E]、[1,H,E]（其它形狀報錯）
+        事件層硬條款理賠：把觀測損失丟入「分層線性」硬 ramp，沿醫院加總 → [E]
+        金額單位：與 product_config 保持一致（美元）
         """
         pf = base_model.payout_function
-        thr    = pf.thresholds          # [T], 單位：美元
-        ratios = pf.ratios              # [T], 累積比例
-        # widths 若模型裡有就用之；否則以相鄰 threshold 差估，最後一段沿用倒數第二段寬
+        thr    = pf.thresholds    # [T], 美元
+        ratios = pf.ratios        # [T], 累積比例
+
+        # widths：若 payout function 有就用；否則以相鄰 thr 差估，最後一段沿用倒數第二段寬
         if hasattr(pf, "widths"):
             widths = pf.widths
         else:
@@ -114,17 +116,16 @@ class EndToEndTrainer:
             last = d[-1] if d.numel() > 0 else torch.tensor(1.0, device=thr.device, dtype=thr.dtype)
             widths = torch.cat([d, last.view(1)])
 
-        # --- 標準化成 [1,H,E] ---
-        if observed_losses.dim() == 1:                  # [E]
+        # 標準化到 [1,H,E]
+        if observed_losses.dim() == 1:          # [E]
             loss_obs = observed_losses.view(1, 1, -1)
-        elif observed_losses.dim() == 2:                # [H,E]
+        elif observed_losses.dim() == 2:        # [H,E]
             loss_obs = observed_losses.unsqueeze(0)
-        elif observed_losses.dim() == 3:                # [1,H,E] 或 [B,H,E]
-            loss_obs = observed_losses[:1]              # 取第一個 batch
+        elif observed_losses.dim() == 3:        # [1,H,E] 或 [B,H,E]
+            loss_obs = observed_losses[:1]
         else:
             raise ValueError("observed_losses 需為 [E]、[H,E] 或 [1,H,E]")
 
-        # --- 硬條款：分層線性 ramp ---
         payout_ratio = torch.zeros_like(loss_obs)
         prev = 0.0
         for i in range(len(thr)):
@@ -134,12 +135,12 @@ class EndToEndTrainer:
             t = float(thr[i].item())
             w = float(widths[i].item())
             r = (loss_obs - t) / max(w, 1e-6)
-            ramp = torch.clamp(r, 0.0, 1.0)            # 線性 0→1，區外夾 0/1
+            ramp = torch.clamp(r, 0.0, 1.0)        # 硬線性 0→1
             payout_ratio = payout_ratio + dr * ramp
             prev = float(ratios[i])
 
-        payout = payout_ratio * pf.max_payout          # [1,H,E]
-        return payout.sum(dim=1).squeeze(0)            # → [E]（沿醫院合計成事件層）
+        payout = payout_ratio * pf.max_payout      # [1,H,E]（美元）
+        return payout.sum(dim=1).squeeze(0)        # → [E]
 
     
     def train_epoch(self, hazard_intensities: torch.Tensor,
@@ -237,6 +238,12 @@ class EndToEndTrainer:
 
             # 2) 觀測損失的「實際理賠」（硬條款）
             y_indemn = self._indemnity_hard(base_model, observed_losses)                     # [E]
+
+            # 添加輕量偵錯信息（可選）
+            nz_param  = (y_parametric > 0).float().mean().item()
+            nz_indemn = (y_indemn     > 0).float().mean().item()
+            # print(f"[debug] trigger% param={nz_param:.3f} indemn={nz_indemn:.3f}, "
+            #       f"param(mean)={y_parametric.mean().item():.1f}, indemn(mean)={y_indemn.mean().item():.1f}")
 
             trad_basis = torch.mean(torch.abs(y_parametric - y_indemn)).item()
 
@@ -360,6 +367,13 @@ class EndToEndTrainer:
                 y_parametric = self._indemnity_hard(base_model, observed_losses)  # 後備
 
             y_indemn = self._indemnity_hard(base_model, observed_losses)                     # [E]
+
+            # 添加輕量偵錯信息（可選）
+            nz_param  = (y_parametric > 0).float().mean().item()
+            nz_indemn = (y_indemn     > 0).float().mean().item()
+            # print(f"[debug eval] trigger% param={nz_param:.3f} indemn={nz_indemn:.3f}, "
+            #       f"param(mean)={y_parametric.mean().item():.1f}, indemn(mean)={y_indemn.mean().item():.1f}")
+
             trad_basis = torch.mean(torch.abs(y_parametric - y_indemn))
 
             loss_dict = {
