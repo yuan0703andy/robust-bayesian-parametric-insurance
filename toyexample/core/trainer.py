@@ -213,10 +213,17 @@ class EndToEndTrainer:
                 y_indemn_evt = self._indemnity_hard(base_model, observed_losses)  # [E]
                 # 從 predictive 抽樣
                 S = 32
+                # 確保 region_assignments 是正確的格式
+                region_assignments = None
+                if spatial_data is not None and hasattr(spatial_data, 'region_assignments'):
+                    region_assignments = spatial_data.region_assignments
+                    if not isinstance(region_assignments, torch.Tensor):
+                        region_assignments = torch.tensor(region_assignments, dtype=torch.long, device=hazard_intensities.device)
+                
                 pred_samples = base_model._sample_total_payout_from_loss(
                     base_model.hbm(hazard_intensities, exposure_values, 
                                    base_model._sample_theta(n_samples), 
-                                   spatial_data.region_assignments if spatial_data else None), 
+                                   region_assignments), 
                     n_pred_samples=S
                 )  # [S,E] 金額
                 crps_u_mc = base_model._mc_crps_unitless(pred_samples, y_indemn_evt, cap).mean()  # 單位化的 mean
@@ -405,10 +412,16 @@ class EndToEndTrainer:
                 scale = float(base_model.payout_scale)
                 
                 # 計算正確的 MC-CRPS（單位化）
+                region_assignments_eval = None
+                if spatial_data is not None and hasattr(spatial_data, 'region_assignments'):
+                    region_assignments_eval = spatial_data.region_assignments
+                    if not isinstance(region_assignments_eval, torch.Tensor):
+                        region_assignments_eval = torch.tensor(region_assignments_eval, dtype=torch.long, device=hazard_intensities.device)
+                
                 Y_mc = base_model._sample_total_payout_from_loss(
                     base_model.hbm(hazard_intensities, exposure_values, 
                                   base_model._sample_theta(30), 
-                                  spatial_data.region_assignments if spatial_data else None), 
+                                  region_assignments_eval), 
                     n_pred_samples=100
                 )  # [S,E] 金額
                 

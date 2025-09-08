@@ -62,6 +62,9 @@ class DifferentiableHierarchicalBayesianModel(nn.Module):
                 if self.verbose:
                     print(f"⚠️ 使用預設區域分配 (循環分配到 {self.n_regions} 個區域)")
             else:
+                # 確保是tensor並轉換到正確設備
+                if not isinstance(region_assignments, torch.Tensor):
+                    region_assignments = torch.tensor(region_assignments, dtype=torch.long)
                 region_assignments = region_assignments.to(hazard_intensities.device).long()
             # Level 3: 參數層
             region_effects, individual_effects, spatial_effects = self._compute_level3_effects(
