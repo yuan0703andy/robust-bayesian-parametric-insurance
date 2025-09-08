@@ -239,11 +239,15 @@ class EndToEndTrainer:
             # 2) 觀測損失的「實際理賠」（硬條款）
             y_indemn = self._indemnity_hard(base_model, observed_losses)                     # [E]
 
-            # 添加輕量偵錯信息（可選）
+            # 添加輕量偵錯信息（每10個epoch打印一次）
             nz_param  = (y_parametric > 0).float().mean().item()
             nz_indemn = (y_indemn     > 0).float().mean().item()
-            # print(f"[debug] trigger% param={nz_param:.3f} indemn={nz_indemn:.3f}, "
-            #       f"param(mean)={y_parametric.mean().item():.1f}, indemn(mean)={y_indemn.mean().item():.1f}")
+            
+            # 第一個epoch必須打印，之後每10個epoch打印一次
+            current_epoch = len(self.loss_history) + 1
+            if current_epoch == 1 or current_epoch % 10 == 0:
+                print(f"[Epoch {current_epoch:2d}] 觸發率 param={nz_param:.3f} indemn={nz_indemn:.3f} | "
+                      f"均值 param=${y_parametric.mean().item()/1e6:.1f}M indemn=${y_indemn.mean().item()/1e6:.1f}M")
 
             trad_basis = torch.mean(torch.abs(y_parametric - y_indemn)).item()
 
@@ -368,11 +372,11 @@ class EndToEndTrainer:
 
             y_indemn = self._indemnity_hard(base_model, observed_losses)                     # [E]
 
-            # 添加輕量偵錯信息（可選）
+            # 添加輕量偵錯信息（評估時總是打印）
             nz_param  = (y_parametric > 0).float().mean().item()
             nz_indemn = (y_indemn     > 0).float().mean().item()
-            # print(f"[debug eval] trigger% param={nz_param:.3f} indemn={nz_indemn:.3f}, "
-            #       f"param(mean)={y_parametric.mean().item():.1f}, indemn(mean)={y_indemn.mean().item():.1f}")
+            print(f"[Eval] 觸發率 param={nz_param:.3f} indemn={nz_indemn:.3f} | "
+                  f"均值 param=${y_parametric.mean().item()/1e6:.1f}M indemn=${y_indemn.mean().item()/1e6:.1f}M")
 
             trad_basis = torch.mean(torch.abs(y_parametric - y_indemn))
 

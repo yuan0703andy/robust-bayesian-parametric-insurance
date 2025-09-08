@@ -132,8 +132,17 @@ def stage3_run_model_matrix(generator: ToyDataGenerator,
         print(f"   描述: {model_config['description']}")
         print(f"   ε值: Prior={model_config['epsilon_prior']:.3f}, Likelihood={model_config['epsilon_likelihood']:.3f}")
         config_results = {}
-        product_config = product_configs[0]
+        product_config = product_configs[0].copy()  # 複製以避免修改原配置
         print(f"\n💰 保險產品: {product_config['name']}")
+        
+        # === 關鍵：添加參數型條款配置，啟用 param_target ===
+        haz_np = train_hazards.cpu().numpy()  # [H,E] 訓練集風險數據
+        dist_km = spatial_data.distance_matrix
+        param_cfg = ModelConfiguration.build_param_target_config(
+            haz_np, dist_km, per_site_limit=product_config['max_payout']
+        )
+        product_config.update(param_cfg)  # 這行很重要，讓 UnifiedEndToEndVIModel 能啟用 param_target
+        
         model = UnifiedEndToEndVIModel(
             n_hospitals=generator.n_hospitals,
             n_regions=generator.n_regions,
@@ -145,6 +154,11 @@ def stage3_run_model_matrix(generator: ToyDataGenerator,
             prior_scenario=model_config['prior_scenario'],
             likelihood_family=model_config['likelihood_family']
         )
+        
+        # === 對齊 CRPS payout_scale 與事件層上限 ===
+        if model.param_target is not None and model.param_target.payout_cap is not None:
+            model.payout_scale = float(model.param_target.payout_cap)
+            print(f"✅ CRPS尺度已對齊事件層上限: ${model.payout_scale/1e6:.1f}M")
         
         # 移動模型到正確的設備
         model.to_multi_gpu()

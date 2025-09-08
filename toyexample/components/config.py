@@ -1,6 +1,7 @@
 """Configuration classes moved from toy_example_complete.py."""
 from typing import Dict, List
 from enum import Enum
+import numpy as np
 
 class PriorScenario(Enum):
     """先驗情境"""
@@ -163,6 +164,54 @@ class ModelConfiguration:
                 'steepness': 0.2
             }
         ]
+
+    @staticmethod
+    def build_param_target_config(hazards_ms: np.ndarray,
+                                  distance_matrix_km: np.ndarray,
+                                  per_site_limit: float,
+                                  given_radius_km: float = None) -> dict:
+        """
+        依資料自動校準 cat-in-circle 硬條款：
+          - 半徑：預設取醫院間距中位數（可覆寫）
+          - trigger：圓內 site 最大風速的 60 分位
+          - exhaustion：85 分位（至少高於 trigger 5 m/s）
+          - site_limits：每院上限 = per_site_limit（建議 = product_config['max_payout']）
+          - payout_cap：事件層上限 = H * per_site_limit
+        """
+        import torch
+        
+        hazards = torch.as_tensor(hazards_ms, dtype=torch.float32)   # [H,E]
+        H, E = hazards.shape
+        D = torch.as_tensor(distance_matrix_km, dtype=torch.float32) # [H,H]
+
+        R_km = float(np.median(D[D.numpy()>0])) if given_radius_km is None else float(given_radius_km)
+        mask = (D <= R_km).float()
+
+        big_neg = torch.tensor(-1e9, dtype=hazards.dtype)
+        masked  = hazards.unsqueeze(0).expand(H,-1,-1).clone() + (mask.unsqueeze(-1)-1.0) * (-big_neg)
+        I_site  = masked.max(dim=1).values   # [H,E] 每 site 的圓內硬 max
+        I_evt   = I_site.max(dim=0).values   # [E] 事件層代表強度（最保守）
+
+        q60 = torch.quantile(I_evt, 0.60).item()
+        q85 = torch.quantile(I_evt, 0.85).item()
+        trigger    = float(q60)
+        exhaustion = float(max(q85, trigger + 5.0))
+
+        site_limits = np.full(H, float(per_site_limit), dtype=np.float32)
+        payout_cap  = float(H * per_site_limit)
+
+        print(f"🎯 參數型條款自動配置:")
+        print(f"   半徑: {R_km:.1f} km | 觸發: {trigger:.1f} m/s | 耗盡: {exhaustion:.1f} m/s")
+        print(f"   單院限額: ${per_site_limit/1e6:.1f}M | 事件上限: ${payout_cap/1e6:.1f}M")
+
+        return dict(
+            radius_km=R_km,
+            trigger_ms=trigger,
+            exhaustion_ms=exhaustion,
+            site_limits=site_limits,
+            payout_cap=payout_cap,
+            smooth_tau=0.3,  # param target 用於 y_target（可微時用），不影響這裡的硬條款
+        )
 
 print("✅ 配置類定義完成")
 
