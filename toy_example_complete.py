@@ -1909,12 +1909,23 @@ class EndToEndTrainer:
                 'peak': [torch.cuda.max_memory_allocated(i) / 1e6 for i in GPU_DEVICES]
             })
         
-        # 記錄損失
+        # 傳統基差風險（事件層）：|param payout(hazard) - indemnity(loss)| 平均
+        with torch.no_grad():
+            base_model = self.model.module if hasattr(self.model, 'module') else self.model
+            y_actual = observed_losses.sum(dim=0)  # (E)
+            if getattr(base_model, 'param_target', None) is not None:
+                y_param, _ = base_model.param_target(hazard_intensities)
+            else:
+                y_param = _indemnity_from_loss(y_actual, deductible=0.0, limit=getattr(base_model, 'payout_scale', float(y_actual.max().item())))
+            trad_basis = torch.mean(torch.abs(y_param - y_actual)).item()
+
+        # 記錄損失與指標
         losses = {
             'total_loss': total_loss_scalar.item(),
             'elbo': elbo_scalar.item(),
             'crps_term': crps_scalar.item(),
-            'kl_term': kl_scalar.item()
+            'kl_term': kl_scalar.item(),
+            'trad_basis': trad_basis
         }
         losses['epoch_time'] = epoch_time
         self.loss_history.append(losses)
@@ -2017,22 +2028,38 @@ class EndToEndTrainer:
                     hazard_intensities, exposure_values, observed_losses, n_samples, spatial_data
                 )
                 total_loss, elbo, crps_term, kl_div = outputs
+                # 傳統基差風險（事件層）
+                base_model = self.model.module if hasattr(self.model, 'module') else self.model
+                y_actual = observed_losses.sum(dim=0)
+                if getattr(base_model, 'param_target', None) is not None:
+                    y_param, _ = base_model.param_target(hazard_intensities)
+                else:
+                    y_param = _indemnity_from_loss(y_actual, deductible=0.0, limit=getattr(base_model, 'payout_scale', float(y_actual.max().item())))
+                trad_basis = torch.mean(torch.abs(y_param - y_actual))
                 loss_dict = {
                     'total_loss': total_loss.mean(),
                     'elbo': elbo.mean(),
                     'crps_term': crps_term.mean(),
-                    'kl_term': kl_div.mean()
+                    'kl_term': kl_div.mean(),
+                    'trad_basis': trad_basis
                 }
             else:
                 base_model = self.model.module if hasattr(self.model, 'module') else self.model
                 total_loss, elbo, crps_term, kl_div = base_model(
                     hazard_intensities, exposure_values, observed_losses, n_samples, spatial_data
                 )
+                y_actual = observed_losses.sum(dim=0)
+                if getattr(base_model, 'param_target', None) is not None:
+                    y_param, _ = base_model.param_target(hazard_intensities)
+                else:
+                    y_param = _indemnity_from_loss(y_actual, deductible=0.0, limit=getattr(base_model, 'payout_scale', float(y_actual.max().item())))
+                trad_basis = torch.mean(torch.abs(y_param - y_actual))
                 loss_dict = {
                     'total_loss': total_loss,
                     'elbo': elbo,
                     'crps_term': crps_term,
-                    'kl_term': kl_div
+                    'kl_term': kl_div,
+                    'trad_basis': trad_basis
                 }
         
         return {k: v.item() if hasattr(v, 'item') else v for k, v in loss_dict.items()}
@@ -2657,7 +2684,8 @@ def stage3_run_model_matrix(generator: ToyDataGenerator,
             if (epoch + 1) % 10 == 0:
                 test_losses_dict = trainer.evaluate(test_hazards, exposure_tensor, test_losses, n_samples=15, spatial_data=spatial_data)
                 print(f"   Epoch {epoch+1:2d}: Test ELBO={test_losses_dict['elbo']:.3f} "
-                      f"(CRPS={test_losses_dict['crps_term']:.1f}, KL={test_losses_dict['kl_term']:.3f})")
+                      f"(CRPS={test_losses_dict['crps_term']:.1f}, KL={test_losses_dict['kl_term']:.3f}, "
+                      f"TradBasis={test_losses_dict.get('trad_basis', float('nan')):.1f})")
                 best_test_elbo = max(best_test_elbo, test_losses_dict['elbo'])
         final_test = trainer.evaluate(test_hazards, exposure_tensor, test_losses, n_samples=30, spatial_data=spatial_data)
         config_results[product_config['name']] = {
@@ -2668,7 +2696,7 @@ def stage3_run_model_matrix(generator: ToyDataGenerator,
             'product_config': product_config
         }
         print(f"   ✅ 最終測試ELBO: {final_test['elbo']:.3f}")
-        print(f"   📊 CRPS分數: {final_test['crps_term']:.1f}")
+        print(f"   📊 CRPS分數: {final_test['crps_term']:.1f} | 傳統基差: {final_test.get('trad_basis', float('nan')):.1f}")
         results[model_config['name']] = config_results
     return results
 
