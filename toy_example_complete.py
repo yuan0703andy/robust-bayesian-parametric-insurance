@@ -815,7 +815,6 @@ class DifferentiableHierarchicalBayesianModel(nn.Module):
             # 對數正態分佈參數化: Loss ~ LogNormal(μ_log, σ_log)
             # 確保數值穩定性
             mu_loss_clamped = torch.clamp(mu_loss, min=1e3)  # 最小損失 $1K
-            mu_log = torch.log(mu_loss_clamped)
             
             # === 用 CV 公式把「美元尺度的不確定度」轉成 LogNormal 的 sigma_log ===
             sigma_obs = params['sigma_obs']  # 可能為 (batch, H) 或 (batch,)
@@ -831,6 +830,7 @@ class DifferentiableHierarchicalBayesianModel(nn.Module):
             sigma_log = torch.nan_to_num(sigma_log, nan=1e-3, posinf=2.5, neginf=1e-3)
             sigma_log = torch.clamp(sigma_log, 1e-3, 2.5)
             # 進一步保護 mu_log（避免極端時的 NaN/Inf）
+            mu_log = torch.log(mu_loss_clamped) - 0.5 * (sigma_log ** 2)
             mu_log = torch.nan_to_num(mu_log, nan=7.0, posinf=20.0, neginf=-60.0)
             
             return {
@@ -935,6 +935,72 @@ print("✅ 可微分保險賠付函數定義完成")
 
 # %%
 # ============================================================================
+# 4.1 參數型 cat-in-circle 賠付目標（事件層觸發）
+# ============================================================================
+
+def _smooth_max(x: torch.Tensor, tau: float = 0.5) -> torch.Tensor:
+    return tau * torch.logsumexp(x / tau, dim=-1)
+
+def _indemnity_from_loss(loss: torch.Tensor, deductible: float = 0.0, limit: float = float('inf')) -> torch.Tensor:
+    pay = torch.clamp(loss - deductible, min=0.0)
+    if torch.isfinite(torch.tensor(limit, device=loss.device)):
+        pay = torch.clamp(pay, max=limit)
+    return pay
+
+class CatInCirclePayout(nn.Module):
+    """基於最大風速觸發的參數型賠付：事件層目標生成器。
+    - 對每個 site（此處以醫院作為 site）取半徑R內的站點最大風速（用平滑max近似）
+    - 指標 I = max_{circle} wind
+    - 賠付_site = ramp(I; trigger→exhaustion) * site_limit
+    - 事件總賠付 = 各 site 賠付加總（可選加總限額）
+    備註：本模組僅用於產生 y_target（監管/產品定義），不參與梯度。
+    """
+    def __init__(self, distance_matrix_km: np.ndarray, radius_km: float,
+                 trigger_ms: float, exhaustion_ms: float,
+                 site_limits: np.ndarray, smooth_tau: float = 0.5,
+                 payout_cap: float = None, site_weights: np.ndarray = None):
+        super().__init__()
+        D = torch.tensor(distance_matrix_km, dtype=torch.float32)
+        self.register_buffer('D', D)
+        H = D.shape[0]
+        self.N_site, self.N_sta = H, H
+        self.R = float(radius_km)
+        self.trigger = float(trigger_ms)
+        self.exhaustion = float(exhaustion_ms)
+        self.smooth_tau = float(smooth_tau)
+        self.register_buffer('site_limits', torch.tensor(site_limits, dtype=torch.float32))
+        if site_weights is None:
+            self.register_buffer('site_weights', torch.ones(H, dtype=torch.float32))
+        else:
+            self.register_buffer('site_weights', torch.tensor(site_weights, dtype=torch.float32))
+        self.payout_cap = payout_cap
+        # 建立圓形遮罩
+        mask = (D <= self.R).float()
+        empty = (mask.sum(dim=1) == 0)
+        if torch.any(empty):
+            nearest_idx = torch.argmin(D[empty], dim=1)
+            mask[empty, :] = 0.0
+            mask[empty, nearest_idx] = 1.0
+        self.register_buffer('mask', mask)
+
+    def forward(self, winds_ms: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        # winds_ms: [H, E]
+        masked = winds_ms.unsqueeze(0).expand(self.N_site, -1, -1)
+        big_neg = torch.tensor(-1e6, device=winds_ms.device, dtype=winds_ms.dtype)
+        masked = masked + (self.mask.unsqueeze(-1) - 1.0) * (-big_neg)
+        # site指標 I_site: [H, E]
+        I_site = _smooth_max(masked, tau=self.smooth_tau)
+        # 線性ramp到賠付比例
+        width = max(self.exhaustion - self.trigger, 1e-6)
+        ramp = torch.clamp((I_site - self.trigger) / width, 0.0, 1.0)
+        payout_site = ramp * self.site_limits.unsqueeze(-1)
+        total = (self.site_weights.unsqueeze(-1) * payout_site).sum(dim=0)  # [E]
+        if self.payout_cap is not None:
+            total = torch.clamp(total, max=self.payout_cap)
+        return total, I_site
+
+# =========================================================================
+# ============================================================================
 # 5. 統一的端到端VI模型
 # ============================================================================
 
@@ -953,7 +1019,10 @@ class UnifiedEndToEndVIModel(nn.Module):
                     epsilon_likelihood: float = 0.0,
                     prior_scenario: PriorScenario = PriorScenario.NON_INFORMATIVE,
                     likelihood_family: LikelihoodFamily = LikelihoodFamily.LOGNORMAL,
-                    verbose: bool = False):
+                    verbose: bool = False,
+                    lambda_kl: float = 0.05,
+                    lambda_br: float = 1.0,
+                    payout_scale: float = None):
         super().__init__()
         
         self.n_hbm_params = n_hbm_params
@@ -962,6 +1031,8 @@ class UnifiedEndToEndVIModel(nn.Module):
         self.prior_scenario = prior_scenario       # 先驗情境
         self.likelihood_family = likelihood_family # 似然函數族
         self.verbose = verbose
+        self.lambda_kl = float(lambda_kl)
+        self.lambda_br = float(lambda_br)
         # 純CRPS模式（不加入likelihood項），符合 ℒ_BR 定義
         
         # 獲取具體的先驗參數
@@ -984,6 +1055,35 @@ class UnifiedEndToEndVIModel(nn.Module):
             n_hospitals, n_regions, n_events, distance_matrix, verbose=verbose
         )
         self.payout_function = DifferentiablePayoutFunction(product_config, verbose=verbose)
+        # 事件層參數型賠付目標（cat-in-circle），若配置齊全則啟用
+        self.param_target = None
+        try:
+            radius_km = product_config.get('radius_km', None)
+            trigger_ms = product_config.get('trigger_ms', None)
+            exhaustion_ms = product_config.get('exhaustion_ms', None)
+            site_limits = product_config.get('site_limits', None)
+            payout_cap = product_config.get('payout_cap', None)
+            if (radius_km is not None) and (trigger_ms is not None) and (exhaustion_ms is not None):
+                if site_limits is None:
+                    # 每院平均分配 max_payout（若未提供）
+                    site_limits = np.full(n_hospitals, float(product_config.get('max_payout', 1.0)) / max(n_hospitals,1))
+                self.param_target = CatInCirclePayout(
+                    distance_matrix_km=distance_matrix,
+                    radius_km=radius_km,
+                    trigger_ms=trigger_ms,
+                    exhaustion_ms=exhaustion_ms,
+                    site_limits=np.asarray(site_limits, dtype=np.float32),
+                    payout_cap=payout_cap,
+                    smooth_tau=product_config.get('smooth_tau', 0.5)
+                )
+        except Exception:
+            self.param_target = None
+
+        # payout 尺度：預設用 H * max_payout（事件層合計的尺寸）
+        if payout_scale is None:
+            self.payout_scale = float(product_config.get('max_payout', 1.0)) * float(n_hospitals)
+        else:
+            self.payout_scale = float(payout_scale)
         
         if self.verbose:
             print(f"🧠 統一VI模型初始化: {n_hbm_params}個HBM參數")
@@ -1015,23 +1115,63 @@ class UnifiedEndToEndVIModel(nn.Module):
         
         # 4. 賠付分佈 F(θ)
         payout_dist_params = self.payout_function(loss_dist_params)
-        
-        # 5. CRPS 基差風險（前向引擎）
-        crps_scores = self._compute_crps_batch(observed_losses, payout_dist_params, n_pred_samples=50)
-        
-        # 6. KL(q||p_ε)
+
+        # (A) NLL: 資料配適（loss likelihood）
+        loglik = PriorLikelihoodProcessor.compute_likelihood_logprob(
+            observed_losses, loss_dist_params, self.likelihood_family
+        )
+        nll = -loglik
+
+        # (B) KL(q||p_ε)
         kl_div = self._compute_kl_divergence_with_prior(theta_samples)
-        
+
+        # (C) 分布型基差風險：事件層 CRPS on payout
+        Y_samples = self._sample_total_payout_from_loss(loss_dist_params, n_pred_samples=50)  # [S,E]
+        if self.param_target is not None:
+            with torch.no_grad():
+                y_target, _ = self.param_target(hazard_intensities)
+        else:
+            with torch.no_grad():
+                # 後備：以損失總額的 indemnity 當作理想賠付
+                loss_total = observed_losses.sum(dim=0)
+                y_target = _indemnity_from_loss(loss_total, deductible=0.0, limit=self.payout_scale)
+        crps_val = self._crps_event_level(Y_samples, y_target)
+        crps_scaled = crps_val / max(self.payout_scale, 1.0)
+
         # 數值保護
-        crps_term = torch.mean(crps_scores)
-        crps_term = torch.nan_to_num(crps_term, nan=1e6, posinf=1e6, neginf=1e6)
-        kl_div = torch.nan_to_num(kl_div, nan=0.0, posinf=1e3, neginf=1e3)
-        
-        # 7. ELBO 與最終損失
-        elbo = - crps_term - kl_div
+        nll = torch.nan_to_num(nll, nan=1e6, posinf=1e6, neginf=1e6)
+        kl_div = torch.nan_to_num(kl_div, nan=0.0, posinf=1e6, neginf=1e6)
+        crps_scaled = torch.nan_to_num(crps_scaled, nan=1e6, posinf=1e6, neginf=0.0)
+
+        total_loss = nll + self.lambda_kl * kl_div + self.lambda_br * crps_scaled
+        elbo = -total_loss
         total_loss = -elbo
         
-        return total_loss, elbo, crps_term, kl_div
+        return total_loss, elbo, crps_scaled.detach(), kl_div.detach()
+
+    def _sample_total_payout_from_loss(self, loss_params: Dict[str, torch.Tensor], n_pred_samples: int = 50) -> torch.Tensor:
+        mu_log = loss_params['mu_log']
+        sigma_log = loss_params['sigma_log']
+        if mu_log.dim() == 2:
+            mu_log = mu_log.unsqueeze(0); sigma_log = sigma_log.unsqueeze(0)
+        B, H, E = mu_log.shape
+        S = int(n_pred_samples)
+        eps = torch.randn(S, B, H, E, device=mu_log.device)
+        X = torch.exp(mu_log.unsqueeze(0) + sigma_log.unsqueeze(0) * eps)  # (S,B,H,E)
+        payout_det, _ = self.payout_function._payout_and_derivative(X)
+        Y = payout_det.sum(dim=2)  # (S,B,E) 合計各院
+        return Y.mean(dim=1)       # (S,E) 對 batch 平均
+
+    def _crps_event_level(self, Y_samples: torch.Tensor, y_target: torch.Tensor) -> torch.Tensor:
+        # Y_samples: [S,E], y_target: [E]
+        S, E = Y_samples.shape
+        term1 = torch.mean(torch.abs(Y_samples - y_target.unsqueeze(0)))
+        Ys, _ = torch.sort(Y_samples, dim=0)
+        idx = torch.arange(1, S+1, device=Ys.device, dtype=Ys.dtype).view(S, 1)
+        coeff = 2 * idx - (S + 1)
+        term2 = (Ys * coeff).sum(dim=0) / (S * S)
+        crps = term1 - term2.mean()
+        return torch.clamp(crps, min=0.0)
 
     def evaluate_metrics(self, hazard_intensities: torch.Tensor,
                          exposure_values: torch.Tensor,
@@ -2172,8 +2312,8 @@ class RobustnessStressTester:
                     val_results = trainer.evaluate(
                         val_hazards_tensor, exposure_tensor, val_losses_tensor, n_samples=15, spatial_data=spatial_data
                     )
-                    # 使用 -crps_term 作為 CRPS 分數（越小越好）
-                    val_crps = -val_results['crps_term']
+                    # 使用 crps_term 作為 CRPS 分數（越小越好）
+                    val_crps = val_results['crps_term']
                     if val_crps < best_val_crps:
                         best_val_crps = val_crps
             

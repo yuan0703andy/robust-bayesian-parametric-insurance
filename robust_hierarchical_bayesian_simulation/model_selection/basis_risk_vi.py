@@ -23,6 +23,7 @@ warnings.filterwarnings('ignore')
 try:
     import torch
     import torch.nn as nn
+    import torch.nn.functional as F
     import torch.optim as optim
     from torch.distributions import Normal
     TORCH_AVAILABLE = True
@@ -1931,6 +1932,208 @@ class BasisRiskAwareVI:
             'best_models': all_results[:3],
             'best_model': all_results[0]
         }
+
+
+if TORCH_AVAILABLE:
+    # ============================================================
+    # Route A: Solvency-compliant integrated objective with cat-in-circle
+    # ============================================================
+
+    # Stable Student-t logpdf
+    def student_t_logpdf(y: torch.Tensor, loc: torch.Tensor, scale: torch.Tensor, df: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
+        scale = torch.clamp(scale, min=eps)
+        df = torch.clamp(df, min=2.01)
+        t = (y - loc) / scale
+        Z = (torch.lgamma((df + 1)/2) - torch.lgamma(df/2)
+             - 0.5*torch.log(df*torch.pi) - torch.log(scale))
+        return Z - 0.5*(df+1)*torch.log1p(t*t/df)
+
+    def smooth_max(x: torch.Tensor, tau: float = 0.5) -> torch.Tensor:
+        return tau * torch.logsumexp(x / tau, dim=-1)
+
+    def smooth_ramp(z: torch.Tensor, a: float, b: float, eps: float = 1e-6, k: float = 20.0) -> torch.Tensor:
+        width = torch.clamp(torch.tensor(b - a, device=z.device, dtype=z.dtype), min=eps)
+        t = (z - a) / width
+        # Smooth clamp to [0,1]
+        return torch.clamp(t, 0.0, 1.0)
+
+    def indemnity_from_loss(loss: torch.Tensor, deductible: float = 0.0, limit: float = float('inf')) -> torch.Tensor:
+        pay = torch.clamp(loss - deductible, min=0.0)
+        if torch.isfinite(torch.tensor(limit, device=loss.device)):
+            pay = torch.clamp(pay, max=limit)
+        return pay
+
+    def crps_from_samples(x_samples: torch.Tensor, y_target: torch.Tensor) -> torch.Tensor:
+        # x_samples: [S, E], y_target: [E]
+        S, E = x_samples.shape
+        term1 = torch.mean(torch.abs(x_samples - y_target))
+        x_perm = x_samples[torch.randperm(S)]
+        term2 = 0.5 * torch.mean(torch.abs(x_samples - x_perm))
+        return term1 - term2
+
+    class CatInCirclePayout(nn.Module):
+        def __init__(self, distance_matrix_km, circle_radius_km: float,
+                     trigger_ms: float, exhaustion_ms: float,
+                     site_limits, smooth_tau: float = 0.5,
+                     payout_cap: float = None, site_weights = None):
+            super().__init__()
+            D = torch.tensor(distance_matrix_km, dtype=torch.float32)
+            self.register_buffer('D', D)
+            self.N_site, self.N_sta = D.shape
+            self.R = float(circle_radius_km)
+            self.trigger = float(trigger_ms)
+            self.exhaustion = float(exhaustion_ms)
+            self.smooth_tau = float(smooth_tau)
+            self.site_limits = torch.as_tensor(site_limits, dtype=torch.float32)
+            self.site_weights = (torch.ones(self.N_site, dtype=torch.float32)
+                                  if site_weights is None else torch.as_tensor(site_weights, dtype=torch.float32))
+            self.payout_cap = payout_cap
+
+            mask = (D <= self.R).float()
+            empty = (mask.sum(dim=1) == 0)
+            if torch.any(empty):
+                nearest_idx = torch.argmin(D[empty], dim=1)
+                mask[empty, :] = 0.0
+                mask[empty, nearest_idx] = 1.0
+            self.register_buffer('mask', mask)
+
+        def forward(self, winds_ms: torch.Tensor):  # winds_ms: [N_sta, E]
+            device = winds_ms.device
+            masked = winds_ms.unsqueeze(0).expand(self.N_site, -1, -1)
+            # non-inplace: set outside-circle to big negative
+            big_neg = torch.tensor(-1e6, device=device, dtype=masked.dtype)
+            masked = masked + (self.mask.unsqueeze(-1) - 1.0) * (-big_neg)
+            I_site = smooth_max(masked, tau=self.smooth_tau)  # [N_site, E]
+
+            ramp = smooth_ramp(I_site, self.trigger, self.exhaustion)
+            payout_site = ramp * self.site_limits.unsqueeze(-1)
+            total = (self.site_weights.unsqueeze(-1) * payout_site).sum(dim=0)
+            if self.payout_cap is not None:
+                total = torch.clamp(total, max=self.payout_cap)
+            return total, I_site
+
+    class VulnerabilityHBM(nn.Module):
+        def __init__(self, n_hospitals: int):
+            super().__init__()
+            self.alpha_un = nn.Parameter(torch.zeros(1))
+            self.beta_un  = nn.Parameter(torch.log(torch.tensor(1.5)))
+            self.v0_un    = nn.Parameter(torch.log(torch.tensor(20.0)))
+            self.log_sigma = nn.Parameter(torch.log(torch.tensor(1.0)))
+            self.log_nu_m1 = nn.Parameter(torch.log(torch.tensor(5.0 - 1.0)))
+
+        def forward(self, winds_ms: torch.Tensor, exposure: torch.Tensor):
+            alpha = F.softplus(self.alpha_un) + 1e-6
+            beta  = F.softplus(self.beta_un)  + 1e-6
+            v0    = F.softplus(self.v0_un)    + 1e-6
+            relu_term = torch.clamp(winds_ms - v0, min=0.0) ** beta
+            mean_loss = exposure.unsqueeze(-1) * alpha * relu_term
+            sigma = torch.exp(self.log_sigma) + 1e-6
+            nu    = 1.0 + F.softplus(self.log_nu_m1)
+            return mean_loss, sigma, nu
+
+    class SolvencyCompliantBayesVI(nn.Module):
+        def __init__(self, n_hospitals: int, n_regions: int,
+                     distance_matrix_km, product_config: Dict,
+                     lambda_kl: float = 0.05, lambda_br: float = 1.0,
+                     loss_scale: float = 1e6, payout_scale: float = None,
+                     solvency_mode: bool = True):
+            super().__init__()
+            self.n_hospitals = n_hospitals
+            self.lambda_kl = lambda_kl
+            self.lambda_br = lambda_br
+            self.loss_scale = loss_scale
+
+            self.mu_q = nn.Parameter(torch.zeros(6))
+            self.log_std_q = nn.Parameter(torch.full((6,), -1.0))
+            self.register_buffer('mu_p', torch.zeros(6))
+            self.register_buffer('std_p', torch.ones(6))
+
+            self.hbm = VulnerabilityHBM(n_hospitals)
+            self.product = CatInCirclePayout(
+                distance_matrix_km=distance_matrix_km,
+                circle_radius_km=product_config['radius_km'],
+                trigger_ms=product_config['trigger_ms'],
+                exhaustion_ms=product_config['exhaustion_ms'],
+                site_limits=product_config['site_limits'],
+                smooth_tau=product_config.get('smooth_tau', 0.5),
+                payout_cap=product_config.get('payout_cap', None),
+                site_weights=product_config.get('site_weights', None)
+            )
+            if payout_scale is None:
+                if product_config.get('payout_cap', None) is not None:
+                    self.payout_scale = float(product_config['payout_cap'])
+                else:
+                    self.payout_scale = float(torch.tensor(product_config['site_limits']).sum())
+            else:
+                self.payout_scale = payout_scale
+
+        def sample_theta(self, n_samples: int) -> torch.Tensor:
+            eps = torch.randn(n_samples, self.mu_q.numel(), device=self.mu_q.device)
+            return self.mu_q + torch.exp(self.log_std_q) * eps
+
+        def kl_qp(self) -> torch.Tensor:
+            var_q = torch.exp(2*self.log_std_q)
+            var_p = self.std_p**2
+            term = (torch.log(self.std_p) - self.log_std_q) + (var_q + (self.mu_q - self.mu_p)**2)/(2*var_p) - 0.5
+            return term.sum()
+
+        def load_theta_to_hbm_(self, theta_vec: torch.Tensor):
+            self.hbm.alpha_un.data = theta_vec[0:1]
+            self.hbm.beta_un.data  = theta_vec[1:2]
+            self.hbm.v0_un.data    = theta_vec[2:3]
+            self.hbm.log_sigma.data = theta_vec[3:4]
+            self.hbm.log_nu_m1.data = theta_vec[4:5]
+
+        def compute_solvency_elbo(self, winds_ms: torch.Tensor, exposure: torch.Tensor, losses: torch.Tensor,
+                                   indemnity_cfg: Dict, n_samples: int = 64):
+            device = self.mu_q.device
+            winds_ms = winds_ms.to(device)
+            exposure = exposure.to(device)
+            losses   = losses.to(device)
+
+            losses_scaled = losses / self.loss_scale
+            S = n_samples
+            theta_s = self.sample_theta(S)
+
+            loglik_terms = []
+            payouts_samples = []
+            for s in range(S):
+                self.load_theta_to_hbm_(theta_s[s])
+                mean_loss, sigma, nu = self.hbm(winds_ms, exposure)
+                ll = student_t_logpdf(losses_scaled,
+                                       loc=mean_loss/self.loss_scale,
+                                       scale=sigma/self.loss_scale,
+                                       df=nu).sum()
+                loglik_terms.append(ll)
+                total_payout, _ = self.product(winds_ms)
+                payouts_samples.append(total_payout)
+
+            loglik = torch.stack(loglik_terms).mean()
+            payouts_samples = torch.stack(payouts_samples, dim=0)
+
+            kl = self.kl_qp()
+
+            loss_total = losses.sum(dim=0)
+            y_pay_target = indemnity_from_loss(
+                loss_total,
+                deductible=indemnity_cfg.get('deductible', 0.0),
+                limit=indemnity_cfg.get('limit', float('inf'))
+            )
+            crps_raw = crps_from_samples(payouts_samples, y_pay_target)
+            crps_scaled = crps_raw / self.payout_scale
+
+            nll = -loglik
+            total_loss = nll + self.lambda_kl * kl + self.lambda_br * crps_scaled
+            solvency_elbo = loglik - self.lambda_kl * kl - self.lambda_br * crps_scaled
+
+            logs = {
+                'nll': float(nll.detach()),
+                'kl': float(kl.detach()),
+                'crps_raw': float(crps_raw.detach()),
+                'crps_scaled': float(crps_scaled.detach()),
+                'solvency_elbo': float(solvency_elbo.detach()),
+            }
+            return total_loss, logs
     
     
     def _cpu_screening(self, X: np.ndarray, y: np.ndarray, 
