@@ -420,64 +420,31 @@ class EndToEndTrainer:
         exposure_values    = exposure_values.to(self.device)
         observed_losses    = observed_losses.to(self.device)
 
+        # 小工具：把任何張量壓成 0 維（預設用 mean），確保能 .item()
+        def _as_scalar_eval(x):
+            if torch.is_tensor(x):
+                return x if x.ndim == 0 else x.mean()
+            # 不是 tensor 也轉成張量，保持型別一致
+            return torch.as_tensor(x, device=self.device)
+
         with torch.no_grad():
             base_model = self.model.module if hasattr(self.model, 'module') else self.model
 
-            # 前向（照舊）- 但不再信任其 crps_term（可能數值爆炸）
-            total_loss, elbo, crps_term_orig, kl_div = base_model(
+            # 前向（通常會回傳每事件的向量）
+            total_loss, elbo, crps_term, kl_div = base_model(
                 hazard_intensities, exposure_values, observed_losses, n_samples, spatial_data
             )
 
-            # === 新增：用穩定的 MC-CRPS 作為評估輸出，並統一單位化比較 ===
-            try:
-                scale = float(base_model.payout_scale)
-                
-                # 計算正確的 MC-CRPS（單位化）
-                region_assignments_eval = None
-                if spatial_data is not None and hasattr(spatial_data, 'region_assignments'):
-                    region_assignments_eval = spatial_data.region_assignments
-                    if not isinstance(region_assignments_eval, torch.Tensor):
-                        region_assignments_eval = torch.tensor(region_assignments_eval, dtype=torch.long, device=hazard_intensities.device)
-                
-                Y_mc = base_model._sample_total_payout_from_loss(
-                    base_model.hbm(hazard_intensities, exposure_values, 
-                                  base_model._sample_theta(30), 
-                                  region_assignments_eval), 
-                    n_pred_samples=100
-                )  # [S,E] 金額
-                
-                # 獲取事件層真值（硬條款理賠）
-                if base_model.param_target is not None:
-                    y_true_evt, _ = base_model.param_target(hazard_intensities)
-                else:
-                    loss_total = observed_losses.sum(dim=0)
-                    y_true_evt = _indemnity_from_loss(loss_total, deductible=0.0, limit=scale)
-                
-                # 正確的 MC-CRPS（單位化）
-                crps_mc_u = base_model._mc_crps_unitless(Y_mc, y_true_evt, scale).mean()
-                
-                # Forward 的 CRPS（已經是單位化）
-                crps_f_u = crps_term_orig.mean()
-                
-                print(f"🔍 CRPS比較 (unitless): Forward={crps_f_u.item():.3f} vs MC={crps_mc_u.item():.3f} "
-                      f"| $版≈${crps_mc_u.item()*scale:,.0f}")
-                
-                # 使用 MC-CRPS 作為評估輸出
-                crps_eval = crps_mc_u
-                
-            except Exception as e:
-                print(f"⚠️  MC-CRPS計算失敗，使用原始值: {e}")
-                crps_eval = crps_term_orig
-
-            # 顯式硬條款（我們的 hard payout 是在 trainer 端自己算，不靠 model 裡的平滑）
-            # → 不需要再設 eval_hard flag；保持 model 的平滑流程只用於訓練/CRPS
-            # 正確的事件層基差風險：
+            # === 硬條款：事件層基差 ===
             if base_model.param_target is not None:
                 y_parametric = self._parametric_payout_hard(base_model, hazard_intensities)  # [E]
             else:
-                y_parametric = self._indemnity_hard(base_model, observed_losses)  # 後備
+                # ✅ 修正：不能 sum(dim=0) 變成 [E] 再丟 _indemnity_hard
+                #   這裡直接用 [H,E] 的 observed_losses
+                y_parametric = self._indemnity_hard(base_model, observed_losses)             # [E]
 
             y_indemn = self._indemnity_hard(base_model, observed_losses)                     # [E]
+            trad_basis = torch.mean(torch.abs(y_parametric - y_indemn))                      # scalar
 
             # 添加輕量偵錯信息（評估時總是打印）
             nz_param  = (y_parametric > 0).float().mean().item()
@@ -485,18 +452,23 @@ class EndToEndTrainer:
             print(f"[Eval] 觸發率 param={nz_param:.3f} indemn={nz_indemn:.3f} | "
                   f"均值 param=${y_parametric.mean().item()/1e6:.1f}M indemn=${y_indemn.mean().item()/1e6:.1f}M")
 
-            trad_basis = torch.mean(torch.abs(y_parametric - y_indemn))
+            # 先在 GPU 上把它們壓成 0 維張量
+            total_loss_s = _as_scalar_eval(total_loss)
+            elbo_s       = _as_scalar_eval(elbo)
+            crps_s       = _as_scalar_eval(crps_term)
+            kl_s         = _as_scalar_eval(kl_div)
+            trad_s       = _as_scalar_eval(trad_basis)
 
             loss_dict = {
-                'total_loss': total_loss,
-                'elbo': elbo,
-                'crps_term': crps_eval,    # <<==== 用穩定的 MC-CRPS 取代可能爆炸的原始值
-                'kl_term': kl_div,
-                'trad_basis': trad_basis
+                'total_loss': total_loss_s,
+                'elbo': elbo_s,
+                'crps_term': crps_s,
+                'kl_term': kl_s,
+                'trad_basis': trad_s
             }
 
-        # to cpu scalars
-        return {k: (v.item() if hasattr(v, 'item') else v) for k, v in loss_dict.items()}
+        # 轉成 Python float 回傳（此時皆為 0 維）
+        return {k: float(v.detach().cpu().item()) for k, v in loss_dict.items()}
 
     def evaluate_with_metrics(self, hazard_intensities: torch.Tensor,
                               exposure_values: torch.Tensor,
