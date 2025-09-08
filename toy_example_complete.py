@@ -1614,9 +1614,9 @@ class PriorLikelihoodProcessor:
                 sigma_obs_raw = predicted_params.get('sigma_obs', torch.tensor(1e6, device=mu_loss.device))
                 std = _expand_sigma_obs_to_mu(mu_loss, sigma_obs_raw)
                 
-                # 計算log probability
+                # 計算log probability（平均而非總和，避免規模依賴）
                 dist = Normal(mu_loss, std)
-                log_prob = dist.log_prob(observed_losses.unsqueeze(0)).sum(dim=(1, 2))  # sum over hospitals and events
+                log_prob = dist.log_prob(observed_losses.unsqueeze(0)).mean(dim=(1, 2))
                 
             elif likelihood_family == LikelihoodFamily.LOGNORMAL:
                 # 對數正態似然: Loss ~ LogNormal(μ_log, σ_log²)
@@ -1629,7 +1629,7 @@ class PriorLikelihoodProcessor:
                 
                 dist = LogNormal(mu_log, sigma_log)
                 eps = 1e-3
-                log_prob = dist.log_prob((observed_losses.unsqueeze(0)).clamp_min(eps)).sum(dim=(1, 2))
+                log_prob = dist.log_prob((observed_losses.unsqueeze(0)).clamp_min(eps)).mean(dim=(1, 2))
                 
             elif likelihood_family == LikelihoodFamily.STUDENT_T:
                 # Student-t似然: 重尾分佈，對異常值更穩健
@@ -1639,12 +1639,13 @@ class PriorLikelihoodProcessor:
                 df = 3.0  # 自由度，較小值產生更重的尾部
                 
                 dist = StudentT(df, mu_loss, scale)
-                log_prob = dist.log_prob(observed_losses.unsqueeze(0)).sum(dim=(1, 2))
+                log_prob = dist.log_prob(observed_losses.unsqueeze(0)).mean(dim=(1, 2))
                 
             else:
                 raise ValueError(f"未知的似然族: {likelihood_family}")
                 
-            return log_prob.mean()  # 平均over batch dimension
+            # 最後在樣本維做平均，得到「平均 NLL」的對偶
+            return log_prob.mean()
     
     print("✅ Prior/Likelihood處理器定義完成")
 
