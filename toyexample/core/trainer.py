@@ -357,10 +357,23 @@ class EndToEndTrainer:
         with torch.no_grad():
             base_model = self.model.module if hasattr(self.model, 'module') else self.model
 
-            # 前向（照舊）
-            total_loss, elbo, crps_term, kl_div = base_model(
+            # 前向（照舊）- 但不再信任其 crps_term（可能數值爆炸）
+            total_loss, elbo, crps_term_orig, kl_div = base_model(
                 hazard_intensities, exposure_values, observed_losses, n_samples, spatial_data
             )
+
+            # === 新增：用穩定的 MC-CRPS 作為評估輸出（避免 forward 內解析式爆數） ===
+            try:
+                metrics = base_model.evaluate_metrics(
+                    hazard_intensities, exposure_values, observed_losses,
+                    n_samples=30, spatial_data=spatial_data, n_pred_samples=200
+                )
+                # 優先使用 MC-CRPS，沒有才回退到原始值
+                crps_eval = metrics.get('crps_mean', metrics.get('crps', crps_term_orig))
+                print(f"🔍 CRPS比較: Forward={crps_term_orig.item():.1f} vs MC={crps_eval.item():.1f}")
+            except Exception as e:
+                print(f"⚠️  MC-CRPS計算失敗，使用原始值: {e}")
+                crps_eval = crps_term_orig
 
             # 顯式硬條款（我們的 hard payout 是在 trainer 端自己算，不靠 model 裡的平滑）
             # → 不需要再設 eval_hard flag；保持 model 的平滑流程只用於訓練/CRPS
@@ -383,7 +396,7 @@ class EndToEndTrainer:
             loss_dict = {
                 'total_loss': total_loss,
                 'elbo': elbo,
-                'crps_term': crps_term,
+                'crps_term': crps_eval,    # <<==== 用穩定的 MC-CRPS 取代可能爆炸的原始值
                 'kl_term': kl_div,
                 'trad_basis': trad_basis
             }

@@ -155,10 +155,30 @@ def stage3_run_model_matrix(generator: ToyDataGenerator,
             likelihood_family=model_config['likelihood_family']
         )
         
-        # === 對齊 CRPS payout_scale 與事件層上限 ===
+        # === 強制覆蓋 CRPS 尺度到事件層上限（確保模型內所有scale一致） ===
+        H = generator.n_hospitals
+        scale_evt = float(H * product_config['max_payout'])  # 事件層上限
+
+        # 1) 模型層面的總尺度（給 forward/損失用）
+        model.payout_scale = scale_evt
+
+        # 2) 若 forward 裡另外有其他尺度屬性，也一併覆蓋
+        if hasattr(model, "crps_scale"):
+            model.crps_scale = scale_evt
+        if hasattr(model, "target_scale"):
+            model.target_scale = scale_evt
+
+        print(f"✅ 強制覆蓋 CRPS 尺度到事件層上限: ${scale_evt:,.0f} (${scale_evt/1e6:.1f}M)")
+        
+        # 3) 驗證 param_target 的 payout_cap 是否一致
         if model.param_target is not None and model.param_target.payout_cap is not None:
-            model.payout_scale = float(model.param_target.payout_cap)
-            print(f"✅ CRPS尺度已對齊事件層上限: ${model.payout_scale/1e6:.1f}M")
+            cap_from_target = float(model.param_target.payout_cap)
+            if abs(cap_from_target - scale_evt) > 1e3:  # 容許小誤差
+                print(f"⚠️  警告: param_target.payout_cap=${cap_from_target:,.0f} 與計算值=${scale_evt:,.0f} 不一致")
+            else:
+                print(f"✅ param_target.payout_cap 已對齊: ${cap_from_target:,.0f}")
+        else:
+            print(f"ℹ️  param_target 未啟用或無 payout_cap")
         
         # 移動模型到正確的設備
         model.to_multi_gpu()
