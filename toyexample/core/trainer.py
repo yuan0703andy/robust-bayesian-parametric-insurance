@@ -29,7 +29,7 @@ class EndToEndTrainer:
         self.log_every = int(log_every)
         self.beta_kl_max = 1.0      # KL 最大權重
         self.beta_warmup_epochs = 100
-        self.lambda_crps_max = 0.1  # CRPS 最大權重（用 unitless）
+        self.lambda_crps_max = 5.0  # CRPS 最大權重（調整到決策量級）
         self.lambda_warmup_epochs = 50
         
         # GPU配置和模型設置
@@ -212,6 +212,20 @@ class EndToEndTrainer:
             # 正確的 KL 權重：ELBO 已包含 KL，用 (beta_kl - 1.0) 調整
             loss_corrected = -elbo_scalar + (beta_kl - 1.0) * kl_scalar + lambda_crps * crps_scalar
             total_loss_scalar = self._as_scalar(loss_corrected)
+            
+            # CRPS 數值健康性檢查
+            assert torch.isfinite(crps_scalar), "CRPS NaN/Inf detected"
+            if not (0.0 <= float(crps_scalar) <= 2.5):
+                print(f"⚠️ CRPS(u) out-of-range: {float(crps_scalar):.3f}")
+                
+            # 多GPU路徑也需要統一的日誌打印（如果需要的話）
+            if self._should_log(epoch_idx):
+                loss_value = float(total_loss_scalar.detach().cpu())
+                elbo_value = float(elbo_scalar.detach().cpu())
+                kl_value = float(kl_scalar.detach().cpu())
+                crps_value = float(crps_scalar.detach().cpu())
+                print(f"[Multi-GPU Epoch {epoch_idx:3d}] loss={loss_value:.3f} | ELBO={elbo_value:+.3f} "
+                      f"| KL={kl_value:.3f}(β={beta_kl:.2f}) | CRPS(u)={crps_value:.3f}(λ={lambda_crps:.2f})")
         else:
             base_model = self.model.module if hasattr(self.model, 'module') else self.model
             total_loss, elbo, crps_term_orig, kl_div = base_model(
@@ -251,6 +265,11 @@ class EndToEndTrainer:
             loss_corrected = -elbo_scalar + (beta_kl - 1.0) * kl_scalar + lambda_crps * crps_scalar
             total_loss_scalar = self._as_scalar(loss_corrected)
         
+        # CRPS 數值健康性檢查
+        assert torch.isfinite(crps_scalar), "CRPS NaN/Inf detected"
+        if not (0.0 <= float(crps_scalar) <= 2.5):
+            print(f"⚠️ CRPS(u) out-of-range: {float(crps_scalar):.3f}")
+        
         # 確保損失是標量用於反向傳播
         assert total_loss_scalar.ndim == 0, f"Loss must be scalar, got shape {total_loss_scalar.shape}"
         
@@ -276,6 +295,13 @@ class EndToEndTrainer:
             # log_sigma_theta 與 mu_theta 約束在合理範圍
             base_model.log_sigma_theta.clamp_(-10.0, 10.0)
             base_model.mu_theta.clamp_(-20.0, 20.0)
+            
+            # 對 σ_obs 參數（第6個參數，log_σ_obs）加更強約束
+            # 限制 log_σ_obs 在 [-5, 5] 範圍，對應 σ_obs ∈ [0.007M, 148M] 
+            if base_model.mu_theta.numel() >= 7:
+                base_model.mu_theta[6].clamp_(-5.0, 5.0)
+                if base_model.log_sigma_theta.numel() >= 7:
+                    base_model.log_sigma_theta[6].clamp_(-3.0, 1.0)  # 更小的變異性
             
         # 記錄性能指標
         epoch_time = time.time() - start_time
@@ -308,10 +334,21 @@ class EndToEndTrainer:
             nz_param  = (y_parametric > 0).float().mean().item()
             nz_indemn = (y_indemn     > 0).float().mean().item()
             
-            # 使用統一的日誌節流
+            # 使用統一的日誌節流 - 確保loss計算與打印一致
             if self._should_log(epoch_idx):
-                print(f"[Epoch {epoch_idx:3d}] loss={total_loss_scalar.item():.3f} | ELBO={elbo_scalar.item():.3f} "
-                      f"| KL={kl_scalar.item():.3f}(β={beta_kl:.2f}) | CRPS(u)={float(crps_scalar):.3f}(λ={lambda_crps:.2f})")
+                # 用同一組標量變數計算並打印loss，確保一致性
+                loss_value = float(total_loss_scalar.detach().cpu())
+                elbo_value = float(elbo_scalar.detach().cpu())
+                kl_value = float(kl_scalar.detach().cpu())
+                crps_value = float(crps_scalar.detach().cpu())
+                
+                # 驗證loss計算公式一致性
+                expected_loss = -elbo_value + (beta_kl - 1.0) * kl_value + lambda_crps * crps_value
+                if abs(loss_value - expected_loss) > 1e-3:
+                    print(f"⚠️ Loss不一致: 實際={loss_value:.3f} vs 期望={expected_loss:.3f}")
+                
+                print(f"[Epoch {epoch_idx:3d}] loss={loss_value:.3f} | ELBO={elbo_value:+.3f} "
+                      f"| KL={kl_value:.3f}(β={beta_kl:.2f}) | CRPS(u)={crps_value:.3f}(λ={lambda_crps:.2f})")
                 print(f"   觸發率 param={nz_param:.3f} indemn={nz_indemn:.3f} | "
                       f"均值 param=${y_parametric.mean().item()/1e6:.1f}M indemn=${y_indemn.mean().item()/1e6:.1f}M")
 

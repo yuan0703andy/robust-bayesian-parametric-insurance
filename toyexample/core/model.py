@@ -173,6 +173,11 @@ class UnifiedEndToEndVIModel(nn.Module):
         
         # 檢測解析式是否穩定
         bad = (~torch.isfinite(crps_u_closed)) | (crps_u_closed > 1.0) | (crps_u_closed < 0.0)
+        if bad.any():
+            print(f"⚠️ 解析式CRPS不穩定: {bad.sum().item()}/{len(bad)} 事件切換到MC-CRPS")
+            print(f"   closed形式範圍: [{crps_u_closed.min():.3f}, {crps_u_closed.max():.3f}]")
+            print(f"   MC形式範圍: [{crps_u_mc.min():.3f}, {crps_u_mc.max():.3f}]")
+        
         crps_u = torch.where(bad, crps_u_mc, crps_u_closed).clamp_(0.0, 1.0)
         
         # 訓練損失用單位化版（更穩定）
@@ -235,6 +240,14 @@ class UnifiedEndToEndVIModel(nn.Module):
         term2 = P.mean(dim=(0,1))                          # [E]  == (1/S^2)Σ|x_i-x_j|
 
         crps_u = term1 - 0.5 * term2                       # [E]
+        
+        # 檢查數值問題並給出診斷信息
+        bad_mask = ~torch.isfinite(crps_u)
+        if bad_mask.any():
+            print(f"⚠️ MC-CRPS數值問題: {bad_mask.sum().item()}/{len(crps_u)} 事件有NaN/Inf")
+            print(f"   term1範圍: [{term1.min():.3f}, {term1.max():.3f}]")
+            print(f"   term2範圍: [{term2.min():.3f}, {term2.max():.3f}]")
+        
         # 數值保護（仍保持在 unitless 域）
         crps_u = crps_u.nan_to_num(nan=1.0, posinf=1.0, neginf=0.0).clamp_(0.0, 1.0)
         return crps_u
