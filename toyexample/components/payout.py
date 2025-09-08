@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 import numpy as np
 from utils.smoothing_tools import _ramp_soft, _softplus_hinge
-
+from typing import Optional
 # ============================================================================
 # 4. 可微分保險賠付函數（Steinmann產品 + Sigmoid逼近）
 # ============================================================================
@@ -65,11 +65,9 @@ class DifferentiablePayoutFunction(nn.Module):
             'payout_values':    payout_det
         }
 
-    def _payout_and_derivative(self, loss_values: torch.Tensor, training: bool) -> Tuple[torch.Tensor, torch.Tensor]:
-        """多階分層線性：每階 i 的增量 dr_i = ratios[i]-ratios[i-1]，
-           在 [thr_i, thr_i+width_i] 線性從 0→1；總賠付 = max_payout * ∑ dr_i * ramp_i。
-           訓練用平滑 ramp，eval()/報價用硬 ramp。
-        """
+    def _payout_and_derivative(self, loss_values: torch.Tensor, training: Optional[bool] = None) -> Tuple[torch.Tensor, torch.Tensor]:
+        if training is None:
+            training = self.training
         thresholds, ratios, widths = self.thresholds, self.ratios, self.widths
         payout_ratio = torch.zeros_like(loss_values)
         d_ratio_dx   = torch.zeros_like(loss_values)
@@ -85,7 +83,6 @@ class DifferentiablePayoutFunction(nn.Module):
             if training and not self.eval_hard:
                 ramp, drdx = _ramp_soft(loss_values, t, t + w, self.tau_ramp)
             else:
-                # 硬條款：ramp = clamp((x - t)/w, 0, 1)；其導數在區間內為 1/w
                 r = (loss_values - t) / max(w, 1e-6)
                 ramp = torch.clamp(r, 0.0, 1.0)
                 drdx = ((loss_values > t) & (loss_values < t + w)).to(loss_values.dtype) / max(w, 1e-6)

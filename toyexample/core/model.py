@@ -175,7 +175,7 @@ class UnifiedEndToEndVIModel(nn.Module):
         S = int(n_pred_samples)
         eps = torch.randn(S, B, H, E, device=mu_log.device)
         X = torch.exp(mu_log.unsqueeze(0) + sigma_log.unsqueeze(0) * eps)  # (S,B,H,E)
-        payout_det, _ = self.payout_function._payout_and_derivative(X)
+        payout_det, _ = self.payout_function._payout_and_derivative(X, training=self.training)
         Y = payout_det.sum(dim=2)  # (S,B,E) 合計各院
         return Y.mean(dim=1)       # (S,E) 對 batch 平均
 
