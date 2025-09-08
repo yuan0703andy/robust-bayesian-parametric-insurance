@@ -51,6 +51,85 @@ class EndToEndTrainer:
         self.gpu_memory_usage = []
         self.training_times = []
         
+        
+    def _anneal_tau(self, payout_fn):
+        """簡單線性退火：1→0.1；你可依需要調整里程碑。"""
+        # 以目前已完成的 epoch 數推估下一個 tau
+        epoch = len(self.loss_history) + 1
+        if epoch < 50:
+            tau = 0.8
+        elif epoch > 150:
+            tau = 0.1
+        else:
+            tau = 0.8 - 0.7 * (epoch - 50) / 100.0
+        if hasattr(payout_fn, "set_tau"):
+            payout_fn.set_tau(float(tau))
+    
+    def _parametric_payout_hard(self, base_model, hazard_intensities: torch.Tensor) -> torch.Tensor:
+        """
+        事件層參數型賠付（硬條款）：用 cat-in-circle 的「硬 max + 硬 ramp」
+        返回 shape: [E]
+        """
+        pt = base_model.param_target
+        if pt is None:
+            # 沒有參數型條款就回傳 0（或你可改成其它後備）
+            return hazard_intensities.sum(dim=0).new_zeros(hazard_intensities.shape[1])
+
+        # winds_ms: [H, E]
+        winds_ms = hazard_intensities
+        H, E = winds_ms.shape
+        # 遮罩：只保留圓內站點，其餘置極小
+        masked = winds_ms.unsqueeze(0).expand(H, -1, -1).clone()     # [H, H, E]
+        mask3 = pt.mask.unsqueeze(-1).bool()                         # [H, H, 1]
+        masked = masked.masked_fill(~mask3, -1e9)
+
+        # 硬 max：每個 site 對圓內的站點取最大風速
+        I_site = masked.max(dim=1).values                            # [H, E]
+
+        # 硬 ramp：觸發→耗盡 線性，夾到 [0,1]
+        width = max(pt.exhaustion - pt.trigger, 1e-6)
+        ramp = torch.clamp((I_site - pt.trigger) / width, 0.0, 1.0)  # [H, E]
+
+        # site 賠付與事件總賠付
+        payout_site = ramp * pt.site_limits.unsqueeze(-1)            # [H, E]
+        total = (pt.site_weights.unsqueeze(-1) * payout_site).sum(dim=0)  # [E]
+        if pt.payout_cap is not None:
+            total = torch.clamp(total, max=pt.payout_cap)
+        return total
+
+
+    def _indemnity_hard(self, base_model, observed_losses: torch.Tensor) -> torch.Tensor:
+        """
+        事件層「實際理賠」（硬條款）：把觀測損失丟入硬分層線性條款，沿醫院加總 → [E]
+        observed_losses: [H, E] 或 [1, E]
+        返回 shape: [E]
+        """
+        pf = base_model.payout_function
+        # 統一成 [1, H, E]
+        if observed_losses.dim() == 2:
+            loss_obs = observed_losses.unsqueeze(0)
+        elif observed_losses.dim() == 3:
+            loss_obs = observed_losses
+        else:
+            raise ValueError("observed_losses 需為 [H,E] 或 [1,H,E]")
+
+        loss_m = loss_obs / 1e6                                      # 以百萬為單位判斷門檻
+        total_ratio = torch.zeros_like(loss_obs)                     # [1, H, E]
+
+        prev_ratio = 0.0
+        for thr, ratio in zip(pf.thresholds, pf.ratios):
+            dr = float(ratio) - prev_ratio
+            if dr > 0:
+                thr_m = float(thr) / 1e6
+                step = (loss_m >= thr_m).to(loss_obs.dtype)          # 硬階梯
+                total_ratio = total_ratio + dr * step
+            prev_ratio = float(ratio)
+
+        payout = total_ratio * pf.max_payout                         # [1, H, E]
+        # 事件層：沿醫院加總 → [E]
+        return payout.sum(dim=1).squeeze(0)
+
+    
     def train_epoch(self, hazard_intensities: torch.Tensor,
                    exposure_values: torch.Tensor,
                    observed_losses: torch.Tensor,
@@ -71,6 +150,13 @@ class EndToEndTrainer:
         if torch.cuda.is_available():
             torch.cuda.synchronize()
             memory_before = [torch.cuda.memory_allocated(i) / 1e6 for i in GPU_DEVICES]
+        
+        
+        # === 訓練期：用平滑近似（軟條款） ===
+        base_model = self.model.module if hasattr(self.model, 'module') else self.model
+        base_model.payout_function.train()
+        base_model.payout_function.eval_hard = False  # 訓練用「軟」條款
+        self._anneal_tau(base_model.payout_function)  # 依 epoch 退火 tau
         
         # 計算損失（DP使用forward可並行）
         if self.enable_multi_gpu:
@@ -126,16 +212,21 @@ class EndToEndTrainer:
                 'peak': [torch.cuda.max_memory_allocated(i) / 1e6 for i in GPU_DEVICES]
             })
         
-        # 傳統基差風險（事件層）：|param payout(hazard) - indemnity(loss)| 平均
+        # 參數型基差風險（事件層）：| parametric(hazard, hard) - indemnity(loss, hard) |
         with torch.no_grad():
             base_model = self.model.module if hasattr(self.model, 'module') else self.model
-            # 事件層實際損失
-            y_actual = observed_losses.sum(dim=0)  # (E)
-            # 傳統產品賠付：將實際損失丟入當前產品引擎（loss-based Steinmann），沿醫院合計
-            loss_obs = observed_losses.unsqueeze(0)  # (1,H,E)
-            payout_obs, _ = base_model.payout_function._payout_and_derivative(loss_obs)
-            y_param = payout_obs.sum(dim=1).squeeze(0)  # (E)
-            trad_basis = torch.mean(torch.abs(y_param - y_actual)).item()
+
+            # 1) 參數型賠付（硬 max / 硬 ramp）
+            if base_model.param_target is not None:
+                y_parametric = self._parametric_payout_hard(base_model, hazard_intensities)  # [E]
+            else:
+                # 後備：用損失總額的硬條款理賠當作「參數型」(讓指標不為常數)
+                y_parametric = self._indemnity_hard(base_model, observed_losses.sum(dim=0))  # [E]
+
+            # 2) 觀測損失的「實際理賠」（硬條款）
+            y_indemn = self._indemnity_hard(base_model, observed_losses)                     # [E]
+
+            trad_basis = torch.mean(torch.abs(y_parametric - y_indemn)).item()
 
         # 記錄損失與指標
         losses = {
@@ -226,59 +317,49 @@ class EndToEndTrainer:
         
         print(f"✅ 並行採樣完成: {all_samples.shape[0]}個總樣本")
         return all_samples
-    
+        
     def evaluate(self, hazard_intensities: torch.Tensor,
                 exposure_values: torch.Tensor,
                 observed_losses: torch.Tensor,
                 n_samples: int = 50,
                 spatial_data: 'SimulatedSpatialData' = None) -> Dict[str, float]:
-        """GPU加速的模型評估"""
+        """GPU加速的模型評估（硬條款 + 正確的 basis risk 指標）"""
         self.model.eval()
-        
+
         # 移動數據到GPU
         hazard_intensities = hazard_intensities.to(self.device)
-        exposure_values = exposure_values.to(self.device)
-        observed_losses = observed_losses.to(self.device)
-        
+        exposure_values    = exposure_values.to(self.device)
+        observed_losses    = observed_losses.to(self.device)
+
         with torch.no_grad():
-            if self.enable_multi_gpu:
-                outputs = self.model(
-                    hazard_intensities, exposure_values, observed_losses, n_samples, spatial_data
-                )
-                total_loss, elbo, crps_term, kl_div = outputs
-                # 傳統基差風險（事件層）：用產品賠付(基於實際損失) vs 實際損失
-                base_model = self.model.module if hasattr(self.model, 'module') else self.model
-                y_actual = observed_losses.sum(dim=0)
-                loss_obs = observed_losses.unsqueeze(0)  # (1,H,E)
-                payout_obs, _ = base_model.payout_function._payout_and_derivative(loss_obs)
-                y_param = payout_obs.sum(dim=1).squeeze(0)
-                trad_basis = torch.mean(torch.abs(y_param - y_actual))
-                loss_dict = {
-                    'total_loss': total_loss.mean(),
-                    'elbo': elbo.mean(),
-                    'crps_term': crps_term.mean(),
-                    'kl_term': kl_div.mean(),
-                    'trad_basis': trad_basis
-                }
+            base_model = self.model.module if hasattr(self.model, 'module') else self.model
+
+            # 前向（照舊）
+            total_loss, elbo, crps_term, kl_div = base_model(
+                hazard_intensities, exposure_values, observed_losses, n_samples, spatial_data
+            )
+
+            # 顯式硬條款（我們的 hard payout 是在 trainer 端自己算，不靠 model 裡的平滑）
+            # → 不需要再設 eval_hard flag；保持 model 的平滑流程只用於訓練/CRPS
+            # 正確的事件層基差風險：
+            if base_model.param_target is not None:
+                y_parametric = self._parametric_payout_hard(base_model, hazard_intensities)  # [E]
             else:
-                base_model = self.model.module if hasattr(self.model, 'module') else self.model
-                total_loss, elbo, crps_term, kl_div = base_model(
-                    hazard_intensities, exposure_values, observed_losses, n_samples, spatial_data
-                )
-                y_actual = observed_losses.sum(dim=0)
-                loss_obs = observed_losses.unsqueeze(0)
-                payout_obs, _ = base_model.payout_function._payout_and_derivative(loss_obs)
-                y_param = payout_obs.sum(dim=1).squeeze(0)
-                trad_basis = torch.mean(torch.abs(y_param - y_actual))
-                loss_dict = {
-                    'total_loss': total_loss,
-                    'elbo': elbo,
-                    'crps_term': crps_term,
-                    'kl_term': kl_div,
-                    'trad_basis': trad_basis
-                }
-        
-        return {k: v.item() if hasattr(v, 'item') else v for k, v in loss_dict.items()}
+                y_parametric = self._indemnity_hard(base_model, observed_losses.sum(dim=0))  # 後備
+
+            y_indemn = self._indemnity_hard(base_model, observed_losses)                     # [E]
+            trad_basis = torch.mean(torch.abs(y_parametric - y_indemn))
+
+            loss_dict = {
+                'total_loss': total_loss,
+                'elbo': elbo,
+                'crps_term': crps_term,
+                'kl_term': kl_div,
+                'trad_basis': trad_basis
+            }
+
+        # to cpu scalars
+        return {k: (v.item() if hasattr(v, 'item') else v) for k, v in loss_dict.items()}
 
     def evaluate_with_metrics(self, hazard_intensities: torch.Tensor,
                               exposure_values: torch.Tensor,

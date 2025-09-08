@@ -3,95 +3,100 @@ from typing import Dict, Tuple
 import torch
 import torch.nn as nn
 import numpy as np
+from ..utils.smoothing_tools import _ramp_soft, _softplus_hinge
 
 # ============================================================================
 # 4. 可微分保險賠付函數（Steinmann產品 + Sigmoid逼近）
 # ============================================================================
 
 class DifferentiablePayoutFunction(nn.Module):
-        """可微分的保險賠付函數 - 「合約引擎」"""
-        
-        def __init__(self, product_config: Dict, verbose: bool = False):
-            super().__init__()
-            
-            # Steinmann產品配置
-            thresholds = torch.tensor(product_config['thresholds'], dtype=torch.float32)
-            ratios = torch.tensor(product_config['ratios'], dtype=torch.float32)  
-            max_payout = float(product_config['max_payout'])
-            steepness = float(product_config.get('steepness', 0.1))
-            
-            # 註冊為不可訓練參數
-            self.register_buffer('thresholds', thresholds)
-            self.register_buffer('ratios', ratios)
-            self.max_payout = max_payout
-            self.steepness = steepness
-            self.verbose = verbose
-            
-            if self.verbose:
-                print(f"💰 初始化保險產品: 閾值={thresholds.tolist()}, 比例={ratios.tolist()}")
-                print(f"   最大賠付: ${max_payout/1e6:.1f}M, 陡峭度: {steepness}")
-        
-        def forward(self, loss_distribution_params: Dict[str, torch.Tensor]
-                   ) -> Dict[str, torch.Tensor]:
-            """
-            使用 delta method 將損失的 LogNormal 分佈推至賠付的 LogNormal 近似。
-            """
-            mu_log = loss_distribution_params['mu_log']   # (B,H,E)
-            sigma_log = loss_distribution_params['sigma_log']
+    """分層線性賠付（Stepped linear）。
+       訓練：softplus-hinge 平滑（tau_ramp）；評估：硬條款（piecewise linear）。
+    """
+    def __init__(self, product_config: Dict, verbose: bool = False):
+        super().__init__()
+        thr = torch.tensor(product_config['thresholds'], dtype=torch.float32)   # [T]
+        rat = torch.tensor(product_config['ratios'],     dtype=torch.float32)   # [T] 累積比例，遞增至 ≤1
+        self.register_buffer('thresholds', thr)
+        self.register_buffer('ratios',     rat)
 
-            # 代表點：E[X] for LogNormal
-            EX = torch.exp(mu_log + 0.5 * sigma_log**2)
+        # 若未提供 widths，就用相鄰 threshold 的差；最後一段沿用倒數第二段寬
+        if 'widths' in product_config:
+            widths = torch.tensor(product_config['widths'], dtype=torch.float32)
+        else:
+            d = torch.diff(thr)
+            last = d[-1] if d.numel() > 0 else torch.tensor(1.0)
+            widths = torch.cat([d, last.view(1)])
+        self.register_buffer('widths', widths)
 
-            # g(EX) 與 g'(EX)
-            payout_det, gprime = self._payout_and_derivative(EX)
+        self.max_payout = float(product_config['max_payout'])
+        # 平滑溫度（退火目標）：大→平滑、小→近硬條款
+        self.tau_ramp  = float(product_config.get('tau_ramp', 0.5))
+        # 在 eval() 時是否強制硬條款
+        self.eval_hard = bool(product_config.get('hard_eval', True))
+        self.verbose   = verbose
 
-            # Var[X] for LogNormal
-            varX = (torch.exp(sigma_log**2) - 1.0) * torch.exp(2*mu_log + sigma_log**2)
+        if self.verbose:
+            print(f"💰 初始化分層線性賠付: thresholds={thr.tolist()}, ratios={rat.tolist()}, widths={widths.tolist()}")
+            print(f"   max_payout={self.max_payout:.0f}, tau_ramp={self.tau_ramp}, eval_hard={self.eval_hard}")
 
-            # Delta method: Var[Y] ≈ (g'(E[X]))^2 Var[X]
-            varY = (gprime**2) * varX
+    def set_tau(self, tau: float):
+        self.tau_ramp = float(tau)
 
-            # 以匹配一二矩方式近似 Y ~ LogNormal(mu_Y, sigma_Y)
-            EY = torch.clamp(payout_det, min=1e-6)
-            cv2 = torch.clamp(varY / (EY**2), min=0.0)
-            sigma_payout_log = torch.sqrt(torch.log1p(cv2))
-            mu_payout_log = torch.log(EY) - 0.5 * sigma_payout_log**2
+    def forward(self, loss_distribution_params: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+        """Delta method：把 Loss 的 LogNormal 推到 Payout 的 LogNormal 近似"""
+        mu_log    = loss_distribution_params['mu_log']         # (B,H,E)
+        sigma_log = loss_distribution_params['sigma_log']
 
-            return {
-                'mu_payout_log': mu_payout_log,
-                'sigma_payout_log': sigma_payout_log,
-                'payout_values': payout_det
-            }
-        
-        def _payout_and_derivative(self, loss_values: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-            """
-            計算合約賠付 g(x) 與對損失的一階導數 g'(x)。
-            內部以百萬美元為Sigmoid入參，導數需乘 1e-6 還原到美元尺度。
-            返回:
-              payout_values: g(x)
-              gprime: dg/dx
-            """
-            loss_millions = loss_values / 1e6
-            total_payout = torch.zeros_like(loss_values)
-            slope_sum = torch.zeros_like(loss_values)  # 累積 ∑ Δr_i * s_i(1-s_i) / k
+        EX = torch.exp(mu_log + 0.5 * sigma_log**2)            # 代表點 E[X]
+        payout_det, gprime = self._payout_and_derivative(EX, training=self.training)
 
-            prev_ratio = 0.0
-            for thr, ratio in zip(self.thresholds, self.ratios):
-                dr = float(ratio) - prev_ratio
-                if dr <= 0:
-                    prev_ratio = float(ratio)
-                    continue
-                thr_m = float(thr) / 1e6
-                s = torch.sigmoid((loss_millions - thr_m) / self.steepness)  # s_i
-                total_payout += dr * s
-                slope_sum += dr * s * (1 - s) / self.steepness              # s_i(1-s_i)/k
-                prev_ratio = float(ratio)
+        varX = (torch.exp(sigma_log**2) - 1.0) * torch.exp(2*mu_log + sigma_log**2)
+        varY = (gprime**2) * varX
 
-            payout_values = total_payout * self.max_payout                  # g(x)
-            gprime = slope_sum * (self.max_payout / 1e6)                    # dg/dx 還原到美元尺度
-            return payout_values, gprime
+        EY   = torch.clamp(payout_det, min=1e-6)
+        cv2  = torch.clamp(varY / (EY**2), min=0.0)
+        sigma_payout_log = torch.sqrt(torch.log1p(cv2))
+        mu_payout_log    = torch.log(EY) - 0.5 * sigma_payout_log**2
 
-print("✅ 可微分保險賠付函數定義完成")
+        return {
+            'mu_payout_log':    mu_payout_log,
+            'sigma_payout_log': sigma_payout_log,
+            'payout_values':    payout_det
+        }
+
+    def _payout_and_derivative(self, loss_values: torch.Tensor, training: bool) -> Tuple[torch.Tensor, torch.Tensor]:
+        """多階分層線性：每階 i 的增量 dr_i = ratios[i]-ratios[i-1]，
+           在 [thr_i, thr_i+width_i] 線性從 0→1；總賠付 = max_payout * ∑ dr_i * ramp_i。
+           訓練用平滑 ramp，eval()/報價用硬 ramp。
+        """
+        thresholds, ratios, widths = self.thresholds, self.ratios, self.widths
+        payout_ratio = torch.zeros_like(loss_values)
+        d_ratio_dx   = torch.zeros_like(loss_values)
+
+        prev = 0.0
+        for i in range(len(thresholds)):
+            dr = float(ratios[i].item() - prev)
+            if dr <= 0:
+                prev = float(ratios[i]); continue
+            t  = float(thresholds[i].item())
+            w  = float(widths[i].item())
+
+            if training and not self.eval_hard:
+                ramp, drdx = _ramp_soft(loss_values, t, t + w, self.tau_ramp)
+            else:
+                # 硬條款：ramp = clamp((x - t)/w, 0, 1)；其導數在區間內為 1/w
+                r = (loss_values - t) / max(w, 1e-6)
+                ramp = torch.clamp(r, 0.0, 1.0)
+                drdx = ((loss_values > t) & (loss_values < t + w)).to(loss_values.dtype) / max(w, 1e-6)
+
+            payout_ratio = payout_ratio + dr * ramp
+            d_ratio_dx   = d_ratio_dx   + dr * drdx
+            prev = float(ratios[i])
+
+        payout_values = payout_ratio * self.max_payout
+        gprime        = d_ratio_dx   * self.max_payout
+        return payout_values, gprime
 
 # %%
 # ============================================================================
@@ -143,16 +148,29 @@ class CatInCirclePayout(nn.Module):
             mask[empty, nearest_idx] = 1.0
         self.register_buffer('mask', mask)
 
-    def forward(self, winds_ms: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        # winds_ms: [H, E]
-        masked = winds_ms.unsqueeze(0).expand(self.N_site, -1, -1)
-        big_neg = torch.tensor(-1e6, device=winds_ms.device, dtype=winds_ms.dtype)
-        masked = masked + (self.mask.unsqueeze(-1) - 1.0) * (-big_neg)
-        # site指標 I_site: [H, E]
-        I_site = _smooth_max(masked, tau=self.smooth_tau)
-        # 線性ramp到賠付比例
+    def forward(self, winds_ms: torch.Tensor, tau: float = None, hard: bool = False) -> Tuple[torch.Tensor, torch.Tensor]:
+        # winds_ms: [H,E]
+        tau_eff = float(self.smooth_tau if tau is None else tau)
+        mask = self.mask  # [H,H]
+
+        if hard:
+            # 硬 max（符合條款）
+            masked = winds_ms.unsqueeze(0).expand(self.N_site, -1, -1)  # [H,H,E]
+            masked[mask == 0] = -1e6
+            I_site = masked.max(dim=1).values  # [H,E]
+        else:
+            # 平滑 max（訓練穩定）
+            masked = winds_ms.unsqueeze(0).expand(self.N_site, -1, -1)
+            big_neg = torch.tensor(-1e6, device=winds_ms.device, dtype=winds_ms.dtype)
+            masked = masked + (mask.unsqueeze(-1) - 1.0) * (-big_neg)
+            I_site = tau_eff * torch.logsumexp(masked / tau_eff, dim=1)
+
         width = max(self.exhaustion - self.trigger, 1e-6)
-        ramp = torch.clamp((I_site - self.trigger) / width, 0.0, 1.0)
+        if hard:
+            ramp = torch.clamp((I_site - self.trigger) / width, 0.0, 1.0)
+        else:
+            ramp, _ = _ramp_soft(I_site, self.trigger, self.exhaustion, tau_eff)
+
         payout_site = ramp * self.site_limits.unsqueeze(-1)
         total = (self.site_weights.unsqueeze(-1) * payout_site).sum(dim=0)  # [E]
         if self.payout_cap is not None:
