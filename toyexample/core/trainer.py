@@ -10,7 +10,7 @@ from torch.distributions import Normal, LogNormal, StudentT
 from enum import Enum
 from typing import Optional
 from components.config import PriorScenario, LikelihoodFamily
-from data import SimulatedSpatialData
+from .data import SimulatedSpatialData
 
 
 class EndToEndTrainer:
