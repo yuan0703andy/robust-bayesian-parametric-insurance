@@ -239,13 +239,13 @@ class EndToEndTrainer:
             # 2) 觀測損失的「實際理賠」（硬條款）
             y_indemn = self._indemnity_hard(base_model, observed_losses)                     # [E]
 
-            # 添加輕量偵錯信息（每10個epoch打印一次）
+            # 添加輕量偵錯信息（每40個epoch打印一次）
             nz_param  = (y_parametric > 0).float().mean().item()
             nz_indemn = (y_indemn     > 0).float().mean().item()
             
-            # 第一個epoch必須打印，之後每10個epoch打印一次
+            # 第一個epoch必須打印，之後每40個epoch打印一次
             current_epoch = len(self.loss_history) + 1
-            if current_epoch == 1 or current_epoch % 10 == 0:
+            if current_epoch == 1 or current_epoch % 40 == 0:
                 print(f"[Epoch {current_epoch:2d}] 觸發率 param={nz_param:.3f} indemn={nz_indemn:.3f} | "
                       f"均值 param=${y_parametric.mean().item()/1e6:.1f}M indemn=${y_indemn.mean().item()/1e6:.1f}M")
 
