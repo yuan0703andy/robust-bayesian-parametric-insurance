@@ -212,9 +212,17 @@ class UnifiedEndToEndVIModel(nn.Module):
             payout_dist_params = self.payout_function(loss_dist_params)
 
             # 2) CRPS（取均值）
-            crps_scores = self._compute_crps_batch(observed_losses, payout_dist_params, n_pred_samples=n_pred_samples)
-            crps_mean = torch.mean(crps_scores)
+            # 事件層目標賠付（訓練可用軟，評估/報價用硬）
+            if self.param_target is not None:
+                y_target, _ = self.param_target(hazard_intensities, hard=True)  # 評估硬條款
+            else:
+                loss_total = observed_losses.sum(dim=0)
+                y_target = _indemnity_from_loss(loss_total, deductible=0.0, limit=self.payout_scale)
 
+            crps_scores = self._compute_crps_batch(y_target, payout_dist_params, n_pred_samples=n_pred_samples)
+            crps_mean = torch.mean(crps_scores)
+            
+            
             # 3) 基礎 log-likelihood（不混合）
             base_loglik = PriorLikelihoodProcessor.compute_likelihood_logprob(
                 observed_losses, loss_dist_params, self.likelihood_family
@@ -305,7 +313,7 @@ class UnifiedEndToEndVIModel(nn.Module):
             'kl_term': kl_div
         }
     
-    def _compute_crps_batch(self, observed_losses: torch.Tensor,
+    def _compute_crps_batch(self, y_target: torch.Tensor,
                             payout_dist_params: Dict[str, torch.Tensor],
                             n_pred_samples: int = 50) -> torch.Tensor:
         """
@@ -318,46 +326,28 @@ class UnifiedEndToEndVIModel(nn.Module):
         mu_log = payout_dist_params['mu_payout_log']   # (...= [B,H,E] 或 [H,E])
         sigma_log = payout_dist_params['sigma_payout_log']
         device = mu_log.device
-        # 標準化 batch 維
-        has_batch = (mu_log.dim() == 3)
-        if not has_batch:
-            mu_log = mu_log.unsqueeze(0)
-            sigma_log = sigma_log.unsqueeze(0)
+        
+        if mu_log.dim() == 2:
+            mu_log = mu_log.unsqueeze(0); sigma_log = sigma_log.unsqueeze(0)
         B, H, E = mu_log.shape
-        # 重參數化樣本（等價 rsample）
         S = int(n_pred_samples)
         eps = torch.randn(S, B, H, E, device=device)
         X = torch.exp(mu_log.unsqueeze(0) + sigma_log.unsqueeze(0) * eps)  # (S,B,H,E)
-        # 數值保護：清理樣本中的 NaN/Inf
         X = torch.nan_to_num(X, nan=0.0, posinf=1e12, neginf=0.0)
-        # 向量化計算
-        N = B * H * E
-        Xf = X.reshape(S, N)                                # (S,N)
-        # 將 observed_losses 透過同一保單函數映射成實際賠付 y_payout
-        with torch.no_grad():
-            # 基差風險版本：直接以觀測「損失」作為 y
-            obs = observed_losses.to(device)
-            if obs.dim() == 2:           # (H,E) -> (1,H,E)
-                obs = obs.unsqueeze(0)
-            # 若預測分佈包含多個 θ 樣本 (B>1)，將 y 在 batch 維度上擴展對齊
-            if obs.shape[0] == 1 and B > 1:
-                obs = obs.expand(B, -1, -1)
-            # 清理觀測中的 NaN/Inf
-            obs = torch.nan_to_num(obs, nan=0.0, posinf=1e12, neginf=0.0)
-            y = obs.reshape(1, N)  # (1,N)
-        # term1 = E|X - y|
-        term1 = torch.mean(torch.abs(Xf - y), dim=0)        # (N,)
-        # term2 = 0.5 * E|X - X'|
-        # Σ_{i,j}|x_i-x_j| = 2 Σ_{i<j}(x_j - x_i)（升序時）
-        # 0.5*E ≈ (1/(2S^2))Σ_{i,j}|·| = (1/S^2) Σ_{i<j}(x_j - x_i)
-        Xs, _ = torch.sort(Xf, dim=0)                       # (S,N)
-        idx = torch.arange(1, S + 1, device=device, dtype=Xs.dtype).view(S, 1)
-        coeff = 2 * idx - (S + 1)                           # (S,1)
-        pair_sum = (Xs * coeff).sum(dim=0)                  # (N,)
-        term2 = pair_sum / (S * S)                          # (N,)
-        crps_vec = term1 - term2                            # (N,)
-        crps_vec = torch.clamp(crps_vec, min=0.0)           # 數值保護
-        crps_b = crps_vec.view(B, H, E).mean(dim=(1, 2))    # (B,)
+
+        # 事件層賠付樣本（合併醫院）
+        X_event = X.sum(dim=2)  # (S,B,E)
+
+        # y_target: [E] → [1,1,E] → broadcast 到 (S,B,E)
+        y = y_target.view(1, 1, E)
+
+        # CRPS(F,y) = E|X - y| - 0.5 E|X - X'|
+        term1 = torch.mean(torch.abs(X_event - y), dim=0)        # (B,E)
+        Xs, _ = torch.sort(X_event, dim=0)                       # (S,B,E)
+        idx = torch.arange(1, S+1, device=device, dtype=Xs.dtype).view(S, 1, 1)
+        coeff = 2 * idx - (S + 1)
+        term2 = (Xs * coeff).sum(dim=0) / (S * S)
+        crps_b = torch.clamp(term1 - term2, min=0.0).mean(dim=1) # (B,)
         return crps_b
 
     def _compute_kl_divergence_with_prior(self, theta_samples: torch.Tensor) -> torch.Tensor:
