@@ -1,8 +1,8 @@
 
-from ..components.config import PriorScenario, LikelihoodFamily, ModelConfiguration
-from ..components.prior import PriorLikelihoodProcessor, _expand_sigma_obs_to_mu
-from ..core.model import UnifiedEndToEndVIModel
-from ..utils.gpu_setup import device, USE_MULTI_GPU, GPU_DEVICES
+from components.config import PriorScenario, LikelihoodFamily, ModelConfiguration
+from components.prior import PriorLikelihoodProcessor, _expand_sigma_obs_to_mu
+from core.model import UnifiedEndToEndVIModel
+from utils.gpu_setup import device, USE_MULTI_GPU, GPU_DEVICES
 from typing import Dict, List
 from enum import Enum
 from typing import Any

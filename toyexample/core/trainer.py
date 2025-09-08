@@ -9,8 +9,8 @@ import torch.optim as optim
 from torch.distributions import Normal, LogNormal, StudentT
 from enum import Enum
 from typing import Optional
-from ..components.config import PriorScenario, LikelihoodFamily
-from .data import SimulatedSpatialData
+from components.config import PriorScenario, LikelihoodFamily
+from data import SimulatedSpatialData
 
 
 class EndToEndTrainer:

@@ -5,13 +5,13 @@ import numpy as np
 import torch
 from torch.distributions import Normal, LogNormal, StudentT
 import matplotlib.pyplot as plt
-from ..components.config import ModelConfiguration
-from ..components.prior import PriorLikelihoodProcessor, PriorScenario, LikelihoodFamily
-from ..core.model import UnifiedEndToEndVIModel
-from ..utils.gpu_setup import device, USE_MULTI_GPU, GPU_DEVICES
-from ..core.trainer import EndToEndTrainer
+from components.config import ModelConfiguration
+from components.prior import PriorLikelihoodProcessor, PriorScenario, LikelihoodFamily
+from core.model import UnifiedEndToEndVIModel
+from utils.gpu_setup import device, USE_MULTI_GPU, GPU_DEVICES
+from core.trainer import EndToEndTrainer
 
-from ..core.data import SimulatedCLIMADAData, SimulatedSpatialData
+from core.data import SimulatedCLIMADAData, SimulatedSpatialData
 
 
 # %%

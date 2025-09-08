@@ -3,7 +3,7 @@ from typing import Dict, Tuple
 import torch
 import torch.nn as nn
 import numpy as np
-from ..utils.smoothing_tools import _ramp_soft, _softplus_hinge
+from utils.smoothing_tools import _ramp_soft, _softplus_hinge
 
 # ============================================================================
 # 4. 可微分保險賠付函數（Steinmann產品 + Sigmoid逼近）
