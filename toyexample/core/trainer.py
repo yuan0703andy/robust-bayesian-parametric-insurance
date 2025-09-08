@@ -1,5 +1,5 @@
 from .model import UnifiedEndToEndVIModel
-from ..utils.gpu_setup import device, USE_MULTI_GPU, GPU_DEVICES
+from utils.gpu_setup import device, USE_MULTI_GPU, GPU_DEVICES
 from typing import Dict, List, Any
 import time
 import numpy as np
