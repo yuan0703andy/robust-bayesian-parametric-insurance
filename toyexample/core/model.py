@@ -149,7 +149,7 @@ class UnifiedEndToEndVIModel(nn.Module):
         # (B) KL(q||p_ε)
         kl_div = self._compute_kl_divergence_with_prior(theta_samples)
 
-        # (C) 分布型基差風險：事件層 CRPS on payout（單位化+安全回退版）
+        # (C) 分布型基差風險：事件層 CRPS on payout（單位化+MC回退版）
         scale = max(getattr(self, "payout_scale", 1.0), 1.0)
         Y_samples = self._sample_total_payout_from_loss(loss_dist_params, n_pred_samples=50)  # [S,E]
         
@@ -162,31 +162,20 @@ class UnifiedEndToEndVIModel(nn.Module):
                 loss_total = observed_losses.sum(dim=0)
                 y_target = _indemnity_from_loss(loss_total, deductible=0.0, limit=scale)
         
-        # 單位化：CRPS 維度變成「比例」0~1
-        y_target_u = y_target / scale
-        Y_samples_u = Y_samples / scale
+        # 嘗試解析式 CRPS（原版，已在金額域）
+        crps_closed_form = self._crps_event_level(Y_samples, y_target)
+        crps_u_closed = crps_closed_form / scale  # 轉為單位化
         
-        # 計算單位化 CRPS
-        crps_u = self._crps_event_level(Y_samples_u, y_target_u)
+        # 用正確的 MC-CRPS 作為回退（S=32~64 足夠穩）
+        S_mc = 32
+        Y_mc = self._sample_total_payout_from_loss(loss_dist_params, n_pred_samples=S_mc)  # [S,E] 金額
+        crps_u_mc = self._mc_crps_unitless(Y_mc, y_target, scale)  # [E] 單位化
         
-        # 檢測數值問題：非有限或異常大值
-        bad = ~torch.isfinite(crps_u) | (crps_u > 10.0)  # 單位化後不應該>10
+        # 檢測解析式是否穩定
+        bad = (~torch.isfinite(crps_u_closed)) | (crps_u_closed > 1.0) | (crps_u_closed < 0.0)
+        crps_u = torch.where(bad, crps_u_mc, crps_u_closed).clamp_(0.0, 1.0)
         
-        if bad.any():
-            # Monte-Carlo 回退（單位化域），樣本數不用大，訓練期 32 即可
-            try:
-                S_mc = 32
-                Y_mc = self._sample_total_payout_from_loss(loss_dist_params, n_pred_samples=S_mc) / scale
-                crps_u_mc = self._crps_event_level(Y_mc, y_target_u)
-                crps_u = torch.where(bad, crps_u_mc, crps_u)
-            except:
-                # 最後的安全網：固定合理的單位化值
-                crps_u = torch.where(bad, torch.tensor(0.5, device=crps_u.device), crps_u)
-        
-        # 保底：把 NaN/Inf 變 1.0（最壞情況=滿額差距），而不是 1e6 這種金額
-        crps_u = torch.nan_to_num(crps_u, nan=1.0, posinf=1.0, neginf=1.0).clamp_(0.0, 1.0)
-        
-        # 轉回金額域參與損失計算
+        # 訓練損失用單位化版（更穩定）
         crps_scaled = crps_u
 
         # 數值保護（其他項）
@@ -222,6 +211,33 @@ class UnifiedEndToEndVIModel(nn.Module):
         term2 = (Ys * coeff).sum(dim=0) / (S * S)
         crps = term1 - term2.mean()
         return torch.clamp(crps, min=0.0)
+
+    def _mc_crps_unitless(self, samples: torch.Tensor, y_true: torch.Tensor, 
+                          scale: float, eps: float = 1e-12) -> torch.Tensor:
+        """
+        正確的 Monte-Carlo CRPS（單位化 0~1）
+        samples: [S, E]  (事件層預測樣本，單位: 金額)
+        y_true : [E]     (事件層真值(實際理賠)，單位: 金額)
+        scale  : float   (事件層上限，例如 30e6)
+        return : [E]     (單位化 CRPS，0~1)
+        """
+        S = samples.shape[0]
+        # 單位化到 [0, 1] 的金額比例域
+        X = (samples / (scale + eps)).clamp(0.0, 1.0)      # [S,E]
+        Y = (y_true  / (scale + eps)).clamp(0.0, 1.0)      # [E]
+
+        # term1 = E|X - y|
+        term1 = (X - Y.unsqueeze(0)).abs().mean(dim=0)     # [E]
+
+        # term2 = E|X - X'|
+        # 以 pairwise L1 距離估計；S<=64 直接做就好
+        P = (X.unsqueeze(0) - X.unsqueeze(1)).abs()        # [S,S,E]
+        term2 = P.mean(dim=(0,1))                          # [E]  == (1/S^2)Σ|x_i-x_j|
+
+        crps_u = term1 - 0.5 * term2                       # [E]
+        # 數值保護（仍保持在 unitless 域）
+        crps_u = crps_u.nan_to_num(nan=1.0, posinf=1.0, neginf=0.0).clamp_(0.0, 1.0)
+        return crps_u
 
     def evaluate_metrics(self, hazard_intensities: torch.Tensor,
                          exposure_values: torch.Tensor,

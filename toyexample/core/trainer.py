@@ -1,5 +1,6 @@
 from .model import UnifiedEndToEndVIModel
 from utils.gpu_setup import device, USE_MULTI_GPU, GPU_DEVICES
+from components.payout import _indemnity_from_loss
 from typing import Dict, List, Any
 import time
 import numpy as np
@@ -16,12 +17,20 @@ from .data import SimulatedSpatialData
 class EndToEndTrainer:
     """端到端訓練器 - GPU-Accelerated Version"""
         
-    def __init__(self, model: UnifiedEndToEndVIModel, learning_rate: float = 0.0001,
-                    enable_multi_gpu: bool = False, verbose: bool = False):
+    def __init__(self, model: UnifiedEndToEndVIModel, learning_rate: float = 3e-5,
+                    enable_multi_gpu: bool = False, verbose: bool = False,
+                    log_every: int = 20):
         self.original_model = model
         # 暫時停用多卡，避免DataParallel沿H維切片導致維度不一致
         self.enable_multi_gpu = False
         self.verbose = verbose
+        
+        # Warmup 參數
+        self.log_every = int(log_every)
+        self.beta_kl_max = 1.0      # KL 最大權重
+        self.beta_warmup_epochs = 100
+        self.lambda_crps_max = 0.1  # CRPS 最大權重（用 unitless）
+        self.lambda_warmup_epochs = 50
         
         # GPU配置和模型設置
         if torch.cuda.is_available():
@@ -44,12 +53,16 @@ class EndToEndTrainer:
             if self.verbose:
                 print("💻 CPU模式: GPU不可用")
         
-        self.optimizer = optim.Adam(self.model.parameters(), lr=learning_rate)
+        self.optimizer = optim.Adam(self.model.parameters(), lr=learning_rate, betas=(0.9, 0.99))
         self.loss_history = []
         
         # GPU性能監控
         self.gpu_memory_usage = []
         self.training_times = []
+        
+    def _should_log(self, epoch_idx: int) -> bool:
+        """判斷是否應該輸出日誌"""
+        return self.verbose and (epoch_idx % self.log_every == 0 or epoch_idx <= 3)
         
         
     def _anneal_tau(self, payout_fn):
@@ -165,6 +178,11 @@ class EndToEndTrainer:
             memory_before = [torch.cuda.memory_allocated(i) / 1e6 for i in GPU_DEVICES]
         
         
+        # === Warmup 權重計算 ===
+        epoch_idx = len(self.loss_history) + 1
+        beta_kl = min(1.0, epoch_idx / self.beta_warmup_epochs) * self.beta_kl_max
+        lambda_crps = min(1.0, epoch_idx / self.lambda_warmup_epochs) * self.lambda_crps_max
+        
         # === 訓練期：用平滑近似（軟條款） ===
         base_model = self.model.module if hasattr(self.model, 'module') else self.model
         base_model.payout_function.train()
@@ -184,10 +202,29 @@ class EndToEndTrainer:
             kl_scalar = kl_div.mean()
         else:
             base_model = self.model.module if hasattr(self.model, 'module') else self.model
-            total_loss, elbo, crps_term, kl_div = base_model(
+            total_loss, elbo, crps_term_orig, kl_div = base_model(
                 hazard_intensities, exposure_values, observed_losses, n_samples, spatial_data
             )
-            total_loss_scalar, elbo_scalar, crps_scalar, kl_scalar = total_loss, elbo, crps_term, kl_div
+            
+            # 用穩定的 MC-CRPS unitless 覆蓋（避免解析式爆數）
+            with torch.no_grad():
+                cap = float(getattr(base_model, 'payout_scale', 1.0))
+                # 事件層真值（硬條款）
+                y_indemn_evt = self._indemnity_hard(base_model, observed_losses)  # [E]
+                # 從 predictive 抽樣
+                S = 32
+                pred_samples = base_model._sample_total_payout_from_loss(
+                    base_model.hbm(hazard_intensities, exposure_values, 
+                                   base_model._sample_theta(n_samples), 
+                                   spatial_data.region_assignments if spatial_data else None), 
+                    n_pred_samples=S
+                )  # [S,E] 金額
+                crps_u_mc = base_model._mc_crps_unitless(pred_samples, y_indemn_evt, cap).mean()  # 單位化的 mean
+                crps_term = crps_u_mc
+            
+            # 新組合的 loss（以 ELBO 為主，CRPS 做正則）
+            loss_stabilized = -elbo + beta_kl * kl_div + lambda_crps * crps_term
+            total_loss_scalar, elbo_scalar, crps_scalar, kl_scalar = loss_stabilized, elbo, crps_term, kl_div
         
         # 反向傳播 
         total_loss_scalar.backward()
@@ -243,10 +280,11 @@ class EndToEndTrainer:
             nz_param  = (y_parametric > 0).float().mean().item()
             nz_indemn = (y_indemn     > 0).float().mean().item()
             
-            # 第一個epoch必須打印，之後每40個epoch打印一次
-            current_epoch = len(self.loss_history) + 1
-            if current_epoch == 1 or current_epoch % 40 == 0:
-                print(f"[Epoch {current_epoch:2d}] 觸發率 param={nz_param:.3f} indemn={nz_indemn:.3f} | "
+            # 使用統一的日誌節流
+            if self._should_log(epoch_idx):
+                print(f"[Epoch {epoch_idx:3d}] loss={total_loss_scalar.item():.3f} | ELBO={elbo_scalar.item():.3f} "
+                      f"| KL={kl_scalar.item():.3f}(β={beta_kl:.2f}) | CRPS(u)={float(crps_scalar):.3f}(λ={lambda_crps:.2f})")
+                print(f"   觸發率 param={nz_param:.3f} indemn={nz_indemn:.3f} | "
                       f"均值 param=${y_parametric.mean().item()/1e6:.1f}M indemn=${y_indemn.mean().item()/1e6:.1f}M")
 
             trad_basis = torch.mean(torch.abs(y_parametric - y_indemn)).item()
@@ -362,15 +400,37 @@ class EndToEndTrainer:
                 hazard_intensities, exposure_values, observed_losses, n_samples, spatial_data
             )
 
-            # === 新增：用穩定的 MC-CRPS 作為評估輸出（避免 forward 內解析式爆數） ===
+            # === 新增：用穩定的 MC-CRPS 作為評估輸出，並統一單位化比較 ===
             try:
-                metrics = base_model.evaluate_metrics(
-                    hazard_intensities, exposure_values, observed_losses,
-                    n_samples=30, spatial_data=spatial_data, n_pred_samples=200
-                )
-                # 優先使用 MC-CRPS，沒有才回退到原始值
-                crps_eval = metrics.get('crps_mean', metrics.get('crps', crps_term_orig))
-                print(f"🔍 CRPS比較: Forward={crps_term_orig.item():.1f} vs MC={crps_eval.item():.1f}")
+                scale = float(base_model.payout_scale)
+                
+                # 計算正確的 MC-CRPS（單位化）
+                Y_mc = base_model._sample_total_payout_from_loss(
+                    base_model.hbm(hazard_intensities, exposure_values, 
+                                  base_model._sample_theta(30), 
+                                  spatial_data.region_assignments if spatial_data else None), 
+                    n_pred_samples=100
+                )  # [S,E] 金額
+                
+                # 獲取事件層真值（硬條款理賠）
+                if base_model.param_target is not None:
+                    y_true_evt, _ = base_model.param_target(hazard_intensities)
+                else:
+                    loss_total = observed_losses.sum(dim=0)
+                    y_true_evt = _indemnity_from_loss(loss_total, deductible=0.0, limit=scale)
+                
+                # 正確的 MC-CRPS（單位化）
+                crps_mc_u = base_model._mc_crps_unitless(Y_mc, y_true_evt, scale).mean()
+                
+                # Forward 的 CRPS（已經是單位化）
+                crps_f_u = crps_term_orig.mean()
+                
+                print(f"🔍 CRPS比較 (unitless): Forward={crps_f_u.item():.3f} vs MC={crps_mc_u.item():.3f} "
+                      f"| $版≈${crps_mc_u.item()*scale:,.0f}")
+                
+                # 使用 MC-CRPS 作為評估輸出
+                crps_eval = crps_mc_u
+                
             except Exception as e:
                 print(f"⚠️  MC-CRPS計算失敗，使用原始值: {e}")
                 crps_eval = crps_term_orig
@@ -425,6 +485,36 @@ class EndToEndTrainer:
         # to cpu scalars
         return {k: (v.item() if hasattr(v, 'item') else v) for k, v in metrics.items()}
     
+    def summarize_hbm(self, param_names: Optional[List[str]] = None, n_samples: int = 2000):
+        """生成HBM後驗參數摘要"""
+        base = self.model.module if hasattr(self.model, 'module') else self.model
+        with torch.no_grad():
+            mu = base.mu_theta.detach().cpu()              # [P]
+            sigma = torch.exp(base.log_sigma_theta).detach().cpu()
+            P = mu.numel()
+            if not param_names or len(param_names) != P:
+                param_names = [f"θ{j}" for j in range(P)]
+            eps = torch.randn(n_samples, P)
+            theta = mu.unsqueeze(0) + sigma.unsqueeze(0) * eps  # [S,P]
+            mean  = theta.mean(0).numpy()
+            std   = theta.std(0, unbiased=True).numpy()
+            q05   = theta.quantile(0.05, dim=0).numpy()
+            q50   = theta.quantile(0.50, dim=0).numpy()
+            q95   = theta.quantile(0.95, dim=0).numpy()
+        rows = []
+        for j, name in enumerate(param_names):
+            rows.append({
+                "name": name, "mean": float(mean[j]), "std": float(std[j]),
+                "q05": float(q05[j]), "q50": float(q50[j]), "q95": float(q95[j])
+            })
+        # 少印：只在 verbose 時印；否則回傳讓上層自己處理（寫檔/表格）
+        if self.verbose:
+            print("\nHBM posterior summary:")
+            for r in rows:
+                print(f" - {r['name']:>8s}: mean={r['mean']:+.3f} ±{r['std']:.3f} | "
+                      f"[{r['q05']:+.3f}, {r['q50']:+.3f}, {r['q95']:+.3f}]")
+        return rows
+
     def get_performance_stats(self) -> Dict[str, Any]:
         """獲取性能統計"""
         stats = {

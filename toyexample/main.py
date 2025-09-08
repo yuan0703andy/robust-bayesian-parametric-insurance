@@ -184,7 +184,7 @@ def stage3_run_model_matrix(generator: ToyDataGenerator,
         model.to_multi_gpu()
         print(f"✅ 模型已移動到設備: {device}")
         
-        trainer = EndToEndTrainer(model, learning_rate=0.0001)
+        trainer = EndToEndTrainer(model, learning_rate=3e-5, verbose=True, log_every=20)
         print(f"🏋️ 開始訓練 ({n_epochs} epochs)...")
         best_test_elbo = float('-inf')
         for epoch in range(n_epochs):
@@ -196,15 +196,21 @@ def stage3_run_model_matrix(generator: ToyDataGenerator,
                       f"TradBasis={test_losses_dict.get('trad_basis', float('nan')):.1f})")
                 best_test_elbo = max(best_test_elbo, test_losses_dict['elbo'])
         final_test = trainer.evaluate(test_hazards, exposure_tensor, test_losses, n_samples=30, spatial_data=spatial_data)
+        
+        # 訓練結束後生成HBM後驗摘要
+        param_names = ["log_σ_α", "log_σ_γ", "log_σ_δ", "log_ρ_spatial", "log_a", "log_b", "log_σ_obs"]
+        posterior_summary = trainer.summarize_hbm(param_names=param_names)
+        
         config_results[product_config['name']] = {
             'final_test_elbo': final_test['elbo'],
             'final_crps': final_test['crps_term'],
             'best_test_elbo': best_test_elbo,
             'model_config': model_config,
-            'product_config': product_config
+            'product_config': product_config,
+            'posterior_summary': posterior_summary
         }
         print(f"   ✅ 最終測試ELBO: {final_test['elbo']:.3f}")
-        print(f"   📊 CRPS分數: {final_test['crps_term']:.1f} | 傳統基差: {final_test.get('trad_basis', float('nan')):.1f}")
+        print(f"   📊 CRPS分數(unitless): {final_test['crps_term']:.3f} | TradBasis: ${final_test.get('trad_basis', 0)/1e6:.1f}M")
         results[model_config['name']] = config_results
     return results
 
