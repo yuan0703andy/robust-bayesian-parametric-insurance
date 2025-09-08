@@ -2730,14 +2730,6 @@ def stage4_analyze_results(results: Dict) -> Dict:
     create_results_visualization(results)
     return {'leaderboard': all_results}
 
-# Auto-run Stage 4 in notebook
-if _in_notebook() and NB_AUTORUN:
-    try:
-        if '_NB_results' in globals():
-            _NB_summary = stage4_analyze_results(_NB_results)
-    except Exception as e:
-        print(f"[NB] Stage4 auto-run failed: {e}")
-
 def stage5_stress_test(climada_data: SimulatedCLIMADAData,
                        spatial_data: SimulatedSpatialData,
                        contamination_ratio: float = 0.15,
