@@ -6,11 +6,11 @@ import torch.nn as nn
 from torch.distributions import Normal, LogNormal, StudentT
 
 from components.prior import PriorScenario, LikelihoodFamily, PriorLikelihoodProcessor, _expand_sigma_obs_to_mu
-from hbm import DifferentiableHierarchicalBayesianModel
+from .hbm import DifferentiableHierarchicalBayesianModel
 from components.payout import DifferentiablePayoutFunction, CatInCirclePayout, _indemnity_from_loss
 
 if TYPE_CHECKING:
-    from core.data import SimulatedSpatialData
+    from .data import SimulatedSpatialData
 
 # GPU configuration (optional - for multi-GPU support)
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
