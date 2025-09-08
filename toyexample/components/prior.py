@@ -6,7 +6,7 @@ import torch
 from torch.distributions import Normal, LogNormal, StudentT
 from enum import Enum
 
-from config import PriorScenario, LikelihoodFamily
+from .config import PriorScenario, LikelihoodFamily
 
 # --- Utility: safe expansion of sigma_obs to match mu_loss (batch, H, E)
 def _expand_sigma_obs_to_mu(mu_loss: torch.Tensor, sigma_obs: torch.Tensor) -> torch.Tensor:

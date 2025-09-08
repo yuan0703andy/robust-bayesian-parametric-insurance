@@ -126,8 +126,7 @@ class EndToEndTrainer:
             prev_ratio = float(ratio)
 
         payout = total_ratio * pf.max_payout                         # [1, H, E]
-        # 事件層：沿醫院加總 → [E]
-        return payout.sum(dim=1).squeeze(0)
+        return payout.squeeze(0)
 
     
     def train_epoch(self, hazard_intensities: torch.Tensor,
