@@ -23,6 +23,7 @@ warnings.filterwarnings('ignore')
 try:
     import torch
     import torch.nn as nn
+    import torch.nn.functional as F
     import torch.optim as optim
     from torch.distributions import Normal
     TORCH_AVAILABLE = True
@@ -218,6 +219,262 @@ class ParametricPayoutFunction:
         return best_config
 
 
+class SigmoidPayoutProxy:
+    """
+    Sigmoid 代理賠付函數 - 兩階段優化的核心
+    
+    階段一：訓練時使用平滑Sigmoid函數作為階梯函數的代理，提供梯度信號
+    階段二：評估時切換回真實階梯函數，確保結果實用性
+    
+    This is the key to surrogate optimization:
+    - Training: Smooth, differentiable Sigmoid approximation
+    - Evaluation: Original step function for realistic assessment
+    """
+    
+    def __init__(self, 
+                 steinmann_thresholds: List[float] = None,
+                 steinmann_ratios: List[float] = None,
+                 max_payout: float = 20e6,
+                 k: float = 0.1,
+                 training_mode: bool = True):
+        """
+        初始化Sigmoid代理賠付函數
+        
+        Args:
+            steinmann_thresholds: Steinmann產品的閾值定義 [t1, t2, t3, t4]
+            steinmann_ratios: 對應的賠付比例 [r1, r2, r3, r4]  
+            max_payout: 最大賠付金額
+            k: Sigmoid陡峭度參數 (越大越接近階梯)
+            training_mode: True=使用Sigmoid, False=使用階梯
+        """
+        # 默認Steinmann產品配置 (四閾值產品示例)
+        if steinmann_thresholds is None:
+            steinmann_thresholds = [33.0, 43.0, 58.0, 999.0]  # Cat1, Cat2, Cat3, 無效
+        if steinmann_ratios is None:
+            steinmann_ratios = [0.25, 0.5, 0.75, 1.0]  # 25%遞增
+        
+        self.thresholds = np.array(steinmann_thresholds, dtype=np.float32)
+        self.ratios = np.array(steinmann_ratios, dtype=np.float32)
+        self.max_payout = float(max_payout)
+        self.k = float(k)  # Sigmoid陡峭度
+        self.training_mode = training_mode
+        
+        # PyTorch tensor版本 (用於GPU加速)
+        if TORCH_AVAILABLE:
+            self.thresholds_tensor = torch.tensor(self.thresholds, dtype=torch.float32)
+            self.ratios_tensor = torch.tensor(self.ratios, dtype=torch.float32)
+            self.max_payout_tensor = torch.tensor(self.max_payout, dtype=torch.float32)
+            self.k_tensor = torch.tensor(self.k, dtype=torch.float32)
+        
+        print(f"🎯 Sigmoid代理函數初始化:")
+        print(f"   閾值: {self.thresholds}")  
+        print(f"   比例: {self.ratios}")
+        print(f"   最大賠付: ${self.max_payout/1e6:.1f}M")
+        print(f"   陡峭度k: {self.k}")
+        print(f"   模式: {'訓練(Sigmoid)' if training_mode else '評估(階梯)'}")
+    
+    @classmethod  
+    def from_steinmann_product(cls, 
+                              product_index: int,
+                              steinmann_data: Dict = None,
+                              k: float = 0.1,
+                              training_mode: bool = True):
+        """
+        從Steinmann產品定義創建代理函數
+        
+        Args:
+            product_index: Steinmann產品索引 (0-349)
+            steinmann_data: 包含thresholds, ratios, max_payouts的字典
+            k: Sigmoid陡峭度
+            training_mode: 訓練模式標誌
+        
+        Returns:
+            SigmoidPayoutProxy實例
+        """
+        if steinmann_data is None:
+            # 使用默認數據 (需要從BasisRiskAwareVI實例獲取)
+            print("⚠️ 警告: 使用默認Steinmann數據，實際使用請傳入真實數據")
+            return cls(k=k, training_mode=training_mode)
+        
+        thresholds = steinmann_data['thresholds'][product_index]
+        ratios = steinmann_data['ratios'][product_index] 
+        max_payout = steinmann_data['max_payouts'][product_index]
+        
+        return cls(
+            steinmann_thresholds=thresholds.tolist() if hasattr(thresholds, 'tolist') else thresholds,
+            steinmann_ratios=ratios.tolist() if hasattr(ratios, 'tolist') else ratios,
+            max_payout=float(max_payout),
+            k=k,
+            training_mode=training_mode
+        )
+    
+    def set_mode(self, training_mode: bool):
+        """切換訓練/評估模式"""
+        self.training_mode = training_mode
+        mode_name = "訓練(Sigmoid)" if training_mode else "評估(階梯)"
+        print(f"🔄 代理函數切換至: {mode_name}")
+    
+    def calculate_payout_sigmoid(self, 
+                               loss_samples: np.ndarray) -> np.ndarray:
+        """
+        計算Sigmoid代理賠付 - 訓練階段使用
+        
+        使用平滑Sigmoid函數近似階梯式賠付：
+        Payout(x) = max_payout * Σ[(rᵢ - rᵢ₋₁) * sigmoid(k*(x - tᵢ))]
+        
+        Args:
+            loss_samples: 損失樣本 [N, M] 或 [N]
+            
+        Returns:
+            平滑的賠付樣本 [N, M] 或 [N]
+        """
+        if len(loss_samples.shape) == 1:
+            loss_samples = loss_samples.reshape(-1, 1)
+            squeeze_output = True
+        else:
+            squeeze_output = False
+            
+        N, M = loss_samples.shape
+        payout_samples = np.zeros_like(loss_samples, dtype=np.float32)
+        
+        # 向量化Sigmoid計算
+        for i, (threshold, ratio) in enumerate(zip(self.thresholds, self.ratios)):
+            if threshold < 999:  # 有效閾值
+                # 計算當前閾值的增量賠付比例
+                prev_ratio = self.ratios[i-1] if i > 0 else 0.0
+                delta_ratio = ratio - prev_ratio
+                
+                # Sigmoid函數: 1 / (1 + exp(-k*(x - threshold)))
+                sigmoid_values = 1.0 / (1.0 + np.exp(-self.k * (loss_samples - threshold)))
+                payout_samples += delta_ratio * sigmoid_values
+        
+        # 應用最大賠付限制
+        payout_samples *= self.max_payout
+        payout_samples = np.minimum(payout_samples, self.max_payout)
+        
+        return payout_samples.squeeze() if squeeze_output else payout_samples
+    
+    def calculate_payout_step(self, 
+                            loss_samples: np.ndarray) -> np.ndarray:
+        """
+        計算真實階梯賠付 - 評估階段使用
+        
+        使用原始Steinmann階梯式邏輯：
+        對每個損失值，找到觸發的最高閾值，返回對應賠付
+        
+        Args:
+            loss_samples: 損失樣本 [N, M] 或 [N]
+            
+        Returns:
+            階梯式賠付樣本 [N, M] 或 [N]
+        """
+        if len(loss_samples.shape) == 1:
+            loss_samples = loss_samples.reshape(-1, 1)
+            squeeze_output = True
+        else:
+            squeeze_output = False
+            
+        N, M = loss_samples.shape
+        payout_samples = np.zeros_like(loss_samples, dtype=np.float32)
+        
+        # 原始階梯邏輯 - 與Steinmann標準完全一致
+        for i in range(N):
+            for j in range(M):
+                loss_value = loss_samples[i, j]
+                total_payout = 0.0
+                
+                # 找到觸發的最高閾值
+                for thresh_idx in range(len(self.thresholds)):
+                    threshold = self.thresholds[thresh_idx]
+                    if threshold < 999 and loss_value >= threshold:  # 有效閾值且觸發
+                        total_payout = self.max_payout * self.ratios[thresh_idx]
+                
+                payout_samples[i, j] = min(total_payout, self.max_payout)
+        
+        return payout_samples.squeeze() if squeeze_output else payout_samples
+    
+    def calculate_payout_distribution(self, 
+                                    loss_samples: np.ndarray) -> np.ndarray:
+        """
+        統一賠付計算接口 - 自動根據模式選擇Sigmoid或階梯
+        
+        Args:
+            loss_samples: 損失分布樣本
+            
+        Returns:
+            賠付分布樣本
+        """
+        if self.training_mode:
+            return self.calculate_payout_sigmoid(loss_samples)
+        else:
+            return self.calculate_payout_step(loss_samples)
+    
+    def calculate_payout_tensor(self, 
+                              loss_samples: torch.Tensor) -> torch.Tensor:
+        """
+        PyTorch張量版本的賠付計算 - 支援GPU加速和自動微分
+        
+        這是確保參數能夠傳遞到HBM並影響基差風險的關鍵方法！
+        
+        Args:
+            loss_samples: PyTorch損失張量 [N, M]
+            
+        Returns:
+            PyTorch賠付張量 [N, M]
+        """
+        if not TORCH_AVAILABLE:
+            raise ImportError("PyTorch not available for tensor operations")
+        
+        device = loss_samples.device
+        self.thresholds_tensor = self.thresholds_tensor.to(device)
+        self.ratios_tensor = self.ratios_tensor.to(device)
+        self.max_payout_tensor = self.max_payout_tensor.to(device)
+        self.k_tensor = self.k_tensor.to(device)
+        
+        if self.training_mode:
+            # Sigmoid模式 - 保持可微分性
+            payout_samples = torch.zeros_like(loss_samples, dtype=torch.float32)
+            
+            for i, (threshold, ratio) in enumerate(zip(self.thresholds_tensor, self.ratios_tensor)):
+                if threshold < 999:  # 有效閾值
+                    prev_ratio = self.ratios_tensor[i-1] if i > 0 else 0.0
+                    delta_ratio = ratio - prev_ratio
+                    
+                    # 可微分的Sigmoid
+                    sigmoid_values = torch.sigmoid(self.k_tensor * (loss_samples - threshold))
+                    payout_samples += delta_ratio * sigmoid_values
+            
+            payout_samples *= self.max_payout_tensor
+            payout_samples = torch.clamp(payout_samples, 0, self.max_payout_tensor)
+            
+        else:
+            # 階梯模式 - 使用不可微但精確的階梯邏輯
+            payout_samples = torch.zeros_like(loss_samples, dtype=torch.float32)
+            
+            for i, (threshold, ratio) in enumerate(zip(self.thresholds_tensor, self.ratios_tensor)):
+                if threshold < 999:
+                    # 階梯函數：loss >= threshold 時賠付ratio * max_payout
+                    triggered = (loss_samples >= threshold).float()
+                    payout_samples = torch.maximum(
+                        payout_samples, 
+                        triggered * ratio * self.max_payout_tensor
+                    )
+        
+        return payout_samples
+    
+    def get_configuration_summary(self) -> Dict:
+        """獲取配置摘要"""
+        return {
+            'thresholds': self.thresholds.tolist(),
+            'ratios': self.ratios.tolist(), 
+            'max_payout': self.max_payout,
+            'k': self.k,
+            'training_mode': self.training_mode,
+            'valid_thresholds': sum(1 for t in self.thresholds if t < 999),
+            'payout_type': 'sigmoid' if self.training_mode else 'step'
+        }
+
+
 class EpsilonContaminationModel:
     """ε-contamination 模型"""
     
@@ -327,7 +584,12 @@ class BasisRiskAwareVI:
                  learning_rate: float = 0.01,
                  objective: str = 'crps_basis_risk',
                  n_params: int = None,
-                 hierarchical_model = None):
+                 hierarchical_model = None,
+                 # 新增: Sigmoid代理優化參數
+                 use_sigmoid_proxy: bool = True,
+                 sigmoid_steepness: float = 0.1,
+                 training_mode: bool = True,
+                 pytorch_hbm_model = None):
         """
         初始化基差風險導向 VI
         
@@ -340,8 +602,13 @@ class BasisRiskAwareVI:
                 - 'traditional_elbo': 傳統ELBO (第二層比較)
                 - 'crps_basis_risk': CRPS-based ELBO創新 (第三層比較)
                 - 'hbm_two_step': 兩步法 - 先優化G(θ)再評估F_k(θ)
+                - 'pytorch_hbm': PyTorch HBM風險大腦模式
             n_params: 參數維度 (None=自動計算, 2=向後兼容, 350=完整產品選擇)
             hierarchical_model: 外部HBM模型實例 (用於two_step模式)
+            use_sigmoid_proxy: 是否使用Sigmoid代理函數進行可微分優化
+            sigmoid_steepness: Sigmoid陡峭度參數k (越大越接近階梯函數)
+            training_mode: True=訓練模式(Sigmoid), False=評估模式(階梯)
+            pytorch_hbm_model: PyTorch HBM適配器實例 (用於pytorch_hbm模式)
         """
         if epsilon_values is None:
             epsilon_values = [0.0, 0.05, 0.10, 0.15, 0.20]
@@ -359,6 +626,12 @@ class BasisRiskAwareVI:
         self.basis_risk_types = basis_risk_types
         self.objective = objective
         self.hierarchical_model = hierarchical_model  # 外部HBM實例
+        self.pytorch_hbm_model = pytorch_hbm_model  # PyTorch HBM適配器
+        
+        # Sigmoid代理優化相關參數
+        self.use_sigmoid_proxy = use_sigmoid_proxy
+        self.sigmoid_steepness = sigmoid_steepness
+        self.training_mode = training_mode
         
         # 雙GPU配置 - 支持並行計算
         self.use_gpu = use_gpu and TORCH_AVAILABLE
@@ -407,14 +680,73 @@ class BasisRiskAwareVI:
         if self.use_gpu and TORCH_AVAILABLE:
             print(f"   GPU設備: {torch.cuda.get_device_name(self.device)}")
         
-        # 賠付函數
-        self.payout_function = ParametricPayoutFunction()
+        # 🎯 賠付函數 - 支援Sigmoid代理優化
+        if self.use_sigmoid_proxy:
+            # 使用Sigmoid代理函數 - 支援兩階段優化
+            self.payout_function = SigmoidPayoutProxy(
+                k=self.sigmoid_steepness,
+                training_mode=self.training_mode
+            )
+            print(f"🎯 啟用Sigmoid代理優化: k={self.sigmoid_steepness}, mode={'訓練' if self.training_mode else '評估'}")
+        else:
+            # 使用傳統階梯函數 - 僅評估模式
+            self.payout_function = ParametricPayoutFunction()
+            print("📊 使用傳統階梯函數")
         
         # CRPS 計算器
         self.crps_calculator = DifferentiableCRPS()
         
         # 存儲結果
         self.vi_results = {}
+    
+    def set_optimization_mode(self, training_mode: bool):
+        """
+        設置優化模式 - 兩階段代理優化的核心控制
+        
+        Args:
+            training_mode: True=訓練模式(使用Sigmoid代理), False=評估模式(使用真實階梯)
+        """
+        self.training_mode = training_mode
+        
+        if hasattr(self.payout_function, 'set_mode'):
+            self.payout_function.set_mode(training_mode)
+            mode_name = "訓練(Sigmoid)" if training_mode else "評估(階梯)"
+            print(f"🔄 優化模式切換: {mode_name}")
+        else:
+            print("⚠️ 當前賠付函數不支援模式切換")
+    
+    def get_steinmann_payout_proxy(self, product_index: int) -> SigmoidPayoutProxy:
+        """
+        為指定的Steinmann產品創建Sigmoid代理函數
+        
+        這是確保參數能夠正確傳遞到HBM模型的關鍵方法！
+        
+        Args:
+            product_index: Steinmann產品索引 (0-349)
+            
+        Returns:
+            配置好的SigmoidPayoutProxy實例
+        """
+        if not self.use_sigmoid_proxy:
+            print("⚠️ 當前未啟用Sigmoid代理，無法創建產品代理")
+            return None
+        
+        # 獲取Steinmann產品數據
+        steinmann_data = {
+            'thresholds': self._get_steinmann_products_tensor().detach().cpu().numpy(),
+            'ratios': self._get_steinmann_ratios_tensor().detach().cpu().numpy(),
+            'max_payouts': self._get_steinmann_max_payouts().detach().cpu().numpy()
+        }
+        
+        # 為特定產品創建代理
+        proxy = SigmoidPayoutProxy.from_steinmann_product(
+            product_index=product_index,
+            steinmann_data=steinmann_data,
+            k=self.sigmoid_steepness,
+            training_mode=self.training_mode
+        )
+        
+        return proxy
     
     def predict_distribution(self, theta: np.ndarray, X: np.ndarray, n_samples: int = 100) -> np.ndarray:
         """
@@ -827,6 +1159,11 @@ class BasisRiskAwareVI:
             return self._compute_hbm_two_step_elbo_batch_gpu(
                 X_tensor, y_tensor, theta_samples, mu_theta, sigma_theta
             )
+        elif self.objective == 'pytorch_hbm':
+            # PyTorch HBM風險大腦：使用PyTorch層級貝氏模型
+            return self._compute_pytorch_hbm_elbo_batch_gpu(
+                X_tensor, y_tensor, theta_samples, mu_theta, sigma_theta
+            )
         else:
             raise ValueError(f"不支持的目標函數: {self.objective}")
     
@@ -931,9 +1268,96 @@ class BasisRiskAwareVI:
         
         return elbo
     
+    def _compute_pytorch_hbm_elbo_batch_gpu(self, X_tensor, y_tensor, theta_samples, 
+                                          mu_theta, sigma_theta):
+        """PyTorch HBM風險大腦: 使用PyTorch層次貝氏模型進行VI優化
+        
+        實現公式: ℒPyTorchHBM(φ) = -E_qφ(θ)[CRPS(y, PyTorchHBM(θ))] - KL(qφ(θ)||p(θ))
+        
+        PyTorchHBM是一個完全可微分的4層階層模型，支持端到端優化
+        """
+        if self.pytorch_hbm_model is None:
+            raise ValueError("PyTorch HBM模式需要提供 pytorch_hbm_model 適配器實例")
+            
+        batch_size = theta_samples.shape[0]
+        
+        # *** 核心：使用PyTorch HBM預測損失分布 ***
+        # PyTorch HBM適配器已經處理GPU張量，無需轉換
+        X_list = [X_tensor[:, 0], X_tensor[:, 1]]  # [hazard_intensities, exposure_values]
+        
+        # 批次調用PyTorch HBM預測
+        crps_scores = []
+        for i in range(batch_size):
+            # 調用PyTorch HBM適配器的predict_distribution方法
+            # 該方法返回numpy數組，需要轉換為GPU張量
+            pred_samples_np = self.pytorch_hbm_model.predict_distribution(
+                theta=theta_samples[i].detach().cpu().numpy(),
+                X=X_list,
+                n_samples=100
+            )
+            
+            # 轉換為GPU張量 [n_samples, n_hospitals, n_events] -> [n_data, n_samples]
+            pred_samples_tensor = torch.from_numpy(pred_samples_np).float().to(self.device)
+            
+            # 重新調整維度以匹配期望格式 [n_data, n_samples]
+            if pred_samples_tensor.dim() == 3:
+                # 假設我們關心第一個醫院的所有事件
+                pred_samples_flat = pred_samples_tensor[:, 0, :].T  # [n_events, n_samples] -> [n_samples, n_events]
+                # 進一步平坦化為 [n_data=n_events*n_hospitals, n_samples]
+                pred_samples_2d = pred_samples_flat.T  # [n_events, n_samples]
+            else:
+                pred_samples_2d = pred_samples_tensor
+                
+            # 計算CRPS(y_observed, PyTorchHBM(θ))
+            crps_batch = []
+            n_data = min(pred_samples_2d.shape[0], y_tensor.shape[0])
+            
+            for j in range(n_data):
+                y_obs = y_tensor[j:j+1]  # [1]
+                
+                if pred_samples_2d.shape[0] > j:
+                    forecast = pred_samples_2d[j]  # [n_samples]
+                    
+                    # 簡化CRPS計算 (可微分)
+                    if len(forecast.shape) > 0 and forecast.numel() > 1:
+                        crps_val = torch.mean(torch.abs(forecast - y_obs)) - 0.5 * torch.mean(
+                            torch.abs(forecast.unsqueeze(0) - forecast.unsqueeze(1))
+                        )
+                    else:
+                        # 退化到MSE
+                        crps_val = torch.abs(forecast.mean() - y_obs)
+                        
+                    crps_batch.append(crps_val)
+            
+            if crps_batch:
+                crps_scores.append(torch.stack(crps_batch).mean())
+            else:
+                # 如果沒有有效的CRPS計算，使用默認懲罰
+                crps_scores.append(torch.tensor(1e6, device=self.device))
+        
+        crps_term = -torch.stack(crps_scores)  # 負號使CRPS最小化等效ELBO最大化
+        
+        # KL散度正則化項 (與其他方法保持一致)
+        log_prior = -0.5 * torch.sum(theta_samples**2, dim=1) - \
+                    0.5 * self.n_params * torch.log(torch.tensor(2 * np.pi, device=self.device))
+        
+        log_q = -0.5 * torch.sum((theta_samples - mu_theta)**2 / sigma_theta**2, dim=1) - \
+                0.5 * torch.sum(torch.log(2 * np.pi * sigma_theta**2))
+        
+        kl_divergence = log_q - log_prior
+        
+        # PyTorch HBM ELBO = -E[CRPS(y,PyTorchHBM(θ))] - KL
+        elbo = crps_term - kl_divergence
+        
+        return elbo
+    
     def _compute_basis_risk_batch_gpu(self, X_tensor, y_tensor, theta_samples, epsilon, basis_risk_type):
         """
-        雙GPU並行計算350維VI基差風險
+        雙GPU並行計算350維VI基差風險 - 支援Sigmoid代理優化
+        
+        🎯 兩階段代理優化：
+        - 訓練模式：使用Sigmoid代理函數，保持可微分性
+        - 評估模式：使用原始階梯函數，確保真實性
         
         GPU0: 處理前175個產品 (0-174)  
         GPU1: 處理後175個產品 (175-349)
@@ -1050,7 +1474,11 @@ class BasisRiskAwareVI:
         return {'gpu0': gpu0_data, 'gpu1': gpu1_data}
     
     def _compute_products_subset_gpu(self, wind_speeds, product_weights, steinmann_data, start_idx, end_idx):
-        """恢復到固定產品定義 - 重新簡化為純產品選擇"""
+        """
+        🎯 代理優化核心：根據模式選擇Sigmoid或階梯函數
+        
+        確保θ參數變化能夠正確反映到基差風險計算中！
+        """
         batch_size = wind_speeds.shape[0]
         n_data = wind_speeds.shape[1]
         n_products = end_idx - start_idx
@@ -1061,24 +1489,97 @@ class BasisRiskAwareVI:
         ratios = steinmann_data['ratios']          # [n_products, 4]
         max_payouts = steinmann_data['max_payouts'] # [n_products]
         
-        # 向量化計算所有產品
+        # 🔄 根據代理優化模式選擇計算方法
+        if self.use_sigmoid_proxy and self.training_mode:
+            # === 訓練模式：Sigmoid代理函數 ===
+            print(f"🎯 使用Sigmoid代理函數計算賠付 (k={self.sigmoid_steepness})")
+            payouts = self._compute_sigmoid_payout_gpu(
+                wind_speeds, product_weights, thresholds, ratios, max_payouts, n_products
+            )
+        else:
+            # === 評估模式：原始階梯函數 ===
+            print(f"📊 使用原始階梯函數計算賠付")
+            payouts = self._compute_step_payout_gpu(
+                wind_speeds, product_weights, thresholds, ratios, max_payouts, n_products
+            )
+        
+        return payouts
+    
+    def _compute_sigmoid_payout_gpu(self, wind_speeds, product_weights, thresholds, ratios, max_payouts, n_products):
+        """
+        🎯 Sigmoid代理賠付計算 - 可微分的平滑近似
+        
+        實現公式: Payout(x) = max_payout * Σ[(rᵢ - rᵢ₋₁) * sigmoid(k*(x - tᵢ))]
+        """
+        batch_size = wind_speeds.shape[0]
+        n_data = wind_speeds.shape[1]
+        payouts = torch.zeros(batch_size, n_data, device=wind_speeds.device, dtype=torch.float32)
+        
+        # 向量化計算所有產品的Sigmoid賠付
         for prod_idx in range(n_products):
             product_thresholds = thresholds[prod_idx]  # [4]
             product_ratios = ratios[prod_idx]          # [4]
             product_max_payout = max_payouts[prod_idx] # scalar
             
-            # 計算此產品的平滑賠付
+            # 為每個產品計算Sigmoid賠付
             product_payouts = torch.zeros_like(wind_speeds, dtype=torch.float32)
             
             for threshold_idx in range(4):
-                base_threshold = float(product_thresholds[threshold_idx].item())
-                if base_threshold < 999:
+                threshold = float(product_thresholds[threshold_idx].item())
+                if threshold < 999:  # 有效閾值
                     ratio = float(product_ratios[threshold_idx].item())
-                    if ratio > 0:
-                        temperature = 2.0
-                        smooth_activation = torch.sigmoid((wind_speeds - base_threshold) / temperature)
-                        payout_value = product_max_payout * ratio
-                        product_payouts += smooth_activation * payout_value
+                    
+                    # 計算增量賠付比例 (Steinmann階梯式邏輯)
+                    prev_ratio = float(product_ratios[threshold_idx-1].item()) if threshold_idx > 0 else 0.0
+                    delta_ratio = ratio - prev_ratio
+                    
+                    if delta_ratio > 0:
+                        # 🎯 可微分的Sigmoid函數
+                        sigmoid_values = torch.sigmoid(self.sigmoid_steepness * (wind_speeds - threshold))
+                        product_payouts += delta_ratio * sigmoid_values
+            
+            # 應用最大賠付限制
+            product_payouts *= product_max_payout
+            product_payouts = torch.clamp(product_payouts, 0, product_max_payout)
+            
+            # 加權累積 - θ參數的變化在這裡體現！
+            weight = product_weights[:, prod_idx:prod_idx+1]  # [batch_size, 1]
+            payouts += weight * product_payouts
+        
+        return payouts
+    
+    def _compute_step_payout_gpu(self, wind_speeds, product_weights, thresholds, ratios, max_payouts, n_products):
+        """
+        📊 原始階梯賠付計算 - 精確但不可微分
+        
+        使用真實的Steinmann階梯函數邏輯
+        """
+        batch_size = wind_speeds.shape[0]
+        n_data = wind_speeds.shape[1]
+        payouts = torch.zeros(batch_size, n_data, device=wind_speeds.device, dtype=torch.float32)
+        
+        # 向量化計算所有產品的階梯賠付
+        for prod_idx in range(n_products):
+            product_thresholds = thresholds[prod_idx]  # [4]
+            product_ratios = ratios[prod_idx]          # [4]
+            product_max_payout = max_payouts[prod_idx] # scalar
+            
+            # 為每個產品計算階梯賠付
+            product_payouts = torch.zeros_like(wind_speeds, dtype=torch.float32)
+            
+            # Steinmann階梯邏輯：找到觸發的最高閾值
+            for i in range(batch_size):
+                for j in range(n_data):
+                    wind_value = wind_speeds[i, j].item()
+                    max_triggered_ratio = 0.0
+                    
+                    for threshold_idx in range(4):
+                        threshold = float(product_thresholds[threshold_idx].item())
+                        if threshold < 999 and wind_value >= threshold:
+                            ratio = float(product_ratios[threshold_idx].item())
+                            max_triggered_ratio = max(max_triggered_ratio, ratio)
+                    
+                    product_payouts[i, j] = product_max_payout * max_triggered_ratio
             
             # 加權累積
             weight = product_weights[:, prod_idx:prod_idx+1]  # [batch_size, 1]
@@ -1431,6 +1932,208 @@ class BasisRiskAwareVI:
             'best_models': all_results[:3],
             'best_model': all_results[0]
         }
+
+
+if TORCH_AVAILABLE:
+    # ============================================================
+    # Route A: Solvency-compliant integrated objective with cat-in-circle
+    # ============================================================
+
+    # Stable Student-t logpdf
+    def student_t_logpdf(y: torch.Tensor, loc: torch.Tensor, scale: torch.Tensor, df: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
+        scale = torch.clamp(scale, min=eps)
+        df = torch.clamp(df, min=2.01)
+        t = (y - loc) / scale
+        Z = (torch.lgamma((df + 1)/2) - torch.lgamma(df/2)
+             - 0.5*torch.log(df*torch.pi) - torch.log(scale))
+        return Z - 0.5*(df+1)*torch.log1p(t*t/df)
+
+    def smooth_max(x: torch.Tensor, tau: float = 0.5) -> torch.Tensor:
+        return tau * torch.logsumexp(x / tau, dim=-1)
+
+    def smooth_ramp(z: torch.Tensor, a: float, b: float, eps: float = 1e-6, k: float = 20.0) -> torch.Tensor:
+        width = torch.clamp(torch.tensor(b - a, device=z.device, dtype=z.dtype), min=eps)
+        t = (z - a) / width
+        # Smooth clamp to [0,1]
+        return torch.clamp(t, 0.0, 1.0)
+
+    def indemnity_from_loss(loss: torch.Tensor, deductible: float = 0.0, limit: float = float('inf')) -> torch.Tensor:
+        pay = torch.clamp(loss - deductible, min=0.0)
+        if torch.isfinite(torch.tensor(limit, device=loss.device)):
+            pay = torch.clamp(pay, max=limit)
+        return pay
+
+    def crps_from_samples(x_samples: torch.Tensor, y_target: torch.Tensor) -> torch.Tensor:
+        # x_samples: [S, E], y_target: [E]
+        S, E = x_samples.shape
+        term1 = torch.mean(torch.abs(x_samples - y_target))
+        x_perm = x_samples[torch.randperm(S)]
+        term2 = 0.5 * torch.mean(torch.abs(x_samples - x_perm))
+        return term1 - term2
+
+    class CatInCirclePayout(nn.Module):
+        def __init__(self, distance_matrix_km, circle_radius_km: float,
+                     trigger_ms: float, exhaustion_ms: float,
+                     site_limits, smooth_tau: float = 0.5,
+                     payout_cap: float = None, site_weights = None):
+            super().__init__()
+            D = torch.tensor(distance_matrix_km, dtype=torch.float32)
+            self.register_buffer('D', D)
+            self.N_site, self.N_sta = D.shape
+            self.R = float(circle_radius_km)
+            self.trigger = float(trigger_ms)
+            self.exhaustion = float(exhaustion_ms)
+            self.smooth_tau = float(smooth_tau)
+            self.site_limits = torch.as_tensor(site_limits, dtype=torch.float32)
+            self.site_weights = (torch.ones(self.N_site, dtype=torch.float32)
+                                  if site_weights is None else torch.as_tensor(site_weights, dtype=torch.float32))
+            self.payout_cap = payout_cap
+
+            mask = (D <= self.R).float()
+            empty = (mask.sum(dim=1) == 0)
+            if torch.any(empty):
+                nearest_idx = torch.argmin(D[empty], dim=1)
+                mask[empty, :] = 0.0
+                mask[empty, nearest_idx] = 1.0
+            self.register_buffer('mask', mask)
+
+        def forward(self, winds_ms: torch.Tensor):  # winds_ms: [N_sta, E]
+            device = winds_ms.device
+            masked = winds_ms.unsqueeze(0).expand(self.N_site, -1, -1)
+            # non-inplace: set outside-circle to big negative
+            big_neg = torch.tensor(-1e6, device=device, dtype=masked.dtype)
+            masked = masked + (self.mask.unsqueeze(-1) - 1.0) * (-big_neg)
+            I_site = smooth_max(masked, tau=self.smooth_tau)  # [N_site, E]
+
+            ramp = smooth_ramp(I_site, self.trigger, self.exhaustion)
+            payout_site = ramp * self.site_limits.unsqueeze(-1)
+            total = (self.site_weights.unsqueeze(-1) * payout_site).sum(dim=0)
+            if self.payout_cap is not None:
+                total = torch.clamp(total, max=self.payout_cap)
+            return total, I_site
+
+    class VulnerabilityHBM(nn.Module):
+        def __init__(self, n_hospitals: int):
+            super().__init__()
+            self.alpha_un = nn.Parameter(torch.zeros(1))
+            self.beta_un  = nn.Parameter(torch.log(torch.tensor(1.5)))
+            self.v0_un    = nn.Parameter(torch.log(torch.tensor(20.0)))
+            self.log_sigma = nn.Parameter(torch.log(torch.tensor(1.0)))
+            self.log_nu_m1 = nn.Parameter(torch.log(torch.tensor(5.0 - 1.0)))
+
+        def forward(self, winds_ms: torch.Tensor, exposure: torch.Tensor):
+            alpha = F.softplus(self.alpha_un) + 1e-6
+            beta  = F.softplus(self.beta_un)  + 1e-6
+            v0    = F.softplus(self.v0_un)    + 1e-6
+            relu_term = torch.clamp(winds_ms - v0, min=0.0) ** beta
+            mean_loss = exposure.unsqueeze(-1) * alpha * relu_term
+            sigma = torch.exp(self.log_sigma) + 1e-6
+            nu    = 1.0 + F.softplus(self.log_nu_m1)
+            return mean_loss, sigma, nu
+
+    class SolvencyCompliantBayesVI(nn.Module):
+        def __init__(self, n_hospitals: int, n_regions: int,
+                     distance_matrix_km, product_config: Dict,
+                     lambda_kl: float = 0.05, lambda_br: float = 1.0,
+                     loss_scale: float = 1e6, payout_scale: float = None,
+                     solvency_mode: bool = True):
+            super().__init__()
+            self.n_hospitals = n_hospitals
+            self.lambda_kl = lambda_kl
+            self.lambda_br = lambda_br
+            self.loss_scale = loss_scale
+
+            self.mu_q = nn.Parameter(torch.zeros(6))
+            self.log_std_q = nn.Parameter(torch.full((6,), -1.0))
+            self.register_buffer('mu_p', torch.zeros(6))
+            self.register_buffer('std_p', torch.ones(6))
+
+            self.hbm = VulnerabilityHBM(n_hospitals)
+            self.product = CatInCirclePayout(
+                distance_matrix_km=distance_matrix_km,
+                circle_radius_km=product_config['radius_km'],
+                trigger_ms=product_config['trigger_ms'],
+                exhaustion_ms=product_config['exhaustion_ms'],
+                site_limits=product_config['site_limits'],
+                smooth_tau=product_config.get('smooth_tau', 0.5),
+                payout_cap=product_config.get('payout_cap', None),
+                site_weights=product_config.get('site_weights', None)
+            )
+            if payout_scale is None:
+                if product_config.get('payout_cap', None) is not None:
+                    self.payout_scale = float(product_config['payout_cap'])
+                else:
+                    self.payout_scale = float(torch.tensor(product_config['site_limits']).sum())
+            else:
+                self.payout_scale = payout_scale
+
+        def sample_theta(self, n_samples: int) -> torch.Tensor:
+            eps = torch.randn(n_samples, self.mu_q.numel(), device=self.mu_q.device)
+            return self.mu_q + torch.exp(self.log_std_q) * eps
+
+        def kl_qp(self) -> torch.Tensor:
+            var_q = torch.exp(2*self.log_std_q)
+            var_p = self.std_p**2
+            term = (torch.log(self.std_p) - self.log_std_q) + (var_q + (self.mu_q - self.mu_p)**2)/(2*var_p) - 0.5
+            return term.sum()
+
+        def load_theta_to_hbm_(self, theta_vec: torch.Tensor):
+            self.hbm.alpha_un.data = theta_vec[0:1]
+            self.hbm.beta_un.data  = theta_vec[1:2]
+            self.hbm.v0_un.data    = theta_vec[2:3]
+            self.hbm.log_sigma.data = theta_vec[3:4]
+            self.hbm.log_nu_m1.data = theta_vec[4:5]
+
+        def compute_solvency_elbo(self, winds_ms: torch.Tensor, exposure: torch.Tensor, losses: torch.Tensor,
+                                   indemnity_cfg: Dict, n_samples: int = 64):
+            device = self.mu_q.device
+            winds_ms = winds_ms.to(device)
+            exposure = exposure.to(device)
+            losses   = losses.to(device)
+
+            losses_scaled = losses / self.loss_scale
+            S = n_samples
+            theta_s = self.sample_theta(S)
+
+            loglik_terms = []
+            payouts_samples = []
+            for s in range(S):
+                self.load_theta_to_hbm_(theta_s[s])
+                mean_loss, sigma, nu = self.hbm(winds_ms, exposure)
+                ll = student_t_logpdf(losses_scaled,
+                                       loc=mean_loss/self.loss_scale,
+                                       scale=sigma/self.loss_scale,
+                                       df=nu).sum()
+                loglik_terms.append(ll)
+                total_payout, _ = self.product(winds_ms)
+                payouts_samples.append(total_payout)
+
+            loglik = torch.stack(loglik_terms).mean()
+            payouts_samples = torch.stack(payouts_samples, dim=0)
+
+            kl = self.kl_qp()
+
+            loss_total = losses.sum(dim=0)
+            y_pay_target = indemnity_from_loss(
+                loss_total,
+                deductible=indemnity_cfg.get('deductible', 0.0),
+                limit=indemnity_cfg.get('limit', float('inf'))
+            )
+            crps_raw = crps_from_samples(payouts_samples, y_pay_target)
+            crps_scaled = crps_raw / self.payout_scale
+
+            nll = -loglik
+            total_loss = nll + self.lambda_kl * kl + self.lambda_br * crps_scaled
+            solvency_elbo = loglik - self.lambda_kl * kl - self.lambda_br * crps_scaled
+
+            logs = {
+                'nll': float(nll.detach()),
+                'kl': float(kl.detach()),
+                'crps_raw': float(crps_raw.detach()),
+                'crps_scaled': float(crps_scaled.detach()),
+                'solvency_elbo': float(solvency_elbo.detach()),
+            }
+            return total_loss, logs
     
     
     def _cpu_screening(self, X: np.ndarray, y: np.ndarray, 
