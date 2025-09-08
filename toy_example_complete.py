@@ -1913,11 +1913,12 @@ class EndToEndTrainer:
         # 傳統基差風險（事件層）：|param payout(hazard) - indemnity(loss)| 平均
         with torch.no_grad():
             base_model = self.model.module if hasattr(self.model, 'module') else self.model
+            # 事件層實際損失
             y_actual = observed_losses.sum(dim=0)  # (E)
-            if getattr(base_model, 'param_target', None) is not None:
-                y_param, _ = base_model.param_target(hazard_intensities)
-            else:
-                y_param = _indemnity_from_loss(y_actual, deductible=0.0, limit=getattr(base_model, 'payout_scale', float(y_actual.max().item())))
+            # 傳統產品賠付：將實際損失丟入當前產品引擎（loss-based Steinmann），沿醫院合計
+            loss_obs = observed_losses.unsqueeze(0)  # (1,H,E)
+            payout_obs, _ = base_model.payout_function._payout_and_derivative(loss_obs)
+            y_param = payout_obs.sum(dim=1).squeeze(0)  # (E)
             trad_basis = torch.mean(torch.abs(y_param - y_actual)).item()
 
         # 記錄損失與指標
@@ -2029,13 +2030,12 @@ class EndToEndTrainer:
                     hazard_intensities, exposure_values, observed_losses, n_samples, spatial_data
                 )
                 total_loss, elbo, crps_term, kl_div = outputs
-                # 傳統基差風險（事件層）
+                # 傳統基差風險（事件層）：用產品賠付(基於實際損失) vs 實際損失
                 base_model = self.model.module if hasattr(self.model, 'module') else self.model
                 y_actual = observed_losses.sum(dim=0)
-                if getattr(base_model, 'param_target', None) is not None:
-                    y_param, _ = base_model.param_target(hazard_intensities)
-                else:
-                    y_param = _indemnity_from_loss(y_actual, deductible=0.0, limit=getattr(base_model, 'payout_scale', float(y_actual.max().item())))
+                loss_obs = observed_losses.unsqueeze(0)  # (1,H,E)
+                payout_obs, _ = base_model.payout_function._payout_and_derivative(loss_obs)
+                y_param = payout_obs.sum(dim=1).squeeze(0)
                 trad_basis = torch.mean(torch.abs(y_param - y_actual))
                 loss_dict = {
                     'total_loss': total_loss.mean(),
@@ -2050,10 +2050,9 @@ class EndToEndTrainer:
                     hazard_intensities, exposure_values, observed_losses, n_samples, spatial_data
                 )
                 y_actual = observed_losses.sum(dim=0)
-                if getattr(base_model, 'param_target', None) is not None:
-                    y_param, _ = base_model.param_target(hazard_intensities)
-                else:
-                    y_param = _indemnity_from_loss(y_actual, deductible=0.0, limit=getattr(base_model, 'payout_scale', float(y_actual.max().item())))
+                loss_obs = observed_losses.unsqueeze(0)
+                payout_obs, _ = base_model.payout_function._payout_and_derivative(loss_obs)
+                y_param = payout_obs.sum(dim=1).squeeze(0)
                 trad_basis = torch.mean(torch.abs(y_param - y_actual))
                 loss_dict = {
                     'total_loss': total_loss,
