@@ -5,12 +5,12 @@ import torch
 import matplotlib.pyplot as plt
 
 # Import from local modules
-from .core.data import ToyDataGenerator, SimulatedCLIMADAData, SimulatedSpatialData
-from .core.model import UnifiedEndToEndVIModel
-from .core.trainer import EndToEndTrainer
-from .components.config import ModelConfiguration
-from .components.prior import PriorScenario, LikelihoodFamily
-from .analysis.stress import RobustnessStressTester
+from core.data import ToyDataGenerator, SimulatedCLIMADAData, SimulatedSpatialData
+from core.model import UnifiedEndToEndVIModel
+from core.trainer import EndToEndTrainer
+from components.config import ModelConfiguration
+from components.prior import PriorScenario, LikelihoodFamily
+from analysis.stress import RobustnessStressTester
 
 # Configuration variables
 VERBOSE = False
