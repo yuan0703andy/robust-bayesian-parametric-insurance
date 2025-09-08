@@ -1,0 +1,323 @@
+from .model import UnifiedEndToEndVIModel
+from ..utils.gpu_setup import device, USE_MULTI_GPU, GPU_DEVICES
+from typing import Dict, List, Any
+import time
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.distributions import Normal, LogNormal, StudentT
+from enum import Enum
+from typing import Optional
+from ..components.config import PriorScenario, LikelihoodFamily
+from .data import SimulatedSpatialData
+
+
+class EndToEndTrainer:
+    """端到端訓練器 - GPU-Accelerated Version"""
+        
+    def __init__(self, model: UnifiedEndToEndVIModel, learning_rate: float = 0.0001,
+                    enable_multi_gpu: bool = False, verbose: bool = False):
+        self.original_model = model
+        # 暫時停用多卡，避免DataParallel沿H維切片導致維度不一致
+        self.enable_multi_gpu = False
+        self.verbose = verbose
+        
+        # GPU配置和模型設置
+        if torch.cuda.is_available():
+            # 移動模型到主GPU
+            self.model = model.to(f'cuda:{GPU_DEVICES[0]}')
+            
+            # 配置多GPU DataParallel
+            if self.enable_multi_gpu and len(GPU_DEVICES) >= 2:
+                if self.verbose:
+                    print(f"🚀 配置DataParallel: 使用GPU {GPU_DEVICES}")
+                self.model = nn.DataParallel(self.model, device_ids=GPU_DEVICES)
+                self.device = f'cuda:{GPU_DEVICES[0]}'
+            else:
+                self.device = f'cuda:{GPU_DEVICES[0]}'
+                if self.verbose:
+                    print(f"🔧 單GPU模式: 使用GPU {GPU_DEVICES[0]}")
+        else:
+            self.model = model
+            self.device = 'cpu'
+            if self.verbose:
+                print("💻 CPU模式: GPU不可用")
+        
+        self.optimizer = optim.Adam(self.model.parameters(), lr=learning_rate)
+        self.loss_history = []
+        
+        # GPU性能監控
+        self.gpu_memory_usage = []
+        self.training_times = []
+        
+    def train_epoch(self, hazard_intensities: torch.Tensor,
+                   exposure_values: torch.Tensor,
+                   observed_losses: torch.Tensor,
+                   n_samples: int = 10,
+                   spatial_data: 'SimulatedSpatialData' = None) -> Dict[str, float]:
+        """GPU加速的訓練epoch"""
+        
+        start_time = time.time()
+        self.model.train()
+        self.optimizer.zero_grad()
+        
+        # 將數據移動到主GPU
+        hazard_intensities = hazard_intensities.to(self.device)
+        exposure_values = exposure_values.to(self.device)
+        observed_losses = observed_losses.to(self.device)
+        
+        # 監控GPU記憶體使用
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+            memory_before = [torch.cuda.memory_allocated(i) / 1e6 for i in GPU_DEVICES]
+        
+        # 計算損失（DP使用forward可並行）
+        if self.enable_multi_gpu:
+            outputs = self.model(
+                hazard_intensities, exposure_values, observed_losses, n_samples, spatial_data
+            )
+            # DataParallel 將返回張量堆疊（num_devices,)
+            total_loss, elbo, crps_term, kl_div = outputs
+            total_loss_scalar = total_loss.mean()
+            elbo_scalar = elbo.mean()
+            crps_scalar = crps_term.mean()
+            kl_scalar = kl_div.mean()
+        else:
+            base_model = self.model.module if hasattr(self.model, 'module') else self.model
+            total_loss, elbo, crps_term, kl_div = base_model(
+                hazard_intensities, exposure_values, observed_losses, n_samples, spatial_data
+            )
+            total_loss_scalar, elbo_scalar, crps_scalar, kl_scalar = total_loss, elbo, crps_term, kl_div
+        
+        # 反向傳播 
+        total_loss_scalar.backward()
+        
+        # 梯度裁剪
+        # 1) 梯度裁剪 + 非有限梯度置零
+        torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+        with torch.no_grad():
+            for p in self.model.parameters():
+                if p.grad is not None:
+                    bad = ~torch.isfinite(p.grad)
+                    if bad.any():
+                        p.grad[bad] = 0.0
+
+        
+        # 參數更新
+        self.optimizer.step()
+        
+        with torch.no_grad():
+            base_model = self.model.module if hasattr(self.model, 'module') else self.model
+            # log_sigma_theta 與 mu_theta 約束在合理範圍
+            base_model.log_sigma_theta.clamp_(-10.0, 10.0)
+            base_model.mu_theta.clamp_(-20.0, 20.0)
+            
+        # 記錄性能指標
+        epoch_time = time.time() - start_time
+        self.training_times.append(epoch_time)
+        
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+            memory_after = [torch.cuda.memory_allocated(i) / 1e6 for i in GPU_DEVICES]
+            self.gpu_memory_usage.append({
+                'before': memory_before,
+                'after': memory_after,
+                'peak': [torch.cuda.max_memory_allocated(i) / 1e6 for i in GPU_DEVICES]
+            })
+        
+        # 傳統基差風險（事件層）：|param payout(hazard) - indemnity(loss)| 平均
+        with torch.no_grad():
+            base_model = self.model.module if hasattr(self.model, 'module') else self.model
+            # 事件層實際損失
+            y_actual = observed_losses.sum(dim=0)  # (E)
+            # 傳統產品賠付：將實際損失丟入當前產品引擎（loss-based Steinmann），沿醫院合計
+            loss_obs = observed_losses.unsqueeze(0)  # (1,H,E)
+            payout_obs, _ = base_model.payout_function._payout_and_derivative(loss_obs)
+            y_param = payout_obs.sum(dim=1).squeeze(0)  # (E)
+            trad_basis = torch.mean(torch.abs(y_param - y_actual)).item()
+
+        # 記錄損失與指標
+        losses = {
+            'total_loss': total_loss_scalar.item(),
+            'elbo': elbo_scalar.item(),
+            'crps_term': crps_scalar.item(),
+            'kl_term': kl_scalar.item(),
+            'trad_basis': trad_basis
+        }
+        losses['epoch_time'] = epoch_time
+        self.loss_history.append(losses)
+        
+        return losses
+    
+    def _multi_gpu_forward(self, hazard_intensities: torch.Tensor,
+                          exposure_values: torch.Tensor, 
+                          observed_losses: torch.Tensor,
+                          n_samples: int,
+                          spatial_data: 'SimulatedSpatialData' = None) -> Dict[str, torch.Tensor]:
+        """多GPU並行前向傳播"""
+        
+        # 將數據分割到不同GPU
+        batch_size = hazard_intensities.shape[0]
+        chunk_size = batch_size // len(GPU_DEVICES)
+        
+        # 使用 DataParallel 的 forward 進行並行計算，並聚合結果
+        outputs = self.model(
+            hazard_intensities, exposure_values, observed_losses, n_samples, spatial_data
+        )
+        total_loss, elbo, crps_term, kl_div = outputs
+        return {
+            'total_loss': total_loss.mean(),
+            'elbo': elbo.mean(),
+            'crps_term': crps_term.mean(),
+            'kl_term': kl_div.mean()
+        }
+    
+    def parallel_mcmc_sampling(self, n_total_samples: int, 
+                              chunk_size: int = None) -> torch.Tensor:
+        """並行MCMC採樣 - 分散到多個GPU"""
+        
+        if not self.enable_multi_gpu:
+            # 單GPU或CPU模式
+            if hasattr(self.model, 'module'):
+                return self.model.module._sample_theta(n_total_samples)
+            else:
+                return self.model._sample_theta(n_total_samples)
+        
+        if chunk_size is None:
+            chunk_size = n_total_samples // len(GPU_DEVICES)
+        
+        print(f"🔄 並行MCMC採樣: {n_total_samples}個樣本分散到{len(GPU_DEVICES)}個GPU")
+        
+        # 分配採樣任務到不同GPU
+        sample_chunks = []
+        remaining_samples = n_total_samples
+        
+        for i, gpu_id in enumerate(GPU_DEVICES):
+            # 計算此GPU的採樣數量
+            if i == len(GPU_DEVICES) - 1:
+                # 最後一個GPU處理剩餘樣本
+                n_samples_gpu = remaining_samples
+            else:
+                n_samples_gpu = min(chunk_size, remaining_samples)
+            
+            with torch.cuda.device(gpu_id):
+                # 在特定GPU上進行採樣
+                model_for_sampling = self.model.module if hasattr(self.model, 'module') else self.model
+                
+                # 使用該GPU上的變分參數進行採樣
+                mu_theta_gpu = model_for_sampling.mu_theta.to(f'cuda:{gpu_id}')
+                log_sigma_theta_gpu = model_for_sampling.log_sigma_theta.to(f'cuda:{gpu_id}')
+                sigma_theta_gpu = torch.exp(log_sigma_theta_gpu)
+                
+                # 重參數化採樣
+                epsilon = torch.randn(n_samples_gpu, model_for_sampling.n_hbm_params, 
+                                    device=f'cuda:{gpu_id}')
+                theta_samples_gpu = (mu_theta_gpu.unsqueeze(0) + 
+                                   sigma_theta_gpu.unsqueeze(0) * epsilon)
+                
+                sample_chunks.append(theta_samples_gpu)
+                remaining_samples -= n_samples_gpu
+                
+            print(f"  GPU {gpu_id}: {n_samples_gpu}個樣本")
+        
+        # 將所有GPU結果聚合到主GPU
+        all_samples = torch.cat([chunk.to(self.device) for chunk in sample_chunks], dim=0)
+        
+        print(f"✅ 並行採樣完成: {all_samples.shape[0]}個總樣本")
+        return all_samples
+    
+    def evaluate(self, hazard_intensities: torch.Tensor,
+                exposure_values: torch.Tensor,
+                observed_losses: torch.Tensor,
+                n_samples: int = 50,
+                spatial_data: 'SimulatedSpatialData' = None) -> Dict[str, float]:
+        """GPU加速的模型評估"""
+        self.model.eval()
+        
+        # 移動數據到GPU
+        hazard_intensities = hazard_intensities.to(self.device)
+        exposure_values = exposure_values.to(self.device)
+        observed_losses = observed_losses.to(self.device)
+        
+        with torch.no_grad():
+            if self.enable_multi_gpu:
+                outputs = self.model(
+                    hazard_intensities, exposure_values, observed_losses, n_samples, spatial_data
+                )
+                total_loss, elbo, crps_term, kl_div = outputs
+                # 傳統基差風險（事件層）：用產品賠付(基於實際損失) vs 實際損失
+                base_model = self.model.module if hasattr(self.model, 'module') else self.model
+                y_actual = observed_losses.sum(dim=0)
+                loss_obs = observed_losses.unsqueeze(0)  # (1,H,E)
+                payout_obs, _ = base_model.payout_function._payout_and_derivative(loss_obs)
+                y_param = payout_obs.sum(dim=1).squeeze(0)
+                trad_basis = torch.mean(torch.abs(y_param - y_actual))
+                loss_dict = {
+                    'total_loss': total_loss.mean(),
+                    'elbo': elbo.mean(),
+                    'crps_term': crps_term.mean(),
+                    'kl_term': kl_div.mean(),
+                    'trad_basis': trad_basis
+                }
+            else:
+                base_model = self.model.module if hasattr(self.model, 'module') else self.model
+                total_loss, elbo, crps_term, kl_div = base_model(
+                    hazard_intensities, exposure_values, observed_losses, n_samples, spatial_data
+                )
+                y_actual = observed_losses.sum(dim=0)
+                loss_obs = observed_losses.unsqueeze(0)
+                payout_obs, _ = base_model.payout_function._payout_and_derivative(loss_obs)
+                y_param = payout_obs.sum(dim=1).squeeze(0)
+                trad_basis = torch.mean(torch.abs(y_param - y_actual))
+                loss_dict = {
+                    'total_loss': total_loss,
+                    'elbo': elbo,
+                    'crps_term': crps_term,
+                    'kl_term': kl_div,
+                    'trad_basis': trad_basis
+                }
+        
+        return {k: v.item() if hasattr(v, 'item') else v for k, v in loss_dict.items()}
+
+    def evaluate_with_metrics(self, hazard_intensities: torch.Tensor,
+                              exposure_values: torch.Tensor,
+                              observed_losses: torch.Tensor,
+                              n_samples: int = 30,
+                              spatial_data: 'SimulatedSpatialData' = None,
+                              n_pred_samples: int = 100) -> Dict[str, float]:
+        """計算CRPS與robust log-likelihood（評估用，不影響訓練）。"""
+        self.model.eval()
+        hazard_intensities = hazard_intensities.to(self.device)
+        exposure_values = exposure_values.to(self.device)
+        observed_losses = observed_losses.to(self.device)
+        with torch.no_grad():
+            base_model = self.model.module if hasattr(self.model, 'module') else self.model
+            metrics = base_model.evaluate_metrics(
+                hazard_intensities, exposure_values, observed_losses,
+                n_samples=n_samples, spatial_data=spatial_data,
+                n_pred_samples=n_pred_samples
+            )
+        # to cpu scalars
+        return {k: (v.item() if hasattr(v, 'item') else v) for k, v in metrics.items()}
+    
+    def get_performance_stats(self) -> Dict[str, Any]:
+        """獲取性能統計"""
+        stats = {
+            'multi_gpu_enabled': self.enable_multi_gpu,
+            'device': self.device,
+            'gpu_devices': GPU_DEVICES if torch.cuda.is_available() else None,
+            'avg_epoch_time': np.mean(self.training_times) if self.training_times else 0,
+            'total_epochs': len(self.training_times)
+        }
+        
+        if self.gpu_memory_usage and torch.cuda.is_available():
+            latest_memory = self.gpu_memory_usage[-1]
+            stats['gpu_memory_mb'] = {
+                'peak': latest_memory['peak'],
+                'current': latest_memory['after']
+            }
+        
+        return stats
+
+print("✅ 端到端訓練器定義完成")

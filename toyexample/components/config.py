@@ -1,0 +1,171 @@
+"""Configuration classes moved from toy_example_complete.py."""
+from typing import Dict, List
+from enum import Enum
+
+class PriorScenario(Enum):
+    """先驗情境"""
+    NON_INFORMATIVE = "non_informative"
+    WEAK_INFORMATIVE = "weak_informative"
+    OPTIMISTIC = "optimistic"
+    PESSIMISTIC = "pessimistic"
+
+class LikelihoodFamily(Enum):
+    """似然函數族"""
+    NORMAL = "normal"
+    LOGNORMAL = "lognormal" 
+    STUDENT_T = "student_t"
+
+
+class ModelConfiguration:
+    """模型配置類 - 全面的Prior/Likelihood組合測試框架"""
+    
+    @staticmethod 
+    def get_comprehensive_test_configs() -> List[Dict]:
+        """
+        獲取全面的Prior/Likelihood組合測試配置
+        4種先驗情境 × 3種似然族 × 3種穩健程度 = 36種組合測試矩陣
+        """
+        configs = []
+        
+        # 定義基礎組合
+        prior_scenarios = [
+            (PriorScenario.NON_INFORMATIVE, "非信息"),
+            (PriorScenario.WEAK_INFORMATIVE, "弱信息"),
+            (PriorScenario.OPTIMISTIC, "樂觀"),
+            (PriorScenario.PESSIMISTIC, "悲觀")
+        ]
+        
+        likelihood_families = [
+            (LikelihoodFamily.NORMAL, "正態"),
+            (LikelihoodFamily.LOGNORMAL, "對數正態"),
+            (LikelihoodFamily.STUDENT_T, "Student-t")
+        ]
+        
+        # 3種穩健程度的配置
+        robustness_levels = [
+            {
+                'level': '基線(無污染)',
+                'epsilon_prior': 0.0,
+                'epsilon_likelihood': 0.0,
+                'category': 'baseline'
+            },
+            {
+                'level': '中等穩健',
+                'epsilon_prior': 0.08,
+                'epsilon_likelihood': 0.10,
+                'category': 'moderate'
+            },
+            {
+                'level': '極高穩健',
+                'epsilon_prior': 0.15,
+                'epsilon_likelihood': 0.18,
+                'category': 'extreme'
+            }
+        ]
+        
+        # 生成所有組合
+        for prior_scenario, prior_name in prior_scenarios:
+            for likelihood_family, likelihood_name in likelihood_families:
+                for robustness in robustness_levels:
+                    
+                    # 創建配置名稱
+                    config_name = f"{robustness['level']}-{prior_name}先驗+{likelihood_name}似然"
+                    
+                    # 生成描述
+                    description = f"{prior_name}先驗 + {likelihood_name}似然"
+                    if robustness['category'] != 'baseline':
+                        description += f" + ε-contamination({robustness['epsilon_prior']:.2f}, {robustness['epsilon_likelihood']:.2f})"
+                    
+                    config = {
+                        'name': config_name,
+                        'prior_scenario': prior_scenario,
+                        'likelihood_family': likelihood_family,
+                        'epsilon_prior': robustness['epsilon_prior'],
+                        'epsilon_likelihood': robustness['epsilon_likelihood'],
+                        'robustness_category': robustness['category'],
+                        'description': description
+                    }
+                    
+                    configs.append(config)
+        
+        # 選擇代表性的配置進行演示（避免過多組合）
+        representative_configs = [
+            # 基線對照組
+            configs[0],   # 非信息+正態+無污染
+            configs[3],   # 非信息+對數正態+無污染
+            
+            # 不同先驗的中等穩健組合
+            configs[12],  # 非信息+正態+中等穩健
+            configs[21],  # 弱信息+對數正態+中等穩健
+            configs[30],  # 樂觀+Student-t+中等穩健
+            configs[33],  # 悲觀+正態+中等穩健
+            
+            # 極高穩健組合
+            configs[14],  # 非信息+Student-t+極高穩健
+            configs[35],  # 悲觀+對數正態+極高穩健
+        ]
+        
+        return representative_configs
+    
+    @staticmethod 
+    def get_test_configs() -> List[Dict]:
+        """獲取簡化版測試配置 - 向後兼容"""
+        return [
+            {
+                'name': '傳統貝葉斯模型 (無污染)',
+                'epsilon_prior': 0.0,
+                'epsilon_likelihood': 0.0,
+                'prior_contamination': 'none',
+                'likelihood_contamination': 'none',
+                'description': '標準貝葉斯模型，作為基線對照組'
+            },
+            {
+                'name': '僅Prior污染模型', 
+                'epsilon_prior': 0.08,
+                'epsilon_likelihood': 0.0,
+                'prior_contamination': 'typhoon_specific',
+                'likelihood_contamination': 'none',
+                'description': '僅對先驗進行ε-contamination，測試先驗穩健性'
+            },
+            {
+                'name': '雙重污染模型 (Prior+Likelihood)',
+                'epsilon_prior': 0.08,
+                'epsilon_likelihood': 0.12,
+                'prior_contamination': 'typhoon_specific', 
+                'likelihood_contamination': 'extreme_events',
+                'description': '先驗+似然雙重污染，最大穩健性配置'
+            }
+        ]
+    
+    @staticmethod
+    def get_steinmann_product_configs() -> List[Dict]:
+        """獲取Steinmann保險產品配置（與資料量級對齊）"""
+        return [
+            {
+                'name': 'Standard Multi-Level (scaled)',
+                'thresholds': [0.2e6, 0.4e6, 0.6e6, 0.8e6],  # 20萬~80萬
+                'ratios':     [0.25,  0.5,   0.75,  1.0],
+                'max_payout': 2e6,                            # 上限 200 萬
+                'steepness':  0.2                              # 較平滑，避免梯度硬切
+            },
+            {
+                'name': 'Dual Threshold Product (scaled)', 
+                'thresholds': [0.3e6, 0.6e6, 999e6, 999e6],
+                'ratios': [0.5, 1.0, 0.0, 0.0],
+                'max_payout': 2e6,
+                'steepness': 0.2
+            },
+            {
+                'name': 'Multi-Level Product (wide)',
+                'thresholds': [0.1e6, 0.3e6, 0.5e6, 0.7e6],
+                'ratios': [0.25, 0.5, 0.75, 1.0],
+                'max_payout': 2e6,
+                'steepness': 0.2
+            }
+        ]
+
+print("✅ 配置類定義完成")
+
+__all__ = [
+    'ModelConfiguration'
+]
