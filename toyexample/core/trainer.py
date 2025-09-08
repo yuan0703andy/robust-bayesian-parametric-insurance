@@ -101,32 +101,45 @@ class EndToEndTrainer:
     def _indemnity_hard(self, base_model, observed_losses: torch.Tensor) -> torch.Tensor:
         """
         事件層「實際理賠」（硬條款）：把觀測損失丟入硬分層線性條款，沿醫院加總 → [E]
-        observed_losses: [H, E] 或 [1, E]
-        返回 shape: [E]
+        支援輸入形狀：[E]、[H,E]、[1,H,E]（其它形狀報錯）
         """
         pf = base_model.payout_function
-        # 統一成 [1, H, E]
-        if observed_losses.dim() == 2:
-            loss_obs = observed_losses.unsqueeze(0)
-        elif observed_losses.dim() == 3:
-            loss_obs = observed_losses
+        thr    = pf.thresholds          # [T], 單位：美元
+        ratios = pf.ratios              # [T], 累積比例
+        # widths 若模型裡有就用之；否則以相鄰 threshold 差估，最後一段沿用倒數第二段寬
+        if hasattr(pf, "widths"):
+            widths = pf.widths
         else:
-            raise ValueError("observed_losses 需為 [H,E] 或 [1,H,E]")
+            d = torch.diff(thr)
+            last = d[-1] if d.numel() > 0 else torch.tensor(1.0, device=thr.device, dtype=thr.dtype)
+            widths = torch.cat([d, last.view(1)])
 
-        loss_m = loss_obs / 1e6                                      # 以百萬為單位判斷門檻
-        total_ratio = torch.zeros_like(loss_obs)                     # [1, H, E]
+        # --- 標準化成 [1,H,E] ---
+        if observed_losses.dim() == 1:                  # [E]
+            loss_obs = observed_losses.view(1, 1, -1)
+        elif observed_losses.dim() == 2:                # [H,E]
+            loss_obs = observed_losses.unsqueeze(0)
+        elif observed_losses.dim() == 3:                # [1,H,E] 或 [B,H,E]
+            loss_obs = observed_losses[:1]              # 取第一個 batch
+        else:
+            raise ValueError("observed_losses 需為 [E]、[H,E] 或 [1,H,E]")
 
-        prev_ratio = 0.0
-        for thr, ratio in zip(pf.thresholds, pf.ratios):
-            dr = float(ratio) - prev_ratio
-            if dr > 0:
-                thr_m = float(thr) / 1e6
-                step = (loss_m >= thr_m).to(loss_obs.dtype)          # 硬階梯
-                total_ratio = total_ratio + dr * step
-            prev_ratio = float(ratio)
+        # --- 硬條款：分層線性 ramp ---
+        payout_ratio = torch.zeros_like(loss_obs)
+        prev = 0.0
+        for i in range(len(thr)):
+            dr = float(ratios[i].item() - prev)
+            if dr <= 0:
+                prev = float(ratios[i]); continue
+            t = float(thr[i].item())
+            w = float(widths[i].item())
+            r = (loss_obs - t) / max(w, 1e-6)
+            ramp = torch.clamp(r, 0.0, 1.0)            # 線性 0→1，區外夾 0/1
+            payout_ratio = payout_ratio + dr * ramp
+            prev = float(ratios[i])
 
-        payout = total_ratio * pf.max_payout                         # [1, H, E]
-        return payout.squeeze(0)
+        payout = payout_ratio * pf.max_payout          # [1,H,E]
+        return payout.sum(dim=1).squeeze(0)            # → [E]（沿醫院合計成事件層）
 
     
     def train_epoch(self, hazard_intensities: torch.Tensor,
@@ -220,7 +233,7 @@ class EndToEndTrainer:
                 y_parametric = self._parametric_payout_hard(base_model, hazard_intensities)  # [E]
             else:
                 # 後備：用損失總額的硬條款理賠當作「參數型」(讓指標不為常數)
-                y_parametric = self._indemnity_hard(base_model, observed_losses.sum(dim=0))  # [E]
+                y_parametric = self._indemnity_hard(base_model, observed_losses)  # [E]
 
             # 2) 觀測損失的「實際理賠」（硬條款）
             y_indemn = self._indemnity_hard(base_model, observed_losses)                     # [E]
@@ -344,7 +357,7 @@ class EndToEndTrainer:
             if base_model.param_target is not None:
                 y_parametric = self._parametric_payout_hard(base_model, hazard_intensities)  # [E]
             else:
-                y_parametric = self._indemnity_hard(base_model, observed_losses.sum(dim=0))  # 後備
+                y_parametric = self._indemnity_hard(base_model, observed_losses)  # 後備
 
             y_indemn = self._indemnity_hard(base_model, observed_losses)                     # [E]
             trad_basis = torch.mean(torch.abs(y_parametric - y_indemn))
