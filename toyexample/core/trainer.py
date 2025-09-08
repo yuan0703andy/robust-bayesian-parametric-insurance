@@ -63,6 +63,15 @@ class EndToEndTrainer:
     def _should_log(self, epoch_idx: int) -> bool:
         """判斷是否應該輸出日誌"""
         return self.verbose and (epoch_idx % self.log_every == 0 or epoch_idx <= 3)
+    
+    def _as_scalar(self, x):
+        """確保輸入是標量tensor"""
+        if isinstance(x, torch.Tensor) and x.ndim == 0:
+            return x
+        elif hasattr(x, 'mean'):
+            return x.mean()
+        else:
+            return torch.as_tensor(x, device=self.device)
         
         
     def _anneal_tau(self, payout_fn):
@@ -196,10 +205,13 @@ class EndToEndTrainer:
             )
             # DataParallel 將返回張量堆疊（num_devices,)
             total_loss, elbo, crps_term, kl_div = outputs
-            total_loss_scalar = total_loss.mean()
-            elbo_scalar = elbo.mean()
-            crps_scalar = crps_term.mean()
-            kl_scalar = kl_div.mean()
+            elbo_scalar = self._as_scalar(elbo)
+            crps_scalar = self._as_scalar(crps_term)
+            kl_scalar = self._as_scalar(kl_div)
+            
+            # 正確的 KL 權重：ELBO 已包含 KL，用 (beta_kl - 1.0) 調整
+            loss_corrected = -elbo_scalar + (beta_kl - 1.0) * kl_scalar + lambda_crps * crps_scalar
+            total_loss_scalar = self._as_scalar(loss_corrected)
         else:
             base_model = self.model.module if hasattr(self.model, 'module') else self.model
             total_loss, elbo, crps_term_orig, kl_div = base_model(
@@ -229,9 +241,18 @@ class EndToEndTrainer:
                 crps_u_mc = base_model._mc_crps_unitless(pred_samples, y_indemn_evt, cap).mean()  # 單位化的 mean
                 crps_term = crps_u_mc
             
-            # 新組合的 loss（以 ELBO 為主，CRPS 做正則）
-            loss_stabilized = -elbo + beta_kl * kl_div + lambda_crps * crps_term
-            total_loss_scalar, elbo_scalar, crps_scalar, kl_scalar = loss_stabilized, elbo, crps_term, kl_div
+            # 確保所有組件是標量
+            elbo_scalar = self._as_scalar(elbo)
+            crps_scalar = self._as_scalar(crps_term)
+            kl_scalar = self._as_scalar(kl_div)
+            
+            # 正確的 KL 權重：ELBO 已包含 KL，用 (beta_kl - 1.0) 調整
+            # beta_kl=0: 純重構損失, beta_kl=1: 純VI目標
+            loss_corrected = -elbo_scalar + (beta_kl - 1.0) * kl_scalar + lambda_crps * crps_scalar
+            total_loss_scalar = self._as_scalar(loss_corrected)
+        
+        # 確保損失是標量用於反向傳播
+        assert total_loss_scalar.ndim == 0, f"Loss must be scalar, got shape {total_loss_scalar.shape}"
         
         # 反向傳播 
         total_loss_scalar.backward()
